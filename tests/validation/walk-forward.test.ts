@@ -40,12 +40,12 @@ test('19. large totalBars diverse folds', () => { assert.ok(generateSplits({...C
 test('20. adjacent isolation clear', () => { const f = generateSplits({...CFG, totalBars:500000, embargoBars:5, trainBars:2000}); assert.ok(f.length > 0); for (let i=0;i<f.length-1;i++) assert.deepStrictEqual(validateFoldIsolation(f[i],f[i+1]), []); });
 
 // ═══ 21–30: Leakage detection ══════════════════════════════════
-test('21. train-val overlap detected', () => { const f: any = generateSplits(CFG)[0]; const bad = {...f, train:{...f.train,end:f.validation.start+1}}; assert.ok(validateFoldIsolation(bad).some(x=>x.includes('train end'))); });
+test('21. train-val overlap detected', () => { const f: any = generateSplits(CFG)[0]; const bad = {...f, train:{...f.train,end:f.validation.start+1}}; assert.ok(validateFoldIsolation(bad).some(x=>x.includes('train+purge'))); });
 test('22. purge before test detected', () => { const f: any = generateSplits(CFG)[0]; const bad = {...f, test:{...f.test,start:f.validation.end}}; assert.ok(validateFoldIsolation(bad).some(x=>x.includes('val+purge'))); });
-test('23. embargo leak detected', () => { const f = generateSplits({...CFG, totalBars:50000}); const badNext = {...f[1], train:{...f[1].train,start:f[0].test.end}}; assert.ok(validateFoldIsolation(f[0],badNext).some(x=>x.includes('test+embargo'))); });
+test('23. embargo leak detected', () => { const f = generateSplits({...CFG, totalBars:50000}); const badNext = {...f[1], test:{...f[1].test,start:f[0].test.end+f[0].embargoBars}}; assert.ok(validateFoldIsolation(f[0],badNext).some(x=>x.includes('test+embargo'))); });
 test('24. feature lookback leak detected', () => { const f = generateSplits({...CFG, totalBars:50000, featureLookbackBars:500})[0]; const bad = {...f, train:{...f.train,start:100}, featureLookbackBars:f.featureLookbackBars}; assert.ok(validateFoldIsolation(bad).some(x=>x.includes('lookback'))); });
 test('25. isolation passes on valid fold', () => { assert.deepStrictEqual(validateFoldIsolation(generateSplits(CFG)[0]), []); });
-test('26. embargo spacing exists', () => { const f = generateSplits({...CFG, totalBars:100000, embargoBars:100, trainBars:500}); for (let i=0;i<f.length-1;i++) assert.ok(f[i].test.end < f[i+1].test.end); });
+test('26. embargo spacing exists', () => { const f = generateSplits({...CFG, totalBars:100000, embargoBars:100, trainBars:500}); for (let i=0;i<f.length-1;i++) assert.ok(f[i].test.end + f[i].embargoBars < f[i+1].test.start); });
 test('27. embargo large still valid', () => { assert.ok(generateSplits({...CFG, totalBars:100000, embargoBars:200, trainBars:500}).length > 0); });
 test('28. purge large but valid', () => { for (const s of generateSplits({...CFG, totalBars:50000, purgeBars:100})) assert.ok(s.validation.end + s.purgeBars <= s.test.start); });
 test('29. more embargo reduces folds', () => { const a = generateSplits({...CFG, totalBars:50000, embargoBars:5}).length; const b = generateSplits({...CFG, totalBars:50000, embargoBars:100}).length; assert.ok(b <= a); });
@@ -70,10 +70,10 @@ test('43. minTrades train rejected', () => { const c = makeCandidate('x',10,5,[1
 test('44. minTrades val rejected', () => { const c = makeCandidate('x',10,5,[10], 15, 2); const r = selectParameters([c]); assert.equal(r.candidates[0].accepted, false); assert.equal(r.candidates[0].rejectionReason, 'MIN_TRADES_VALIDATION'); });
 test('45. empty candidates null', () => { assert.equal(selectParameters([]).selectedId, undefined); });
 test('46. selected in list', () => { const r = selectParameters([makeCandidate('z',10,5,[10])]); assert.ok(r.candidates.find(x=>x.id==='z') != null); });
-test('47. test phase calls match folds', () => { const l = mkLedger(); const r = wf(CFG, [{a:1}], l); const testCalls = l.log.filter(x=>x.phase==='test'); assert.ok(testCalls.length === r.folds.length || r.folds.length > 0); });
+test('47. test phase calls match folds', () => { const l = mkLedger(); const r = wf({...CFG,trainBars:500}, [{a:1}], l); const testCalls = l.log.filter(x=>x.phase==='test'); assert.equal(testCalls.length, r.folds.length); assert.deepStrictEqual(testCalls.map(x=>x.fold), r.folds.map(x=>x.fold)); });
 test('48. no test in candidate phase', () => { const l = mkLedger(); wf(CFG, [{a:1}], l); const candCalls = l.log.filter(x=>x.phase==='test' && x.candidateId !== undefined); assert.equal(candCalls.length, 0); });
 test('49. no grid no testMetrics', () => { assert.equal(wf().folds[0].testMetrics, undefined); });
-test('50. grid → testMetrics present', () => { assert.equal(wf(CFG, [{a:1}]).folds[0].testMetrics !== null, true); });
+test('50. grid → testMetrics present', () => { assert.notEqual(wf({...CFG,trainBars:500}, [{a:1}]).folds[0].testMetrics, undefined); });
 test('51. selection produces output', () => { const r = wf(CFG, [{a:1}]); assert.ok(r.folds.length > 0); });
 test('52. train/val have candidateId', () => { const l = mkLedger(); wf(CFG, [{a:1}], l); const tv = l.log.filter(x=>x.candidateId && x.phase!=='test'); assert.ok(tv.length > 0); });
 test('53. param grid selection valid', () => { const g = [{a:1},{b:2},{c:3}]; assert.ok(wf(CFG, g).reportId.length > 0); });
@@ -98,3 +98,9 @@ test('69. deepFreeze arrays', () => { const a = [1,2,3]; deepFreeze(a); assert.o
 test('70. makeReportId stable', () => { assert.equal(makeReportId(CFG,COST), makeReportId(CFG,COST)); });
 test('71. zero-cost net≈gross', () => { const z:CostConfig={feeBps:0,spreadBps:0,slippageBps:0,latencyPenaltyBps:0,stressMultiplier:1}; const r=runWalkForward(CFG,z,sim,{clock:CLOCK}); assert.ok(Math.abs(r.folds[0].trainMetrics.netReturn - r.folds[0].trainMetrics.grossReturn) < 0.0001); });
 test('72. insufficient sample warning', () => { const ns=(s:number,e:number)=>({grossPnl:0,volume:0,turnover:0,maxDrawdown:0,sharpe:0,sortino:0,profitFactor:0,trades:0}); assert.ok(runWalkForward(CFG,COST,ns,{clock:CLOCK}).warnings.includes('INSUFFICIENT_SAMPLE')); });
+
+// ═══ 73–76: Explicit label-horizon and adjacent OOS contracts ═══
+test('73. label horizon separates train→validation', () => { for (const s of generateSplits({...CFG,totalBars:50000,purgeBars:0,labelHorizonBars:42})) assert.ok(s.train.end + s.labelHorizonBars < s.validation.start); });
+test('74. label horizon separates validation→test', () => { for (const s of generateSplits({...CFG,totalBars:50000,purgeBars:0,labelHorizonBars:42})) assert.ok(s.validation.end + s.labelHorizonBars < s.test.start); });
+test('75. label horizon separates adjacent tests', () => { const f = generateSplits({...CFG,totalBars:50000,embargoBars:0,labelHorizonBars:42}); for (let i=0;i<f.length-1;i++) assert.ok(f[i].test.end + f[i].labelHorizonBars < f[i+1].test.start); });
+test('76. next training window may reuse prior history', () => { for (const mode of ['rolling','expanding'] as const) { const f = generateSplits({...CFG,totalBars:50000,mode}); assert.ok(f.some((s,i)=>i>0 && s.train.start <= f[i-1].test.end)); for (let i=0;i<f.length-1;i++) assert.deepStrictEqual(validateFoldIsolation(f[i],f[i+1]), []); } });
