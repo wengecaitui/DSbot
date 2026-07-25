@@ -1,10 +1,12 @@
-// Stage 4A4-R3: Walk-forward — real cost recompute, minTrades gate, datasetHash.
+// Stage 4A4-R4: Walk-forward — real multi-fold aggregation, per-fold minTrades, phase ledger.
 import type { WalkForwardConfig, CostConfig, CostBreakdown, PerformanceMetrics, FoldMetrics, ParameterCandidate, ValidationReport, ValidationWarning, StressScenario, ValidationClock } from './ValidationTypes';
 import { makeReportId, deepFreeze, VALIDATION_WARNINGS, systemValidationClock } from './ValidationTypes';
 import { generateSplits, validateFoldIsolation } from './ChronologicalSplit';
 
-export interface SimCallLedger { calls: number; }
 export interface SimResult { grossPnl: number; volume: number; turnover: number; maxDrawdown: number; sharpe: number; sortino: number; profitFactor: number; trades: number; }
+
+export interface PhaseCall { phase: 'train' | 'validation' | 'test'; fold: number; candidateId?: string; start: number; end: number; }
+export interface SimCallLedger { calls: number; log: PhaseCall[]; }
 
 export function computeCosts(grossPnl: number, volume: number, turn: number, cfg: CostConfig): CostBreakdown {
   const m = cfg.stressMultiplier;
@@ -21,25 +23,17 @@ export function makeMetrics(sim: SimResult, costCfg: CostConfig): PerformanceMet
 }
 
 export function recomputeCosts(baseMetrics: PerformanceMetrics, multiplier: number, costCfg: CostConfig): PerformanceMetrics {
-  const volume = (baseMetrics as any)._volume ?? 0;
-  const turn = baseMetrics.turnover;
-  const scaled: CostConfig = { ...costCfg, stressMultiplier: multiplier };
-  const cb = computeCosts(baseMetrics.grossReturn, volume, turn, scaled);
-  return {
-    grossReturn: baseMetrics.grossReturn, netReturn: cb.netReturn,
-    maxDrawdown: baseMetrics.maxDrawdown, sharpeRatio: baseMetrics.sharpeRatio,
-    sortinoRatio: baseMetrics.sortinoRatio, profitFactor: baseMetrics.profitFactor,
-    tradeCount: baseMetrics.tradeCount, turnover: turn, costBreakdown: cb,
-    _volume: volume,
-  };
+  const v = (baseMetrics as any)._volume ?? 0; const t = baseMetrics.turnover;
+  const c = computeCosts(baseMetrics.grossReturn, v, t, { ...costCfg, stressMultiplier: multiplier });
+  return { grossReturn: baseMetrics.grossReturn, netReturn: c.netReturn, maxDrawdown: baseMetrics.maxDrawdown, sharpeRatio: baseMetrics.sharpeRatio, sortinoRatio: baseMetrics.sortinoRatio, profitFactor: baseMetrics.profitFactor, tradeCount: baseMetrics.tradeCount, turnover: t, costBreakdown: c, _volume: v };
 }
 
 export function selectParameters(candidates: ParameterCandidate[], minTrades: number = 5): { candidates: ParameterCandidate[]; selectedId?: string; selectedParams?: Record<string, string | number> } {
   const out: ParameterCandidate[] = [];
   for (const c of candidates) {
     let accept = true; let reason = '';
-    if (c.metrics?.trainMetrics.tradeCount! < minTrades) { accept = false; reason = 'MIN_TRADES_TRAIN'; }
-    if (c.metrics.validationMetrics.tradeCount < minTrades) { accept = false; reason = 'MIN_TRADES_VALIDATION'; }
+    if (c.minTrainTrades < minTrades) { accept = false; reason = 'MIN_TRADES_TRAIN'; }
+    if (c.minValidationTrades < minTrades) { accept = false; reason = 'MIN_TRADES_VALIDATION'; }
     if (c.validationScore < c.trainScore * 0.5) { if (!reason) reason = 'VALIDATION_DEGRADATION'; accept = false; }
     out.push({ ...c, accepted: accept, rejectionReason: reason || undefined, selected: false });
   }
@@ -54,7 +48,7 @@ export function runWalkForward(
   opts: { paramGrid?: Record<string, string | number>[]; simVersion?: string; clock?: ValidationClock; ledger?: SimCallLedger; datasetHash?: string } = {},
 ): ValidationReport {
   const clock = opts.clock ?? systemValidationClock;
-  const ledger = opts.ledger ?? { calls: 0 };
+  const ledger = opts.ledger ?? { calls: 0, log: [] };
   const splits = generateSplits(cfg);
   const warnings: ValidationWarning[] = [];
   const foldMetrics: FoldMetrics[] = [];
@@ -67,38 +61,50 @@ export function runWalkForward(
     if (issues.length > 0) warnings.push('LEAKAGE_DETECTED');
   }
 
-  // Multi-fold candidate evaluation (train+val only, no test)
+  // Multi-fold candidate evaluation — real netReturn per fold
   if (opts.paramGrid && opts.paramGrid.length > 0) {
-    const candidates: ParameterCandidate[] = [];
-    for (let i = 0; i < opts.paramGrid.length; i++) {
-      const p = opts.paramGrid[i];
-      const trainPnl: number[] = []; const valPnl: number[] = [];
-      let trainTrades = 0; let valTrades = 0;
+    const fullCandidates: ParameterCandidate[] = [];
+    for (let ci = 0; ci < opts.paramGrid.length; ci++) {
+      const p = opts.paramGrid[ci];
+      const valNets: number[] = [];
+      let minTrainTrades = Infinity; let minValTrades = Infinity;
+      let trainTotalNet = 0; let valTotalNet = 0;
+      let lastTrainMetrics: PerformanceMetrics | undefined;
+      let lastValMetrics: PerformanceMetrics | undefined;
       for (const s of splits) {
-        const tr = simulator(s.train.start, s.train.end, p); ledger.calls++; trainPnl.push(tr.grossPnl); trainTrades = tr.trades;
-        const vr = simulator(s.validation.start, s.validation.end, p); ledger.calls++; valPnl.push(vr.grossPnl); valTrades = vr.trades;
+        const tr = simulator(s.train.start, s.train.end, p); ledger.calls++; ledger.log.push({ phase: 'train', fold: s.fold, candidateId: `p${ci}`, start: s.train.start, end: s.train.end });
+        const trainM = makeMetrics(tr, costCfg);
+        const vr = simulator(s.validation.start, s.validation.end, p); ledger.calls++; ledger.log.push({ phase: 'validation', fold: s.fold, candidateId: `p${ci}`, start: s.validation.start, end: s.validation.end });
+        const valM = makeMetrics(vr, costCfg);
+        valNets.push(valM.netReturn); minTrainTrades = Math.min(minTrainTrades, tr.trades); minValTrades = Math.min(minValTrades, vr.trades);
+        trainTotalNet += trainM.netReturn; valTotalNet += valM.netReturn;
+        lastTrainMetrics = trainM; lastValMetrics = valM;
       }
-      const avgValNet = valPnl.reduce((a, b) => a + b, 0) / valPnl.length;
-      const avgTrainNet = trainPnl.reduce((a, b) => a + b, 0) / trainPnl.length;
-      candidates.push({
-        id: `p${i}`, params: p, validationScore: avgValNet, foldScores: valPnl,
-        metrics: { fold: 0, trainMetrics: makeMetrics({grossPnl:avgTrainNet,volume:2000,turnover:2,maxDrawdown:0.1,sharpe:1,sortino:1,profitFactor:1,trades:trainTrades},costCfg), validationMetrics: makeMetrics({grossPnl:avgValNet,volume:2000,turnover:2,maxDrawdown:0.1,sharpe:1,sortino:1,profitFactor:1,trades:valTrades},costCfg), selected: false },
+      const avgValNet = valTotalNet / splits.length;
+      fullCandidates.push({
+        id: `p${ci}`, params: p, validationScore: avgValNet, trainScore: trainTotalNet / splits.length,
+        foldScores: valNets,
+        metrics: { fold: 0, trainMetrics: lastTrainMetrics!, validationMetrics: lastValMetrics!, selected: false },
+        minTrainTrades, minValidationTrades: minValTrades,
         accepted: true, selected: false,
       });
     }
-    const sel = selectParameters(candidates);
+    const sel = selectParameters(fullCandidates);
     if (sel.selectedId) { selectedParams = sel.selectedParams; selectedFold = 0; }
     if (sel.candidates.some(c => !c.accepted)) warnings.push('PARAMETER_INSTABILITY');
   }
 
-  // Evaluate folds (train+val always, test only if params selected)
+  // Evaluate folds — test exact-once after selection
   for (const s of splits) {
-    const tr = simulator(s.train.start, s.train.end, selectedParams); ledger.calls++;
+    const tr = simulator(s.train.start, s.train.end, selectedParams); ledger.calls++; ledger.log.push({ phase: 'train', fold: s.fold, start: s.train.start, end: s.train.end });
     const trainM = makeMetrics(tr, costCfg);
-    const vr = simulator(s.validation.start, s.validation.end, selectedParams); ledger.calls++;
+    const vr = simulator(s.validation.start, s.validation.end, selectedParams); ledger.calls++; ledger.log.push({ phase: 'validation', fold: s.fold, start: s.validation.start, end: s.validation.end });
     const valM = makeMetrics(vr, costCfg);
     let testM: PerformanceMetrics | undefined;
-    if (selectedParams) { const ts = simulator(s.test.start, s.test.end, selectedParams); ledger.calls++; testM = makeMetrics(ts, costCfg); }
+    if (selectedParams) {
+      const ts = simulator(s.test.start, s.test.end, selectedParams); ledger.calls++; ledger.log.push({ phase: 'test', fold: s.fold, start: s.test.start, end: s.test.end });
+      testM = makeMetrics(ts, costCfg);
+    }
     if (trainM.tradeCount < 5) warnings.push('INSUFFICIENT_SAMPLE');
     if (valM.netReturn < trainM.netReturn * 0.7) warnings.push('VALIDATION_DEGRADATION');
     foldMetrics.push({ fold: s.fold, trainMetrics: trainM, validationMetrics: valM, testMetrics: testM, selected: s.fold === selectedFold });
@@ -115,7 +121,7 @@ export function runWalkForward(
     reportId: makeReportId(cfg, costCfg, opts.datasetHash ?? '', selectedParams ?? {}, opts.simVersion ?? ''),
     createdAt: clock.nowISO(), config: cfg, costConfig: costCfg,
     folds: foldMetrics, selectedFold, selectedParameters: selectedParams,
-    warnings, limitations: ['paper-only simulation', 'no forward-looking claims', 'cost metrics re-computed from original grossPnl/volume/turnover'],
+    warnings, limitations: ['paper-only simulation', 'no forward-looking claims'],
     stressScenarios, simulatorVersion: opts.simVersion,
   });
 }

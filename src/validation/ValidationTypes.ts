@@ -63,10 +63,17 @@ export function makeReportId(cfg: WalkForwardConfig, cost: CostConfig, datasetHa
 
 // ── Parameter selection ───────────────────────────────────────
 export interface ParameterCandidate {
-  id: string; params: Readonly<Record<string, string | number>>;
-  validationScore: number; trainScore?: number; rejectionReason?: string;
-  foldScores: readonly number[]; accepted: boolean; selected: boolean;
-  metrics?: FoldMetrics;
+  readonly id: string;
+  readonly params: Readonly<Record<string, string | number>>;
+  readonly validationScore: number;
+  readonly trainScore: number;
+  readonly foldScores: readonly number[];
+  readonly metrics: FoldMetrics;
+  readonly minTrainTrades: number;
+  readonly minValidationTrades: number;
+  accepted: boolean;
+  rejectionReason?: string;
+  selected: boolean;
 }
 export interface ParameterSelectionResult {
   readonly candidates: readonly ParameterCandidate[];
