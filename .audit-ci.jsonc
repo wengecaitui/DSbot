@@ -1,13 +1,5 @@
 {
   "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
   "moderate": true,
-  "allowlist": [
-    {
-      "GHSA-f88m-g3jw-g9cj": {
-        "active": true,
-        "notes": "Temporary exception: sharp 0.34.5 baseline advisory (inherited libvips CVEs: CVE-2026-33327, CVE-2026-33328, CVE-2026-35590, CVE-2026-35591). No patched sharp release available as of 2026-07-22. Tracked by Security PR. Do NOT broaden to module-level 'sharp' allowlist — only this exact CVE advisory is excepted.",
-        "expiry": "2026-08-05"
-      }
-    }
-  ]
+  "allowlist": ["GHSA-f88m-g3jw-g9cj"]
 }
