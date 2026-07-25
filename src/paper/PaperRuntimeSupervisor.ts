@@ -105,11 +105,14 @@ export class PaperRuntimeSupervisor {
   // ── Start ───────────────────────────────────────────────────
   async start(aid: string, ex: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
     const r = this.get(aid, ex);
+    // Transition precedence: check activeTransition BEFORE state idempotency
+    if (r.activeTransition) {
+      if (r.activeTransition.operation === 'start') { await r.activeTransition.promise; return snapshot(r); }
+      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.lifecycle_rejected', accountId: aid, exchange: ex, occurredAtMs: this.clock.now(), errorCode: 'LIFECYCLE_TRANSITION_IN_PROGRESS', metadata: { attemptedOperation: 'start', activeOperation: r.activeTransition.operation, lifecycleState: r.state, generation: r.generation, inFlightRuns: r.inFlightRuns } });
+      throw new PaperRuntimeLifecycleError('LIFECYCLE_TRANSITION_IN_PROGRESS', `start rejected: ${r.activeTransition.operation} in progress`, aid, ex);
+    }
     if (r.state === 'running') return snapshot(r);
     if (r.state === 'failed') throw new PaperRuntimeLifecycleError('LIFECYCLE_INVALID_STATE', 'cannot start from failed', aid, ex);
-    this.checkConflict(r, 'start', aid, ex);
-    // Concurrent start → share same transition
-    if (r.activeTransition) { await r.activeTransition.promise; return snapshot(r); }
     const gate = this._doStart(r);
     r.activeTransition = { operation: 'start', promise: gate };
     try { await gate; return snapshot(r); } finally { r.activeTransition = null; }
@@ -137,10 +140,19 @@ export class PaperRuntimeSupervisor {
   // ── Stop ────────────────────────────────────────────────────
   async stop(aid: string, ex: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
     const r = this.get(aid, ex);
+    if (r.activeTransition) {
+      if (r.activeTransition.operation === 'stop') { await r.activeTransition.promise; return snapshot(r); }
+      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.lifecycle_rejected', accountId: aid, exchange: ex, occurredAtMs: this.clock.now(), errorCode: 'LIFECYCLE_TRANSITION_IN_PROGRESS', metadata: { attemptedOperation: 'stop', activeOperation: r.activeTransition.operation, lifecycleState: r.state, generation: r.generation, inFlightRuns: r.inFlightRuns } });
+      throw new PaperRuntimeLifecycleError('LIFECYCLE_TRANSITION_IN_PROGRESS', `stop rejected: ${r.activeTransition.operation} in progress`, aid, ex);
+    }
     if (r.state === 'stopped') return snapshot(r);
-    if (r.state === 'failed') return this._recoveryStop(r);
-    this.checkConflict(r, 'stop', aid, ex);
-    if (r.activeTransition) { await r.activeTransition.promise; return snapshot(r); }
+    if (r.state === 'failed') {
+      r.metrics.stopTotal++;
+      const gate = this._recoveryStop(r);
+      r.activeTransition = { operation: 'stop', promise: gate };
+      try { await gate; return snapshot(r); } finally { r.activeTransition = null; }
+    }
+    r.metrics.stopTotal++;
     const gate = this._doStop(r);
     r.activeTransition = { operation: 'stop', promise: gate };
     try { await gate; return snapshot(r); } finally { r.activeTransition = null; }
@@ -162,7 +174,6 @@ export class PaperRuntimeSupervisor {
 
   private async _doStop(r: LifecycleRecord): Promise<PaperRuntimeLifecycleSnapshot> {
     const now = this.clock.now();
-    r.metrics.stopTotal++;
     r.state = 'stopping'; r.lastTransitionAtMs = now;
     await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.stopping', accountId: r.accountId, exchange: r.exchange, occurredAtMs: now, metadata: { lifecycleState: 'stopping', inFlightRuns: r.inFlightRuns } });
     // Graceful drain
@@ -186,11 +197,12 @@ export class PaperRuntimeSupervisor {
   // ── Restart ─────────────────────────────────────────────────
   async restart(aid: string, ex: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
     const r = this.get(aid, ex);
-    this.checkConflict(r, 'restart', aid, ex);
-    // Concurrent restart → share same transition
-    if (r.activeTransition) { await r.activeTransition.promise; return snapshot(r); }
+    if (r.activeTransition) {
+      if (r.activeTransition.operation === 'restart') { await r.activeTransition.promise; return snapshot(r); }
+      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.lifecycle_rejected', accountId: aid, exchange: ex, occurredAtMs: this.clock.now(), errorCode: 'LIFECYCLE_TRANSITION_IN_PROGRESS', metadata: { attemptedOperation: 'restart', activeOperation: r.activeTransition.operation, lifecycleState: r.state, generation: r.generation, inFlightRuns: r.inFlightRuns } });
+      throw new PaperRuntimeLifecycleError('LIFECYCLE_TRANSITION_IN_PROGRESS', `restart rejected: ${r.activeTransition.operation} in progress`, aid, ex);
+    }
     r.metrics.restartTotal++;
-    // Build gate synchronously, set activeTransition BEFORE any await
     const gate = this._doRestart(r);
     r.activeTransition = { operation: 'restart', promise: gate };
     try { return await gate; } finally { r.activeTransition = null; }
