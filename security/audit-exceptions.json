@@ -1,0 +1,18 @@
+{
+  "$schema": "./audit-exceptions.schema.json",
+  "exceptions": [
+    {
+      "advisoryId": "GHSA-f88m-g3jw-g9cj",
+      "package": "sharp",
+      "relatedCves": ["CVE-2026-33327","CVE-2026-33328","CVE-2026-35590","CVE-2026-35591"],
+      "severity": "high",
+      "reason": "No patched sharp release available. Inherited libvips CVEs. Affects @huggingface/transformers tree. Monitor sharp releases weekly; remove exception when >=0.35.0 ships.",
+      "owner": "security",
+      "createdAt": "2026-07-25",
+      "expiresAt": "2026-08-24",
+      "maximumLifetimeDays": 30,
+      "compensatingControls": ["Project is paper-only. No exposed network surface for image processing CVEs. Public-market data fixtures only."],
+      "removalCondition": "sharp >=0.35.0 published and package-lock.json updated"
+    }
+  ]
+}
