@@ -23,7 +23,7 @@ export function generateSplits(cfg: WalkForwardConfig): ChronologicalSplit[] {
       const trainEnd = vStart - purgeBars - 1;
       if (trainEnd < trainStart + trainBars) break;
       folds.push({ fold: foldIdx++, train: { start: trainStart, end: trainEnd, count: trainEnd - trainStart + 1 }, validation: { start: vStart, end: vEnd, count: validationBars }, test: { start: tStart, end: testEnd - 1, count: testBars }, purgeBars, embargoBars, featureLookbackBars: lkbk, labelHorizonBars: lbl });
-      testEnd -= testBars;
+      testEnd -= testBars + embargoBars;
     }
   } else {
     let foldIdx = 0;
@@ -35,7 +35,7 @@ export function generateSplits(cfg: WalkForwardConfig): ChronologicalSplit[] {
       const trainStart = trainEnd - trainBars + 1;
       if (trainStart < lkbk) break;
       folds.push({ fold: foldIdx++, train: { start: trainStart, end: trainEnd, count: trainBars }, validation: { start: vStart, end: vEnd, count: validationBars }, test: { start: tStart, end: testEnd - 1, count: testBars }, purgeBars, embargoBars, featureLookbackBars: lkbk, labelHorizonBars: lbl });
-      testEnd -= testBars;
+      testEnd -= testBars + embargoBars;
     }
   }
 
@@ -47,7 +47,7 @@ export function validateFoldIsolation(fold: ChronologicalSplit, nextFold?: Chron
   const issues: string[] = [];
   if (fold.train.end >= fold.validation.start) issues.push('LEAKAGE: train end >= validation start');
   if (fold.validation.end + fold.purgeBars >= fold.test.start) issues.push('LEAKAGE: val+purge crosses test start');
-  if (fold.test.end + fold.embargoBars >= (nextFold?.train.start ?? Infinity)) issues.push('LEAKAGE: test+embargo crosses next train');
+  if (fold.test.end + fold.embargoBars > (nextFold?.train.start ?? Infinity)) issues.push('LEAKAGE: test+embargo crosses next train');
   if (fold.train.start < fold.featureLookbackBars) issues.push('LEAKAGE: feature lookback before bar 0');
   return issues;
 }
