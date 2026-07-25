@@ -6,12 +6,16 @@
       "package": "sharp",
       "relatedCves": ["CVE-2026-33327","CVE-2026-33328","CVE-2026-35590","CVE-2026-35591"],
       "severity": "high",
-      "reason": "No patched sharp release available. Inherited libvips CVEs. Affects @huggingface/transformers tree. Monitor sharp releases weekly; remove exception when >=0.35.0 ships.",
+      "reason": "No patched sharp release available as of 2026-07-25. These are inherited libvips CVEs (image processing library). @huggingface/transformers depends on sharp for image preprocessing; this project does not invoke sharp image pipelines in the paper execution path.",
       "owner": "security",
       "createdAt": "2026-07-25",
       "expiresAt": "2026-08-24",
       "maximumLifetimeDays": 30,
-      "compensatingControls": ["Project is paper-only. No exposed network surface for image processing CVEs. Public-market data fixtures only."],
+      "compensatingControls": [
+        "Paper-only execution: no image preprocessing in trading path",
+        "sharp dependency is inert unless @huggingface/transformers image pipeline is invoked",
+        "Monitor sharp releases weekly for 0.35.0+"
+      ],
       "removalCondition": "sharp >=0.35.0 published and package-lock.json updated"
     }
   ]
