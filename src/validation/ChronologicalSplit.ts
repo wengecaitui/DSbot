@@ -1,55 +1,42 @@
-// Stage 4A4-R1: Chronological split with feature lookback, label horizon, oldest→newest folds.
+// Stage 4A4-R3: Chronological split — proper expanding window, fixed embargo.
 import type { WalkForwardConfig, ChronologicalSplit } from './ValidationTypes';
 
-export const SPLIT_ERRORS = {
-  INSUFFICIENT_DATA: 'SPLIT_INSUFFICIENT_DATA',
-  INVALID_CONFIG: 'SPLIT_INVALID_CONFIG',
-  ZERO_BARS: 'SPLIT_ZERO_BARS',
-} as const;
-
-function assertNonNegInt(v: number, name: string): void {
-  if (!Number.isInteger(v) || v < 0) throw new Error(`${SPLIT_ERRORS.INVALID_CONFIG}: ${name}=${v}`);
-}
+export const SPLIT_ERRORS = { INSUFFICIENT_DATA: 'SPLIT_INSUFFICIENT_DATA', INVALID_CONFIG: 'SPLIT_INVALID_CONFIG', ZERO_BARS: 'SPLIT_ZERO_BARS' } as const;
 
 export function generateSplits(cfg: WalkForwardConfig): ChronologicalSplit[] {
-  if (!Number.isInteger(cfg.totalBars) || cfg.totalBars <= 0) throw new Error(SPLIT_ERRORS.ZERO_BARS);
-  assertNonNegInt(cfg.trainBars, 'trainBars'); assertNonNegInt(cfg.validationBars, 'validationBars');
-  assertNonNegInt(cfg.testBars, 'testBars'); assertNonNegInt(cfg.purgeBars, 'purgeBars'); assertNonNegInt(cfg.embargoBars, 'embargoBars');
+  const { totalBars, trainBars, validationBars, testBars, purgeBars, embargoBars, mode } = cfg;
   const lkbk = cfg.featureLookbackBars ?? 0; const lbl = cfg.labelHorizonBars ?? 0;
-  assertNonNegInt(lkbk, 'featureLookbackBars'); assertNonNegInt(lbl, 'labelHorizonBars');
+  if (!Number.isInteger(totalBars) || totalBars <= 0) throw new Error(SPLIT_ERRORS.ZERO_BARS);
+  [trainBars, validationBars, testBars, purgeBars, embargoBars, lkbk, lbl].forEach(v => { if (!Number.isInteger(v) || v < 0) throw new Error(SPLIT_ERRORS.INVALID_CONFIG); });
 
   const folds: ChronologicalSplit[] = [];
-  let testEnd = cfg.totalBars;
-  let foldNum = 0;
+  let testEnd = totalBars;
+  const minSpan = trainBars + validationBars + 2 * purgeBars + testBars + embargoBars + lkbk + lbl;
 
-  while (testEnd >= cfg.trainBars + cfg.validationBars + cfg.testBars + 2 * cfg.purgeBars + cfg.embargoBars + lkbk + lbl) {
-    const testStart = testEnd - cfg.testBars;
-    const valEnd = testStart - cfg.purgeBars - 1;
-    const valStart = valEnd - cfg.validationBars + 1;
-    const trainEnd = valStart - cfg.purgeBars - 1;
-    const trainStart = cfg.mode === 'expanding' ? Math.max(lkbk, trainEnd - cfg.trainBars + 1) : Math.max(lkbk, trainEnd - cfg.trainBars + 1);
-    if (cfg.mode === 'expanding') {
-      // expanding: train grows leftward
-      const expandingStart = Math.max(lkbk, testEnd - cfg.trainBars - cfg.validationBars - 2 * cfg.purgeBars - cfg.testBars - lkbk - lbl);
-      folds.push({
-        fold: foldNum++,
-        train: { start: expandingStart, end: trainEnd, count: trainEnd - expandingStart + 1 },
-        validation: { start: valStart, end: valEnd, count: cfg.validationBars },
-        test: { start: testStart, end: testEnd - 1, count: cfg.testBars },
-        purgeBars: cfg.purgeBars, embargoBars: cfg.embargoBars,
-        featureLookbackBars: lkbk, labelHorizonBars: lbl,
-      });
-    } else {
-      folds.push({
-        fold: foldNum++,
-        train: { start: trainStart, end: trainEnd, count: trainEnd - trainStart + 1 },
-        validation: { start: valStart, end: valEnd, count: cfg.validationBars },
-        test: { start: testStart, end: testEnd - 1, count: cfg.testBars },
-        purgeBars: cfg.purgeBars, embargoBars: cfg.embargoBars,
-        featureLookbackBars: lkbk, labelHorizonBars: lbl,
-      });
+  if (mode === 'expanding') {
+    const trainStart = lkbk;
+    let foldIdx = 0;
+    while (testEnd >= minSpan + lkbk) {
+      const tStart = testEnd - testBars;
+      const vEnd = tStart - purgeBars - 1;
+      const vStart = vEnd - validationBars + 1;
+      const trainEnd = vStart - purgeBars - 1;
+      if (trainEnd < trainStart + trainBars) break;
+      folds.push({ fold: foldIdx++, train: { start: trainStart, end: trainEnd, count: trainEnd - trainStart + 1 }, validation: { start: vStart, end: vEnd, count: validationBars }, test: { start: tStart, end: testEnd - 1, count: testBars }, purgeBars, embargoBars, featureLookbackBars: lkbk, labelHorizonBars: lbl });
+      testEnd -= testBars;
     }
-    testEnd -= cfg.testBars;
+  } else {
+    let foldIdx = 0;
+    while (testEnd >= lkbk + minSpan) {
+      const tStart = testEnd - testBars;
+      const vEnd = tStart - purgeBars - 1;
+      const vStart = vEnd - validationBars + 1;
+      const trainEnd = vStart - purgeBars - 1;
+      const trainStart = trainEnd - trainBars + 1;
+      if (trainStart < lkbk) break;
+      folds.push({ fold: foldIdx++, train: { start: trainStart, end: trainEnd, count: trainBars }, validation: { start: vStart, end: vEnd, count: validationBars }, test: { start: tStart, end: testEnd - 1, count: testBars }, purgeBars, embargoBars, featureLookbackBars: lkbk, labelHorizonBars: lbl });
+      testEnd -= testBars;
+    }
   }
 
   if (folds.length === 0) throw new Error(SPLIT_ERRORS.INSUFFICIENT_DATA);
@@ -58,10 +45,9 @@ export function generateSplits(cfg: WalkForwardConfig): ChronologicalSplit[] {
 
 export function validateFoldIsolation(fold: ChronologicalSplit, nextFold?: ChronologicalSplit): string[] {
   const issues: string[] = [];
-  if (fold.train.end >= fold.validation.start) issues.push('LEAKAGE: train overlaps validation');
-  if (fold.validation.end + fold.purgeBars >= fold.test.start) issues.push('LEAKAGE: insufficient purge before test');
-  if (fold.test.end + fold.embargoBars >= (nextFold?.train.start ?? Infinity)) issues.push('LEAKAGE: embargo violated between test and next train');
-  if (fold.train.start < fold.featureLookbackBars) issues.push('LEAKAGE: insufficient lookback before train');
-  if (fold.test.end + fold.labelHorizonBars > (nextFold?.train.start ?? Infinity) && fold.test.end + fold.labelHorizonBars >= fold.test.end) issues.push('LEAKAGE: label horizon crosses into next fold');
+  if (fold.train.end >= fold.validation.start) issues.push('LEAKAGE: train end >= validation start');
+  if (fold.validation.end + fold.purgeBars >= fold.test.start) issues.push('LEAKAGE: val+purge crosses test start');
+  if (fold.test.end + fold.embargoBars >= (nextFold?.train.start ?? Infinity)) issues.push('LEAKAGE: test+embargo crosses next train');
+  if (fold.train.start < fold.featureLookbackBars) issues.push('LEAKAGE: feature lookback before bar 0');
   return issues;
 }

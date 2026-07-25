@@ -41,6 +41,7 @@ export interface PerformanceMetrics {
   readonly grossReturn: number; readonly netReturn: number; readonly maxDrawdown: number;
   readonly sharpeRatio: number; readonly sortinoRatio: number; readonly profitFactor: number;
   readonly tradeCount: number; readonly turnover: number; readonly costBreakdown: CostBreakdown;
+  readonly _volume?: number; // internal: original volume for recomputation
 }
 
 // ── Report ────────────────────────────────────────────────────
@@ -56,15 +57,16 @@ export interface ValidationReport {
 }
 export interface StressScenario { readonly name: string; readonly multiplier: number; readonly metrics: PerformanceMetrics; }
 
-export function makeReportId(cfg: WalkForwardConfig, cost: CostConfig, simVersion?: string): string {
-  return createHash('sha256').update(JSON.stringify({ cfg, cost, simVersion })).digest('hex').slice(0, 16);
+export function makeReportId(cfg: WalkForwardConfig, cost: CostConfig, datasetHash?: string, selected?: Record<string, string | number>, simVersion?: string): string {
+  return createHash('sha256').update(JSON.stringify({ cfg, cost, datasetHash: datasetHash ?? '', selected: selected ?? {}, simVersion: simVersion ?? '' })).digest('hex').slice(0, 16);
 }
 
 // ── Parameter selection ───────────────────────────────────────
 export interface ParameterCandidate {
   id: string; params: Readonly<Record<string, string | number>>;
-  validationScore: number; rejectionReason?: string;
+  validationScore: number; trainScore?: number; rejectionReason?: string;
   foldScores: readonly number[]; accepted: boolean; selected: boolean;
+  metrics?: FoldMetrics;
 }
 export interface ParameterSelectionResult {
   readonly candidates: readonly ParameterCandidate[];
