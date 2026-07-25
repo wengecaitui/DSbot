@@ -26,7 +26,7 @@ jobs:
         run: npm ci
 
       - name: Audit production dependencies (moderate+, with time-bounded exceptions)
-        run: npx --yes audit-ci@^7 --config .audit-ci.jsonc --production
+        run: npm run security:audit
 
       - name: Check for known vulnerabilities
         run: |
