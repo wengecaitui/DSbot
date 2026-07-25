@@ -17,6 +17,13 @@ export function generateSplits(cfg: WalkForwardConfig): ChronologicalSplit[] {
   // adjacent out-of-sample windows must satisfy embargo and label horizon.
   const phaseGapBars = Math.max(purgeBars, lbl);
   const outOfSampleGapBars = Math.max(embargoBars, lbl);
+  // Fold step: consecutive folds must have their eligible regions (validation)
+  // non-overlapping with the previous fold's test+embargo+label-horizon.  The
+  // tightest valid step is testBars + phaseGapBars + validationBars + outOfSampleGapBars.
+  // Training windows MAY reuse older history (permitted for both rolling and expanding);
+  // this is enforced by validateFoldIsolation which does NOT gate on train start crossing
+  // the previous test+embargo boundary.
+  const foldStepBars = testBars + phaseGapBars + validationBars + outOfSampleGapBars;
 
   if (mode === 'expanding') {
     const trainStart = lkbk;
@@ -28,7 +35,7 @@ export function generateSplits(cfg: WalkForwardConfig): ChronologicalSplit[] {
       const trainEnd = vStart - phaseGapBars - 1;
       if (trainEnd - trainStart + 1 < trainBars) break;
       folds.push({ fold: foldIdx++, train: { start: trainStart, end: trainEnd, count: trainEnd - trainStart + 1 }, validation: { start: vStart, end: vEnd, count: validationBars }, test: { start: tStart, end: testEnd - 1, count: testBars }, purgeBars, embargoBars, featureLookbackBars: lkbk, labelHorizonBars: lbl });
-      testEnd -= testBars + outOfSampleGapBars;
+      testEnd -= foldStepBars;
     }
   } else {
     let foldIdx = 0;
@@ -40,7 +47,7 @@ export function generateSplits(cfg: WalkForwardConfig): ChronologicalSplit[] {
       const trainStart = trainEnd - trainBars + 1;
       if (trainStart < lkbk) break;
       folds.push({ fold: foldIdx++, train: { start: trainStart, end: trainEnd, count: trainBars }, validation: { start: vStart, end: vEnd, count: validationBars }, test: { start: tStart, end: testEnd - 1, count: testBars }, purgeBars, embargoBars, featureLookbackBars: lkbk, labelHorizonBars: lbl });
-      testEnd -= testBars + outOfSampleGapBars;
+      testEnd -= foldStepBars;
     }
   }
 
@@ -56,6 +63,8 @@ export function validateFoldIsolation(fold: ChronologicalSplit, nextFold?: Chron
   if (fold.validation.end + fold.labelHorizonBars >= fold.test.start) issues.push('LEAKAGE: validation label horizon crosses test start');
   if (nextFold && fold.test.end + fold.embargoBars >= nextFold.test.start) issues.push('LEAKAGE: test+embargo crosses next test');
   if (nextFold && fold.test.end + fold.labelHorizonBars >= nextFold.test.start) issues.push('LEAKAGE: test label horizon crosses next test');
+  if (nextFold && fold.test.end + fold.embargoBars >= nextFold.validation.start) issues.push('LEAKAGE: test+embargo crosses next validation');
+  if (nextFold && fold.test.end + fold.labelHorizonBars >= nextFold.validation.start) issues.push('LEAKAGE: test label horizon crosses next validation');
   if (fold.train.start < fold.featureLookbackBars) issues.push('LEAKAGE: feature lookback before bar 0');
   return issues;
 }

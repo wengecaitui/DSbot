@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { generateSplits, validateFoldIsolation } from '../../src/validation/ChronologicalSplit';
 import { computeCosts, makeMetrics, selectParameters, runWalkForward, recomputeCosts, type SimCallLedger } from '../../src/validation/WalkForward';
 import { deepFreeze, makeReportId } from '../../src/validation/ValidationTypes';
-import type { WalkForwardConfig, CostConfig, ValidationClock, ParameterCandidate } from '../../src/validation/ValidationTypes';
+import type { WalkForwardConfig, CostConfig, ValidationClock, ParameterCandidate, ChronologicalSplit } from '../../src/validation/ValidationTypes';
 
 const CFG: WalkForwardConfig = { totalBars: 15000, trainBars: 800, validationBars: 300, testBars: 300, purgeBars: 20, embargoBars: 10, mode: 'rolling' };
 const COST: CostConfig = { feeBps: 10, spreadBps: 1, slippageBps: 5, latencyPenaltyBps: 2, stressMultiplier: 1.0 };
@@ -104,3 +104,70 @@ test('73. label horizon separates train→validation', () => { for (const s of g
 test('74. label horizon separates validation→test', () => { for (const s of generateSplits({...CFG,totalBars:50000,purgeBars:0,labelHorizonBars:42})) assert.ok(s.validation.end + s.labelHorizonBars < s.test.start); });
 test('75. label horizon separates adjacent tests', () => { const f = generateSplits({...CFG,totalBars:50000,embargoBars:0,labelHorizonBars:42}); for (let i=0;i<f.length-1;i++) assert.ok(f[i].test.end + f[i].labelHorizonBars < f[i+1].test.start); });
 test('76. next training window may reuse prior history', () => { for (const mode of ['rolling','expanding'] as const) { const f = generateSplits({...CFG,totalBars:50000,mode}); assert.ok(f.some((s,i)=>i>0 && s.train.start <= f[i-1].test.end)); for (let i=0;i<f.length-1;i++) assert.deepStrictEqual(validateFoldIsolation(f[i],f[i+1]), []); } });
+
+// ═══ 77–78: Cross-fold eligible-region & holdout evidence ═══
+test('77. adversarial: test-test well-spaced but eligible region overlaps', () => {
+  // Construct two folds where nextFold.test remains outside the
+  // previous test+embargo band (passes test-test check) but nextFold's
+  // validation (parameter-selection eligible region) overlaps the
+  // previous test+embargo — a gap that only the cross-fold eligible-region
+  // checks catch.
+  const fold: ChronologicalSplit = {
+    fold: 0,
+    train: { start: 0, end: 99, count: 100 },
+    validation: { start: 120, end: 149, count: 30 },
+    test: { start: 170, end: 199, count: 30 },
+    purgeBars: 20, embargoBars: 10, featureLookbackBars: 0, labelHorizonBars: 0,
+  } as ChronologicalSplit;
+  const nextFold: ChronologicalSplit = {
+    fold: 1,
+    train: { start: 170, end: 269, count: 100 },
+    validation: { start: 200, end: 229, count: 30 },  // starts inside prev test+embargo band
+    test: { start: 250, end: 279, count: 30 },
+    purgeBars: 20, embargoBars: 10, featureLookbackBars: 0, labelHorizonBars: 0,
+  } as ChronologicalSplit;
+  // fold.test.end + embargo = 199 + 10 = 209 ≥ nextFold.test.start(250)? No → test-test passes
+  // fold.test.end + embargo = 209 ≥ nextFold.validation.start(200)? YES → eligible-region overlap!
+  const issues = validateFoldIsolation(fold, nextFold);
+  assert.ok(issues.some(x => x.includes('crosses next validation')), `expected eligible-region leak, got: ${JSON.stringify(issues)}`);
+});
+
+test('78. holdout: identical train+val but different test yields same selectedParameters', () => {
+  // Parameter selection uses only train+validation data.  The test phase
+  // runs AFTER selection is finalized — proving the holdout wall is real.
+  // Two runs with identical train+val outputs but deliberately different
+  // test outputs must produce the same selectedParameters.
+  const cfgA = { ...CFG, trainBars: 500 };
+  const numFolds = generateSplits(cfgA).length;
+  const numParams = 2;
+  // candidate eval calls: numFolds × numParams × 2 (train+val per fold per param)
+  const candidateEvalCalls = numFolds * numParams * 2;
+  // After that, final eval follows a strict train→val→test pattern per fold.
+  // Call idx (0-based) >= candidateEvalCalls is final eval;
+  // within final eval, idx % 3 === 2 is the test phase.
+
+  // Run 1: standard simulator (all phases use (e-s)*3)
+  const r1 = runWalkForward(cfgA, COST,
+    (s, e) => ({ grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 }),
+    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
+
+  // Run 2: identical train+val, but test outputs are deliberately different.
+  let callIdx = 0;
+  const r2 = runWalkForward(cfgA, COST,
+    (s, e) => {
+      const isTest = callIdx >= candidateEvalCalls && (callIdx - candidateEvalCalls) % 3 === 2;
+      callIdx++;
+      return {
+        grossPnl: isTest ? (e - s) * 999 : (e - s) * 3,
+        volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2,
+        profitFactor: 1.6, trades: isTest ? 42 : 15,
+      };
+    },
+    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
+
+  assert.deepStrictEqual(r1.selectedParameters, r2.selectedParameters,
+    'selectedParameters must be identical when train+val outputs match');
+  // Verify test outputs are actually different (the holdout did its job)
+  assert.notDeepStrictEqual(r1.folds[0].testMetrics?.grossReturn, r2.folds[0].testMetrics?.grossReturn,
+    'test outputs must differ between runs');
+});
