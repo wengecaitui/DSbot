@@ -190,7 +190,7 @@ test('79. causal-per-fold: each fold independently selects parameters (R8 only)'
   assert.equal(typeof r.finalHoldoutEvaluationCount, 'number');
 });
 
-test('80. causal: TWO runs — fold0 identical train/val, fold1+ differ provably changing later selection', () => {
+test('80. causal: TWO runs with SEPARATE ledgers — fold0 identical train/val, later-fold mutation changes later selection', () => {
   // Use a config guaranteed to produce >= 2 folds
   const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
   const holdoutCfg = allocateFinalHoldout(cfgA);
@@ -198,58 +198,66 @@ test('80. causal: TWO runs — fold0 identical train/val, fold1+ differ provably
   const splits = generateSplits(devCfg);
   assert.ok(splits.length >= 2, `need >=2 folds, got ${splits.length}`);
 
-  // Run 1: uniform simulator — all candidates produce same output everywhere
-  const r1 = wf(cfgA, [{ a: 1 }, { b: 2 }]);
+  const f0 = splits[0];
+  const f1 = splits[1];
+  const f0ValRange = `${f0.validation.start}-${f0.validation.end}`;
+  const f1ValRange = `${f1.validation.start}-${f1.validation.end}`;
 
-  // Run 2: same train/val as Run 1, but fold1+ candidate outputs differ so
-  // later folds make different selections.
-  // Track calls: for each fold, 2 params × 2 phases (train+val) = 4 calls, then 1 test = 5 calls.
-  let callCount = 0;
-  const callsPerFold = 5; // 4 train/val + 1 test
+  // Run 1: uniform simulator — both candidates produce same output
+  const l1 = mkLedger();
+  const r1 = runWalkForward(cfgA, COST, sim, { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l1 });
+
+  // Run 2: separate ledger. Fold0 train/val must be IDENTICAL to Run 1.
+  // Fold1+ train/val mutate to flip selection — use exact generated phase ranges.
+  const l2 = mkLedger();
   const r2 = runWalkForward(cfgA, COST,
     (s, e, p) => {
-      const isFold0 = callCount < callsPerFold;
-      callCount++;
-      if (isFold0) {
-        // Fold 0: identical to Run 1 (uniform output)
+      // Fold0 train/val: identical to Run 1 uniform output
+      if (s >= f0.train.start && e <= f0.validation.end) {
         return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
       }
-      // Fold 1+: bias candidate 'b' heavily so fold1 selection flips vs Run 1
+      // Fold1+ train/val: bias candidate 'b' to flip later selection
       const bonus = p && 'b' in p ? (e - s) * 10 : (e - s) * 3;
       return { grossPnl: bonus, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
     },
-    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
+    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l2 });
 
-  // Assert fold0 identical
-  const f0r1 = r1.folds[0];
-  const f0r2 = r2.folds[0];
-  assert.ok(f0r1.selectedCandidateId !== undefined, 'fold0 must have selection');
-  assert.deepStrictEqual(f0r1.selectedCandidateId, f0r2.selectedCandidateId,
+  // Fold 0: deepStrictEqual for selectedCandidateId, selectedParameters, testMetrics
+  assert.ok(r1.folds[0].selectedCandidateId !== undefined, 'fold0 must have selection');
+  assert.deepStrictEqual(r1.folds[0].selectedCandidateId, r2.folds[0].selectedCandidateId,
     'fold0 selectedCandidateId must be identical across runs');
-  assert.deepStrictEqual(f0r1.selectedParameters, f0r2.selectedParameters,
+  assert.deepStrictEqual(r1.folds[0].selectedParameters, r2.folds[0].selectedParameters,
     'fold0 selectedParameters must be identical across runs');
-  assert.deepStrictEqual(f0r1.testMetrics, f0r2.testMetrics,
+  assert.deepStrictEqual(r1.folds[0].testMetrics, r2.folds[0].testMetrics,
     'fold0 testMetrics must be identical across runs');
 
+  // Fold 0: deepStrictEqual exact ledger records
+  const f0Ledger1 = l1.log.filter(x => x.fold === 0);
+  const f0Ledger2 = l2.log.filter(x => x.fold === 0);
+  assert.deepStrictEqual(f0Ledger1, f0Ledger2, 'fold0 ledger records must be identical across runs');
+
   // Assert at least one later fold's selection differs
-  const laterDiffer = r1.folds.slice(1).some((f1, i) => {
+  const laterDiffer = r1.folds.slice(1).some((f, i) => {
     const f2 = r2.folds[i + 1];
-    return f1.selectedCandidateId !== f2.selectedCandidateId ||
-      JSON.stringify(f1.selectedParameters) !== JSON.stringify(f2.selectedParameters);
+    return f.selectedCandidateId !== f2.selectedCandidateId ||
+      JSON.stringify(f.selectedParameters) !== JSON.stringify(f2.selectedParameters);
   });
   assert.ok(laterDiffer, 'at least one later fold must have different selection between runs');
 });
 
-test('81. causal: fold0 prefers A, fold1 prefers B — both accepted, each tests own params', () => {
+test('81. causal: fold0 prefers A, fold1 prefers B — each tests own params, captured test-call params prove it', () => {
   const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
   const holdoutCfg = allocateFinalHoldout(cfgA);
   const devCfg = { ...cfgA, totalBars: holdoutCfg.developmentEndExclusive };
   const splits = generateSplits(devCfg);
   assert.ok(splits.length >= 2, `need >=2 folds, got ${splits.length}`);
 
-  // Capture fold ranges for verification
   const f0 = splits[0];
   const f1 = splits[1];
+
+  // Capture the actual params received by the simulator on each fold's test call
+  let capturedFold0TestParams: Record<string, string | number> | undefined;
+  let capturedFold1TestParams: Record<string, string | number> | undefined;
 
   const r = runWalkForward(cfgA, COST,
     (s, e, p) => {
@@ -257,11 +265,18 @@ test('81. causal: fold0 prefers A, fold1 prefers B — both accepted, each tests
       // fold1 validation: candidate B returns higher score
       const inFold0Val = s === f0.validation.start && e === f0.validation.end;
       const inFold1Val = s === f1.validation.start && e === f1.validation.end;
+      const inFold0Test = s === f0.test.start && e === f0.test.end;
+      const inFold1Test = s === f1.test.start && e === f1.test.end;
+
+      // Capture test params
+      if (inFold0Test && p) capturedFold0TestParams = { ...p };
+      if (inFold1Test && p) capturedFold1TestParams = { ...p };
+
       if (inFold0Val && p && 'a' in p) return { grossPnl: 1e6, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 5.0, sortino: 5.0, profitFactor: 5.0, trades: 15 };
       if (inFold0Val && p && 'b' in p) return { grossPnl: 100, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.0, sortino: 1.0, profitFactor: 1.0, trades: 15 };
       if (inFold1Val && p && 'b' in p) return { grossPnl: 1e6, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 5.0, sortino: 5.0, profitFactor: 5.0, trades: 15 };
       if (inFold1Val && p && 'a' in p) return { grossPnl: 100, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.0, sortino: 1.0, profitFactor: 1.0, trades: 15 };
-      // Other phases (train, test): uniform output
+      // Other phases (train): uniform output
       return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
     },
     { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
@@ -271,7 +286,6 @@ test('81. causal: fold0 prefers A, fold1 prefers B — both accepted, each tests
   assert.ok(fm0.selectedCandidateId !== undefined, 'fold0 must have selection');
   assert.ok(fm0.selectedCandidateId.includes('"a":1'), `fold0 must select A, got ${fm0.selectedCandidateId}`);
   assert.deepStrictEqual(fm0.selectedParameters, { a: 1 }, 'fold0 selectedParameters must be {a:1}');
-  // fold0 test must exist and use its own params
   assert.ok(fm0.testMetrics !== undefined, 'fold0 must have testMetrics');
   assert.ok(fm0.testMetrics.grossReturn > 0);
 
@@ -282,6 +296,12 @@ test('81. causal: fold0 prefers A, fold1 prefers B — both accepted, each tests
   assert.deepStrictEqual(fm1.selectedParameters, { b: 2 }, 'fold1 selectedParameters must be {b:2}');
   assert.ok(fm1.testMetrics !== undefined, 'fold1 must have testMetrics');
 
+  // Captured test params must prove each fold tested its own selected params
+  assert.deepStrictEqual(capturedFold0TestParams, { a: 1 },
+    `fold0 test must be called with {a:1}, got ${JSON.stringify(capturedFold0TestParams)}`);
+  assert.deepStrictEqual(capturedFold1TestParams, { b: 2 },
+    `fold1 test must be called with {b:2}, got ${JSON.stringify(capturedFold1TestParams)}`);
+
   // Both must be accepted
   const cr0 = fm0.candidateResults || [];
   const cr1 = fm1.candidateResults || [];
@@ -291,7 +311,7 @@ test('81. causal: fold0 prefers A, fold1 prefers B — both accepted, each tests
   assert.ok(b1?.accepted, 'fold1 candidate B must be accepted');
 });
 
-test('82. causal-expanding: fixed train.start, increasing train.count, later contains earlier test; frozen on future mutate', () => {
+test('82. causal-expanding: SEPARATE ledgers, later train CONTAINS earlier test, fold0 frozen on future mutate', () => {
   const cfgE = { ...CFG, mode: 'expanding' as const, trainBars: 500, totalBars: 50000 };
   const holdoutCfg = allocateFinalHoldout(cfgE);
   const devCfg = { ...cfgE, totalBars: holdoutCfg.developmentEndExclusive };
@@ -304,39 +324,48 @@ test('82. causal-expanding: fixed train.start, increasing train.count, later con
   for (let i = 1; i < splits.length; i++) {
     assert.ok(splits[i].train.count > splits[i - 1].train.count, `fold ${i}: train.count must strictly increase`);
   }
-  // At least one later train interval overlaps (contains bars from) an earlier test interval
-  const laterOverlapsEarlierTest = splits.some((s, i) => i > 0 &&
-    s.train.start <= splits[i - 1].test.end && s.train.end >= splits[i - 1].test.start);
-  assert.ok(laterOverlapsEarlierTest, 'at least one later train must overlap an earlier test interval');
 
-  // Run 1: uniform constant simulator
-  const r1 = runWalkForward(cfgE, COST,
-    () => ({ grossPnl: 1000, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 }),
-    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
+  // A later train MUST fully CONTAIN an earlier test interval:
+  // train.start <= earlier.test.start AND train.end >= earlier.test.end
+  const containsEarlierTest = splits.some((s, i) =>
+    splits.slice(0, i).some(prev =>
+      s.train.start <= prev.test.start && s.train.end >= prev.test.end));
+  assert.ok(containsEarlierTest, 'at least one later train must fully contain an earlier test interval');
 
-  // Run 2: mutate future fold (fold index >= 1) validation scores to flip selection,
-  // but fold0 train+val must be identical. Earlier fold test/selection/ledger remain frozen.
+  // Run 1: uniform constant simulator with separate ledger
+  const l1 = mkLedger();
+  const simConst = () => ({ grossPnl: 1000, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 });
+  const r1 = runWalkForward(cfgE, COST, simConst, { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l1 });
+
+  // Run 2: separate ledger. Mutate only exact later-fold candidate train/validation ranges.
+  // Fold0 sim output stays identical — fold0 selection/params/test/ledger must be frozen.
+  const l2 = mkLedger();
   const r2 = runWalkForward(cfgE, COST,
     (s, e, p) => {
-      // fold0: same as Run 1
+      // Fold0: identical to Run 1 (all phases inside fold0 test end)
       if (s >= splits[0].train.start && e <= splits[0].test.end) {
         return { grossPnl: 1000, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
       }
-      // fold1+: bias candidate 'b' so selection changes
+      // Fold1+ candidate train/val: bias 'b' to flip later selection
       const bonus = p && 'b' in p ? 10000 : 1000;
       return { grossPnl: bonus, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
     },
-    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
+    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l2 });
 
-  // fold0 must be frozen — identical across runs
+  // Fold0 must be frozen — deepStrictEqual across runs
   assert.deepStrictEqual(r1.folds[0].selectedCandidateId, r2.folds[0].selectedCandidateId, 'fold0 selection frozen');
   assert.deepStrictEqual(r1.folds[0].selectedParameters, r2.folds[0].selectedParameters, 'fold0 params frozen');
   assert.deepStrictEqual(r1.folds[0].testMetrics, r2.folds[0].testMetrics, 'fold0 testMetrics frozen');
 
+  // Fold0 ledger records must be identical across runs
+  const f0Ledger1 = l1.log.filter(x => x.fold === 0);
+  const f0Ledger2 = l2.log.filter(x => x.fold === 0);
+  assert.deepStrictEqual(f0Ledger1, f0Ledger2, 'fold0 ledger records must be identical across runs');
+
   // At least one later fold must differ
-  const laterDiffer = r1.folds.slice(1).some((f1, i) => {
+  const laterDiffer = r1.folds.slice(1).some((f, i) => {
     const f2 = r2.folds[i + 1];
-    return f1.selectedCandidateId !== f2.selectedCandidateId;
+    return f.selectedCandidateId !== f2.selectedCandidateId;
   });
   assert.ok(laterDiffer, 'future mutation must change at least one later fold selection');
 });
@@ -611,48 +640,71 @@ test('101. holdout: deterministic full report identity', () => {
 });
 
 // ── Earlier folds: selected=false, usedForDeployment=false, test params are own frozen params ──
-test('102. causal: earlier folds have selected=false, own frozen test params, not deployment params', () => {
+test('102. causal: at least 2 folds select DIFFERENT params, capture each test-call params, all pre-deployment invariants hold', () => {
   const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
   const holdoutCfg = allocateFinalHoldout(cfgA);
   const devCfg = { ...cfgA, totalBars: holdoutCfg.developmentEndExclusive };
   const splits = generateSplits(devCfg);
   assert.ok(splits.length >= 2, `need >=2 folds, got ${splits.length}`);
 
-  // Use a simulator where each fold's selected params produce distinct test outputs
+  // Capture each fold's exact test-call params (keyed by fold number, not array index)
+  const capturedTestParams: Record<number, Record<string, string | number>> = {};
+
+  // splits is in reverse chronological order: splits[0]=latest fold, splits[last]=earliest fold (fold 0)
+  const earliestFold = splits[splits.length - 1];
+  const laterFolds = splits.slice(0, -1); // all folds except the earliest
+
   const r = runWalkForward(cfgA, COST,
     (s, e, p) => {
-      // Each fold's test gets a unique grossPnl based on its own params
-      const bonus = p && 'a' in p ? 100 : p && 'b' in p ? 200 : 0;
-      return { grossPnl: (e - s) * 3 + bonus, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+      // Earliest fold val: bias A. All later folds: bias B. Ensures fold0≠deployment.
+      const inEarliestVal = s === earliestFold.validation.start && e === earliestFold.validation.end;
+      const inLaterVal = laterFolds.some(sp => s === sp.validation.start && e === sp.validation.end);
+      // Capture test call params
+      const splitIdx = splits.findIndex(sp => s === sp.test.start && e === sp.test.end);
+      if (splitIdx !== -1 && p) capturedTestParams[splits[splitIdx].fold] = { ...p };
+
+      if (inEarliestVal && p && 'a' in p) return { grossPnl: 1e6, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 5.0, sortino: 5.0, profitFactor: 5.0, trades: 15 };
+      if (inEarliestVal && p && 'b' in p) return { grossPnl: 100, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.0, sortino: 1.0, profitFactor: 1.0, trades: 15 };
+      if (inLaterVal && p && 'b' in p) return { grossPnl: 1e6, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 5.0, sortino: 5.0, profitFactor: 5.0, trades: 15 };
+      if (inLaterVal && p && 'a' in p) return { grossPnl: 100, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.0, sortino: 1.0, profitFactor: 1.0, trades: 15 };
+      return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
     },
     { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
 
   const selectedFolds = r.folds.filter(f => f.selectedParameters !== undefined);
-  assert.ok(selectedFolds.length >= 1, 'must have at least one selected fold');
+  assert.ok(selectedFolds.length >= 2, `need >=2 folds with selections, got ${selectedFolds.length}`);
+
+  // Prove at least two folds selected different parameters
+  const distinctParams = new Set(selectedFolds.map(f => JSON.stringify(f.selectedParameters)));
+  assert.ok(distinctParams.size >= 2,
+    `must have at least 2 distinct selected parameter sets, got ${distinctParams.size}`);
+
+  const deploymentParams = r.deploymentParameters!;
+  let earlierDiffersFromDeployment = false;
 
   // For all folds except the last selected (deployment fold):
-  // - selected must be false
-  // - usedForDeployment must be false
-  // - testMetrics must exist and match the fold's own selected params, not deployment params
-  const deploymentParams = r.deploymentParameters;
-  assert.ok(deploymentParams !== undefined, 'must have deployment params');
-
   const earlierSelected = selectedFolds.slice(0, -1);
   for (const fm of earlierSelected) {
     assert.equal(fm.selected, false, `fold ${fm.fold}: earlier fold selected must be false`);
     assert.equal(fm.usedForDeployment, false, `fold ${fm.fold}: earlier fold usedForDeployment must be false`);
-    // The fold's own selected params should be present
     assert.ok(fm.selectedParameters !== undefined, `fold ${fm.fold}: must have own selectedParameters`);
     assert.ok(fm.selectedCandidateId !== undefined, `fold ${fm.fold}: must have own selectedCandidateId`);
-    // Test metrics exist (fold tested with its own params)
     assert.ok(fm.testMetrics !== undefined, `fold ${fm.fold}: must have testMetrics`);
-    // Verify: its selected params are NOT the deployment params (if they differ)
-    if (JSON.stringify(fm.selectedParameters) !== JSON.stringify(deploymentParams)) {
-      // This is the key proof: earlier fold used its own params, not deployment
-      assert.notDeepStrictEqual(fm.selectedParameters, deploymentParams,
-        `fold ${fm.fold}: own params differ from deployment — proves no backward application`);
-    }
+
+    // Prove this earlier fold's own params differ from deployment — no conditional
+    assert.notDeepStrictEqual(fm.selectedParameters, deploymentParams,
+      `fold ${fm.fold}: earlier selectedParams must differ from deploymentParams — no backward application`);
+
+    // Captured test params for this fold must match its own selectedParameters
+    const capt = capturedTestParams[fm.fold];
+    assert.ok(capt !== undefined, `fold ${fm.fold}: must have captured test params`);
+    assert.deepStrictEqual(capt, fm.selectedParameters,
+      `fold ${fm.fold}: captured test params must equal its own selectedParameters`);
+
+    earlierDiffersFromDeployment = true;
   }
+
+  assert.ok(earlierDiffersFromDeployment, 'at least one earlier fold selectedParameters must differ from deployment');
 
   // The last selected fold (deployment fold): selected=true, usedForDeployment=true
   const deploymentFold = selectedFolds[selectedFolds.length - 1];
@@ -660,6 +712,12 @@ test('102. causal: earlier folds have selected=false, own frozen test params, no
   assert.equal(deploymentFold.usedForDeployment, true, 'deployment fold usedForDeployment must be true');
   assert.deepStrictEqual(deploymentFold.selectedParameters, deploymentParams,
     'deployment fold params must match deployment parameters');
+
+  // Captured test params for deployment fold must match deployment
+  const captDeploy = capturedTestParams[deploymentFold.fold];
+  assert.ok(captDeploy !== undefined, 'deployment fold must have captured test params');
+  assert.deepStrictEqual(captDeploy, deploymentParams,
+    'deployment fold captured test params must equal deploymentParams');
 });
 
 // ── Insufficient development throws ────────────────────────────
@@ -759,7 +817,7 @@ test('110. selectionMode: explicit causal-per-fold accepted', () => {
 
 test('111. selectionMode: invalid value throws fail-closed', () => {
   assert.throws(
-    () => runWalkForward({ ...CFG, selectionMode: 'global' as any }, COST, sim, { clock: CLOCK }),
+    () => runWalkForward({ ...CFG, selectionMode: 'global' as unknown as WalkForwardConfig }, COST, sim, { clock: CLOCK }),
     /INVALID_SELECTION_MODE/,
     'must throw on invalid selectionMode');
 });
@@ -787,40 +845,51 @@ test('114. holdout: negative fractional minBars still throws', () => {
   assert.throws(() => allocateFinalHoldout({ ...CFG, totalBars: 50000, finalHoldoutMinBars: -0.5 }));
 });
 
-// ═══ R8 corrective: footprint boundary (legal one-fold + too small) ═══
+// ═══ R8 corrective: footprint boundary (legal one-fold at exact boundary + one bar less) ═══
 
-test('115. holdout: footprint — legal boundary produces exactly one development fold', () => {
-  // Minimum footprint for one fold with default purge/embargo:
-  // featureLookback(0) + train(500) + val(300) + test(300) + 2*max(purge(20), labelHorizon(0)) = 1140
-  // gap = max(20, 10, 0) = 20
-  // Need: totalBars - holdout - gap >= footprint → totalBars = holdout + gap + footprint
-  // holdout = max(ceil(totalBars*0.15), 3*testBars=900)
-  const cfgExact = { ...CFG, totalBars: 1360, trainBars: 500, validationBars: 300, testBars: 300, purgeBars: 20, embargoBars: 10, labelHorizonBars: 0 };
-  // holdout = max(ceil(1360*0.15)=204, 900) = 900
-  // devEndExclusive = (1360-900) - 20 = 440
-  // footprint = 0 + 500 + 300 + 300 + 2*20 = 1140
-  // 440 < 1140 → throws! Need larger totalBars.
-  // Let's compute: totalBars = holdout + gap + footprint = 900 + 20 + 1140 = 2060
-  // But holdout = max(ceil(totalBars*0.15), 900), with 2060: ceil(309)=309, max=900.
-  // So: totalBars=2060, holdout=900, devEndExclusive=2060-900-20=1140, footprint=1140 → exactly fits
-  const cfgOneFold = { ...CFG, totalBars: 2070, trainBars: 500, validationBars: 300, testBars: 300, purgeBars: 20, embargoBars: 10, labelHorizonBars: 0 };
+test('115. holdout: footprint — totalBars=2060 (developmentEndExclusive=1140) produces exactly one development fold', () => {
+  // Minimum footprint for one fold: featureLookback(0) + train(500) + val(300) + test(300) + 2*max(purge(20), labelHorizon(0)) = 1140
+  // holdout = max(ceil(2060*0.15)=309, 3*testBars=900) = 900
+  // gap = max(purge=20, embargo=10, labelHorizon=0) = 20
+  // devEndExclusive = 2060 - 900 - 20 = 1140  ← exact footprint match
+  const cfgOneFold = { ...CFG, totalBars: 2060, trainBars: 500, validationBars: 300, testBars: 300, purgeBars: 20, embargoBars: 10, labelHorizonBars: 0 };
   const h = allocateFinalHoldout(cfgOneFold);
-  // holdout = max(ceil(2070*0.15)=311, 900) = 900
-  // devEndExclusive = 2070 - 900 - 20 = 1150
-  // footprint = 0 + 500 + 300 + 300 + 40 = 1140
-  // 1150 >= 1140 → passes
   assert.equal(h.count, 900);
+  assert.equal(h.developmentEndExclusive, 1140, 'developmentEndExclusive must be exactly 1140 at boundary');
   const devCfg = { ...cfgOneFold, totalBars: h.developmentEndExclusive };
   const folds = generateSplits(devCfg);
-  assert.equal(folds.length, 1, 'must produce exactly one development fold at boundary');
+  assert.equal(folds.length, 1, 'must produce exactly one development fold at exact footprint boundary');
 });
 
-test('116. holdout: footprint — immediately smaller throws insufficient development', () => {
-  // Same as above but reduce totalBars by 1: devEndExclusive=1149, footprint=1140 → still passes
-  // Actually: 2070-1=2069, holdout=max(ceil(2069*0.15)=311,900)=900, dev=2069-900-20=1149, footprint=1140 → passes
-  // Need to reduce more: 2059, holdout=max(ceil(2059*0.15)=309,900)=900, dev=2059-900-20=1139, footprint=1140 → fails
+test('116. holdout: footprint — totalBars=2059 (one bar smaller) throws insufficient development', () => {
+  // totalBars=2059: holdout=max(ceil(2059*0.15)=309,900)=900
+  // devEndExclusive = 2059 - 900 - 20 = 1139 < 1140 footprint → insufficient
   assert.throws(
     () => allocateFinalHoldout({ ...CFG, totalBars: 2059, trainBars: 500, validationBars: 300, testBars: 300, purgeBars: 20, embargoBars: 10, labelHorizonBars: 0 }),
     /INSUFFICIENT_DEVELOPMENT/,
-    'must throw when dev region is smaller than one-fold footprint');
+    'must throw when totalBars is one bar below exact footprint boundary');
+});
+
+// ═══ R8 corrective: report identity — selectionMode normalization ═══
+
+test('117. reportId: omitted selectionMode and explicit causal-per-fold produce identical IDs', () => {
+  const cfgOmitted = { ...CFG, totalBars: 50000, trainBars: 500 };
+  const cfgExplicit = { ...cfgOmitted, selectionMode: 'causal-per-fold' as const };
+  const r1 = runWalkForward(cfgOmitted, COST, sim, { paramGrid: [{ a: 1 }], clock: CLOCK });
+  const r2 = runWalkForward(cfgExplicit, COST, sim, { paramGrid: [{ a: 1 }], clock: CLOCK });
+  assert.equal(r1.reportId, r2.reportId,
+    'omitted selectionMode must produce same reportId as explicit causal-per-fold');
+  // Both reports must declare selectionMode exactly as 'causal-per-fold'
+  assert.equal(r1.selectionMode, 'causal-per-fold');
+  assert.equal(r2.selectionMode, 'causal-per-fold');
+});
+
+test('118. reportId: makeReportId always includes selectionMode=causal-per-fold in serialization', () => {
+  const idOmitted = makeReportId(CFG, COST);
+  const idExplicit = makeReportId({ ...CFG, selectionMode: 'causal-per-fold' }, COST);
+  assert.equal(idOmitted, idExplicit,
+    'makeReportId must normalize omitted and explicit selectionMode to identical IDs');
+  // makeReportId with different selectionMode in cfg (if present) should still normalize
+  const idWithField = makeReportId({ ...CFG, selectionMode: 'causal-per-fold' }, COST);
+  assert.equal(makeReportId(CFG, COST), idWithField);
 });

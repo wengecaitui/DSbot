@@ -136,9 +136,29 @@ export function makeReportId(
   const effectiveMin = cfg.finalHoldoutMinBars ?? 3 * cfg.testBars;
   const effectiveCount = effectiveHoldout
     ? effectiveHoldout.count
-    : Math.max(Math.ceil(cfg.totalBars * effectiveRatio), effectiveMin);
+    : Math.max(Math.ceil(cfg.totalBars * effectiveRatio), Math.ceil(effectiveMin));
+  // Normalize selectionMode: omitted and explicit 'causal-per-fold' produce identical IDs.
+  const selectionMode: 'causal-per-fold' = 'causal-per-fold';
+  const featureLookback = cfg.featureLookbackBars ?? 0;
+  const labelHorizon = cfg.labelHorizonBars ?? 0;
+  const minFoldBars = cfg.minFoldBars ?? 0;
   return createHash('sha256').update(JSON.stringify({
-    cfg: { ...cfg, finalHoldoutRatio: effectiveRatio, finalHoldoutMinBars: effectiveMin },
+    // Enumerate cfg fields explicitly for deterministic JSON key ordering.
+    cfg: {
+      totalBars: cfg.totalBars,
+      trainBars: cfg.trainBars,
+      validationBars: cfg.validationBars,
+      testBars: cfg.testBars,
+      purgeBars: cfg.purgeBars,
+      embargoBars: cfg.embargoBars,
+      mode: cfg.mode,
+      featureLookbackBars: featureLookback,
+      labelHorizonBars: labelHorizon,
+      minFoldBars,
+      finalHoldoutRatio: effectiveRatio,
+      finalHoldoutMinBars: effectiveMin,
+      selectionMode,
+    },
     cost, datasetHash: opts.datasetHash ?? '', selected: opts.selected ?? {},
     simVersion: opts.simVersion ?? '', contractVersion: opts.contractVersion ?? '4A4-R8',
     effectiveHoldoutCount: effectiveCount,
