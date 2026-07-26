@@ -918,3 +918,26 @@ test('118. reportId: makeReportId always includes selectionMode=causal-per-fold 
   const idWithField = makeReportId({ ...CFG, selectionMode: 'causal-per-fold' }, COST);
   assert.equal(makeReportId(CFG, COST), idWithField);
 });
+
+// ═══ R8 corrective: report identity — finalHoldoutRange not just count ═══
+
+test('119. reportId: equal effective count but different start/end produces different IDs', () => {
+  const hA = { start: 40000, end: 45000, count: 1000 };
+  const hB = { start: 41000, end: 46000, count: 1000 };
+  // count is equal, but start/end differ
+  assert.equal(hA.count, hB.count, 'counts must be equal for this adversarial test');
+  assert.notEqual(hA.start, hB.start, 'starts must differ');
+  const id1 = makeReportId(CFG, COST, hA);
+  const id2 = makeReportId(CFG, COST, hB);
+  assert.notEqual(id1, id2,
+    'same count but different start/end must produce different reportId');
+});
+
+test('120. reportId: omitted effectiveHoldout still produces deterministic ID (backward compat)', () => {
+  const id1 = makeReportId(CFG, COST);
+  const id2 = makeReportId(CFG, COST);
+  assert.equal(id1, id2, 'makeReportId without effectiveHoldout must be deterministic');
+  // Omitted effectiveHoldout and one with only-count must differ from full-range
+  const idWithRange = makeReportId(CFG, COST, { start: 40000, end: 45000, count: 1000 });
+  assert.notEqual(id1, idWithRange, 'full-range ID must differ from count-only ID');
+});

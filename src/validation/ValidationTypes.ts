@@ -121,6 +121,9 @@ export interface StressScenario { readonly name: string; readonly multiplier: nu
  *   - effective holdout count = max(ceil(totalBars * effectiveRatio), effectiveMinBars)
  *
  * Omitted defaults and explicit equivalent defaults produce the same reportId.
+ *
+ * When `effectiveHoldout` is provided, the full normalized range (start, end, count)
+ * is serialized into the identity. When omitted, only the computed count is included.
  */
 export function makeReportId(
   cfg: WalkForwardConfig,
@@ -161,7 +164,9 @@ export function makeReportId(
     },
     cost, datasetHash: opts.datasetHash ?? '', selected: opts.selected ?? {},
     simVersion: opts.simVersion ?? '', contractVersion: opts.contractVersion ?? '4A4-R8',
-    effectiveHoldoutCount: effectiveCount,
+    finalHoldoutRange: effectiveHoldout
+      ? { start: effectiveHoldout.start, end: effectiveHoldout.end, count: effectiveHoldout.count }
+      : { count: effectiveCount },
     deployment: opts.deploymentParams ?? {},
   })).digest('hex').slice(0, 16);
 }

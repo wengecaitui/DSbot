@@ -3,11 +3,11 @@
 import type {
   WalkForwardConfig, CostConfig, CostBreakdown, PerformanceMetrics, FoldMetrics,
   ParameterCandidate, ValidationReport, ValidationWarning, StressScenario,
-  ValidationClock, FinalHoldoutConfig, CandidateResult,
+  ValidationClock, CandidateResult,
 } from './ValidationTypes';
-import { makeReportId, deepFreeze, VALIDATION_WARNINGS, systemValidationClock } from './ValidationTypes';
-import { generateSplits, validateFoldIsolation, assertFoldIsolation } from './ChronologicalSplit';
-import { allocateFinalHoldout, computeHoldoutCount } from './FinalHoldout';
+import { makeReportId, deepFreeze, systemValidationClock } from './ValidationTypes';
+import { generateSplits, assertFoldIsolation } from './ChronologicalSplit';
+import { allocateFinalHoldout } from './FinalHoldout';
 
 export interface SimResult { grossPnl: number; volume: number; turnover: number; maxDrawdown: number; sharpe: number; sortino: number; profitFactor: number; trades: number; }
 
