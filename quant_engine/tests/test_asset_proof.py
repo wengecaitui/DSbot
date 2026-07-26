@@ -191,6 +191,28 @@ class StrategyProofTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INSUFFICIENT_DEVELOPMENT_BARS"):
             run_causal_walk_forward(adapter, gapped, [{"period": 4}], WalkForwardConfig(30, 10, 10), segmented, segment_index=0)
 
+    def test_transaction_costs_are_explicit_and_report_identity_bound(self):
+        frame = bars(120)
+        audit = audit_ohlcv(frame, pd.Timedelta("4h"), GapPolicy.REJECT)
+        low_cost = run_causal_walk_forward(
+            AlternatingAdapter(), frame, [{"period": 4}],
+            WalkForwardConfig(30, 10, 10, fee_bps=1, slippage_bps=0), audit,
+        )
+        high_cost = run_causal_walk_forward(
+            AlternatingAdapter(), frame, [{"period": 4}],
+            WalkForwardConfig(30, 10, 10, fee_bps=10, slippage_bps=5), audit,
+        )
+        self.assertEqual(low_cost["config"]["fee_bps"], 1)
+        self.assertEqual(high_cost["config"]["slippage_bps"], 5)
+        self.assertNotEqual(low_cost["reportId"], high_cost["reportId"])
+        self.assertLess(high_cost["finalHoldoutMetrics"]["netReturn"], low_cost["finalHoldoutMetrics"]["netReturn"])
+
+    def test_invalid_transaction_costs_fail_closed(self):
+        frame = bars(120)
+        audit = audit_ohlcv(frame, pd.Timedelta("4h"), GapPolicy.REJECT)
+        with self.assertRaisesRegex(ValueError, "TRANSACTION_COST_CONFIG_INVALID"):
+            run_causal_walk_forward(AlternatingAdapter(), frame, [{"period": 4}], WalkForwardConfig(30, 10, 10, fee_bps=float("nan")), audit)
+
 
 if __name__ == "__main__":
     unittest.main()
