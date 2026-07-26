@@ -6,7 +6,7 @@
     "NOT STRATEGY PROMOTION",
     "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
   ],
-  "engineCommit": "03d2472cee1c6b7fe5f196c36edfa0aeb40be978",
+  "engineCommit": "98ffc6d5bfa48e0c237c94843d6549f2d7987427",
   "asset": {
     "id": "TradeIQCrazyScalping",
     "pineSha256": "87b84ac22c43965e726f1487e7cc0211b7361fa1d868103a5ee07253b4bb64db",
@@ -21,9 +21,11 @@
     "dataframeSha256": "2eea5c03be721e90b8d138d6cde3d953d02342f67446a45860be87b3127cce42"
   },
   "proof": {
-    "privateProofId": "88494390724c91b0f352e3c7329a9e4a117008dd9e0b9bcd5fe4d09cd6babc05",
+    "privateProofId": "e2050505e6a54d79b3abdd7fb396eae53e26b4b7283aa81a5448c5302a650a77",
     "candidateGridSha256": "094639e7fabfb6b45bca1a45edcc1c69ae658e7f0f0ac083a3758b84ba6974a9",
-    "walkForwardReportId": "9bb3d28df79bd4f116e88efd07400d8bd9f75375aa22e81b9b3c2b2da8c124f5",
+    "walkForwardReportId": "11b52eff6e34a5941e27f54514c868a6d595cabafb8b7406bd5273a908ac05fe",
+    "feeBps": 4.0,
+    "slippageBps": 1.0,
     "developmentFolds": 3,
     "testEvaluationCount": 3,
     "finalHoldoutEvaluationCount": 1,
@@ -37,5 +39,5 @@
     "eligible": false,
     "reason": "NEGATIVE_FINAL_HOLDOUT_RETURN_AND_PRIVATE_ADAPTER_NOT_REGISTERED"
   },
-  "receiptId": "c145bbae04be361a412f96c64d11ac9fe22d19011c8b333166b1665272fcdefb"
+  "receiptId": "3ccf8bb3d56596044312b918d3ddb5be54c9a5586fd22f2e1e2e53c169a28ea2"
 }

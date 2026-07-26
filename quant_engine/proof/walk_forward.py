@@ -23,6 +23,8 @@ class WalkForwardConfig:
     embargo_bars: int = 0
     feature_lookback_bars: int = 0
     label_horizon_bars: int = 0
+    fee_bps: float = 4.0
+    slippage_bps: float = 1.0
     final_holdout_ratio: float = 0.15
     final_holdout_min_bars: int | None = None
 
@@ -49,6 +51,8 @@ def run_causal_walk_forward(
         raise ValueError("FINAL_HOLDOUT_RATIO_INVALID")
     if config.final_holdout_min_bars is not None and config.final_holdout_min_bars < 0:
         raise ValueError("FINAL_HOLDOUT_MIN_INVALID")
+    if not math.isfinite(config.fee_bps) or not math.isfinite(config.slippage_bps) or min(config.fee_bps, config.slippage_bps) < 0:
+        raise ValueError("TRANSACTION_COST_CONFIG_INVALID")
     if data_audit.get("dataframeSha256") != dataframe_sha256(bars):
         raise ValueError("DATA_AUDIT_SHA_MISMATCH")
     segments = data_audit.get("segments")
@@ -104,12 +108,12 @@ def run_causal_walk_forward(
         test_end = ranges["test"]["endExclusive"]
         candidate_results = []
         for candidate in candidates:
-            metrics = simulate_window(adapter, working_bars, candidate, validation_start, validation_end)
+            metrics = simulate_window(adapter, working_bars, candidate, validation_start, validation_end, config.fee_bps, config.slippage_bps)
             candidate_results.append({"parameters": dict(candidate), "metrics": metrics})
         ranked = sorted(candidate_results, key=lambda item: (-item["metrics"]["netReturn"], _canonical_sha(item["parameters"])))
         selected = ranked[0]
         frozen_parameters = json.loads(json.dumps(selected["parameters"], sort_keys=True))
-        test_metrics = simulate_window(adapter, working_bars, frozen_parameters, test_start, test_end)
+        test_metrics = simulate_window(adapter, working_bars, frozen_parameters, test_start, test_end, config.fee_bps, config.slippage_bps)
         test_calls += 1
         folds.append({
             "fold": len(folds),
@@ -122,7 +126,7 @@ def run_causal_walk_forward(
 
     if deployment is None:
         raise ValueError("NO_DEPLOYMENT_PARAMETERS")
-    final_holdout_metrics = simulate_window(adapter, working_bars, deployment, holdout_start, len(working_bars))
+    final_holdout_metrics = simulate_window(adapter, working_bars, deployment, holdout_start, len(working_bars), config.fee_bps, config.slippage_bps)
     report = {
         "schemaVersion": "stage-4a9.causal-walk-forward.v1",
         "strategyId": adapter.strategy_id,

@@ -8,6 +8,7 @@ This stage closes the generic execution semantics required by the only native Pi
 - Pine entries can attach a positive stop distance.
 - Signals are evaluated on closed bars and execute at the next bar open.
 - Protective stops execute against subsequent OHLC ranges, including conservative adverse opening-gap fills.
+- Fee and slippage basis points are explicit Walk-Forward configuration fields and are included in report identity.
 - Flat bars are evaluated normally, so a strategy can generate its first entry without an existing position.
 
 These are generic interfaces. The public repository does not contain the private faithful TradeIQ adapter or historical data.

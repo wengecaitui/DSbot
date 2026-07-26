@@ -39,6 +39,7 @@ if (receipt.dataset.gapPolicy !== 'reject' || receipt.dataset.gapCount !== 0) th
 if (receipt.proof.developmentFolds <= 0 || receipt.proof.testEvaluationCount !== receipt.proof.developmentFolds) throw new Error('RECEIPT_TEST_EXACT_ONCE_INVALID');
 if (receipt.proof.finalHoldoutEvaluationCount !== 1 || receipt.proof.finalHoldoutTrades <= 0) throw new Error('RECEIPT_HOLDOUT_INVALID');
 if (!Number.isFinite(receipt.proof.finalHoldoutNetReturn)) throw new Error('RECEIPT_METRICS_INVALID');
+if (!Number.isFinite(receipt.proof.feeBps) || !Number.isFinite(receipt.proof.slippageBps) || Math.min(receipt.proof.feeBps, receipt.proof.slippageBps) < 0) throw new Error('RECEIPT_COST_CONFIG_INVALID');
 if (receipt.proof.causalityCandidates !== 3 || receipt.proof.causalityCheckpointsPerCandidate !== 124 || receipt.proof.causalityFields !== 9) throw new Error('RECEIPT_CAUSALITY_INVALID');
 if (receipt.promotion.eligible !== false) throw new Error('RECEIPT_PROMOTION_MUST_BE_FALSE');
 const unsigned = { ...receipt };
