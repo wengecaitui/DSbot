@@ -267,10 +267,14 @@ test('26. health after unregister still accessible', async () => {
   finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('27. existing registry behavior unchanged', async () => {
+test('27. existing registry behavior unchanged', async (t) => {
   const { binding, dir } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const r = new PaperRuntimeRegistry(); r.register(binding); await r.run('a1', SIG, P);
-    assert.equal(r.snapshot('a1', EXCH_BG).processedFills, 1); await r.run('a1', SIG, P);
+  try { const r = new PaperRuntimeRegistry(); r.register(binding); const first = await r.run('a1', SIG, P);
+    assert.equal(r.snapshot('a1', EXCH_BG).processedFills, 1);
+    assert.ok(first.pipelineResult.tradeIntent, 'first run must produce a trade intent');
+    const firstCreatedAt = first.pipelineResult.tradeIntent.createdAt;
+    t.mock.method(Date, 'now', () => firstCreatedAt + 1);
+    await r.run('a1', SIG, P);
     assert.equal(r.snapshot('a1', EXCH_BG).processedFills, 2); }
   finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
