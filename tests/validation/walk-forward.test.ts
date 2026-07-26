@@ -199,30 +199,39 @@ test('80. causal: TWO runs with SEPARATE ledgers — fold0 identical train/val, 
   assert.ok(splits.length >= 2, `need >=2 folds, got ${splits.length}`);
 
   const f0 = splits[0];
-  const f1 = splits[1];
-  const f0ValRange = `${f0.validation.start}-${f0.validation.end}`;
-  const f1ValRange = `${f1.validation.start}-${f1.validation.end}`;
+  const laterSplits = splits.slice(1);
 
   // Run 1: uniform simulator — both candidates produce same output
   const l1 = mkLedger();
   const r1 = runWalkForward(cfgA, COST, sim, { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l1 });
 
-  // Run 2: separate ledger. Fold0 train/val must be IDENTICAL to Run 1.
-  // Fold1+ train/val mutate to flip selection — use exact generated phase ranges.
+  // Run 2: separate ledger. Fold0 ALL phases = baseline (identical to Run 1).
+  // Later-fold CANDIDATE train/val only mutate to flip selection. Later-fold
+  // test phases and final holdout remain baseline.
   const l2 = mkLedger();
   const r2 = runWalkForward(cfgA, COST,
     (s, e, p) => {
-      // Fold0 train/val: identical to Run 1 uniform output
-      if (s >= f0.train.start && e <= f0.validation.end) {
+      // Fold0: all phases (train, val, test) = baseline (identical to uniform sim)
+      if ((s === f0.train.start && e === f0.train.end) ||
+          (s === f0.validation.start && e === f0.validation.end) ||
+          (s === f0.test.start && e === f0.test.end)) {
         return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
       }
-      // Fold1+ train/val: bias candidate 'b' to flip later selection
-      const bonus = p && 'b' in p ? (e - s) * 10 : (e - s) * 3;
-      return { grossPnl: bonus, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+      // Later folds: only candidate train/val calls bias 'b'. Test + holdout = baseline.
+      const isLaterCandidate = p !== undefined && laterSplits.some(sp =>
+        (s === sp.train.start && e === sp.train.end) ||
+        (s === sp.validation.start && e === sp.validation.end));
+      if (isLaterCandidate) {
+        const bonus = 'b' in p ? (e - s) * 10 : (e - s) * 3;
+        return { grossPnl: bonus, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+      }
+      // Everything else (later-fold test phases, holdout): baseline
+      return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
     },
     { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l2 });
 
   // Fold 0: deepStrictEqual for selectedCandidateId, selectedParameters, testMetrics
+  const fold0Idx = f0.fold;
   assert.ok(r1.folds[0].selectedCandidateId !== undefined, 'fold0 must have selection');
   assert.deepStrictEqual(r1.folds[0].selectedCandidateId, r2.folds[0].selectedCandidateId,
     'fold0 selectedCandidateId must be identical across runs');
@@ -231,9 +240,10 @@ test('80. causal: TWO runs with SEPARATE ledgers — fold0 identical train/val, 
   assert.deepStrictEqual(r1.folds[0].testMetrics, r2.folds[0].testMetrics,
     'fold0 testMetrics must be identical across runs');
 
-  // Fold 0: deepStrictEqual exact ledger records
-  const f0Ledger1 = l1.log.filter(x => x.fold === 0);
-  const f0Ledger2 = l2.log.filter(x => x.fold === 0);
+  // Fold 0: filter ledger by the actual chronological fold id, assert non-empty
+  const f0Ledger1 = l1.log.filter(x => x.fold === fold0Idx);
+  const f0Ledger2 = l2.log.filter(x => x.fold === fold0Idx);
+  assert.ok(f0Ledger1.length > 0, 'fold0 ledger must be non-empty');
   assert.deepStrictEqual(f0Ledger1, f0Ledger2, 'fold0 ledger records must be identical across runs');
 
   // Assert at least one later fold's selection differs
@@ -332,23 +342,35 @@ test('82. causal-expanding: SEPARATE ledgers, later train CONTAINS earlier test,
       s.train.start <= prev.test.start && s.train.end >= prev.test.end));
   assert.ok(containsEarlierTest, 'at least one later train must fully contain an earlier test interval');
 
+  const f0 = splits[0];
+  const laterSplits = splits.slice(1);
+
   // Run 1: uniform constant simulator with separate ledger
   const l1 = mkLedger();
   const simConst = () => ({ grossPnl: 1000, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 });
   const r1 = runWalkForward(cfgE, COST, simConst, { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l1 });
 
-  // Run 2: separate ledger. Mutate only exact later-fold candidate train/validation ranges.
-  // Fold0 sim output stays identical — fold0 selection/params/test/ledger must be frozen.
+  // Run 2: separate ledger. Fold0 ALL phases = baseline. Later-fold CANDIDATE
+  // train/val only mutate to flip selection; test + holdout stay baseline.
   const l2 = mkLedger();
   const r2 = runWalkForward(cfgE, COST,
     (s, e, p) => {
-      // Fold0: identical to Run 1 (all phases inside fold0 test end)
-      if (s >= splits[0].train.start && e <= splits[0].test.end) {
+      // Fold0: all phases = baseline (identical to Run 1)
+      if ((s === f0.train.start && e === f0.train.end) ||
+          (s === f0.validation.start && e === f0.validation.end) ||
+          (s === f0.test.start && e === f0.test.end)) {
         return { grossPnl: 1000, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
       }
-      // Fold1+ candidate train/val: bias 'b' to flip later selection
-      const bonus = p && 'b' in p ? 10000 : 1000;
-      return { grossPnl: bonus, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+      // Later folds: only candidate train/val calls bias 'b'. Test + holdout = baseline.
+      const isLaterCandidate = p !== undefined && laterSplits.some(sp =>
+        (s === sp.train.start && e === sp.train.end) ||
+        (s === sp.validation.start && e === sp.validation.end));
+      if (isLaterCandidate) {
+        const bonus = 'b' in p ? 10000 : 1000;
+        return { grossPnl: bonus, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+      }
+      // Everything else (later-fold test phases, holdout): baseline
+      return { grossPnl: 1000, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
     },
     { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l2 });
 
@@ -357,9 +379,11 @@ test('82. causal-expanding: SEPARATE ledgers, later train CONTAINS earlier test,
   assert.deepStrictEqual(r1.folds[0].selectedParameters, r2.folds[0].selectedParameters, 'fold0 params frozen');
   assert.deepStrictEqual(r1.folds[0].testMetrics, r2.folds[0].testMetrics, 'fold0 testMetrics frozen');
 
-  // Fold0 ledger records must be identical across runs
-  const f0Ledger1 = l1.log.filter(x => x.fold === 0);
-  const f0Ledger2 = l2.log.filter(x => x.fold === 0);
+  // Fold0 ledger records: filter by actual chronological fold id, assert non-empty
+  const fold0Idx = f0.fold;
+  const f0Ledger1 = l1.log.filter(x => x.fold === fold0Idx);
+  const f0Ledger2 = l2.log.filter(x => x.fold === fold0Idx);
+  assert.ok(f0Ledger1.length > 0, 'fold0 ledger must be non-empty');
   assert.deepStrictEqual(f0Ledger1, f0Ledger2, 'fold0 ledger records must be identical across runs');
 
   // At least one later fold must differ
@@ -650,23 +674,24 @@ test('102. causal: at least 2 folds select DIFFERENT params, capture each test-c
   // Capture each fold's exact test-call params (keyed by fold number, not array index)
   const capturedTestParams: Record<number, Record<string, string | number>> = {};
 
-  // splits is in reverse chronological order: splits[0]=latest fold, splits[last]=earliest fold (fold 0)
-  const earliestFold = splits[splits.length - 1];
-  const laterFolds = splits.slice(0, -1); // all folds except the earliest
+  // splits is oldest-to-newest (generateSplits reverses): splits[0]=earliest,
+  // splits[splits.length-1]=latest/deployment split. Fold IDs descend (newest=0).
+  const deploymentSplit = splits[splits.length - 1];
+  const preDeploymentSplits = splits.slice(0, -1); // all folds except the deployment/latest
 
   const r = runWalkForward(cfgA, COST,
     (s, e, p) => {
-      // Earliest fold val: bias A. All later folds: bias B. Ensures fold0≠deployment.
-      const inEarliestVal = s === earliestFold.validation.start && e === earliestFold.validation.end;
-      const inLaterVal = laterFolds.some(sp => s === sp.validation.start && e === sp.validation.end);
+      // Pre-deployment folds: bias B. Deployment (latest) fold: bias A. Ensures fold0≠deployment.
+      const inDeploymentVal = s === deploymentSplit.validation.start && e === deploymentSplit.validation.end;
+      const inPreDeployVal = preDeploymentSplits.some(sp => s === sp.validation.start && e === sp.validation.end);
       // Capture test call params
       const splitIdx = splits.findIndex(sp => s === sp.test.start && e === sp.test.end);
       if (splitIdx !== -1 && p) capturedTestParams[splits[splitIdx].fold] = { ...p };
 
-      if (inEarliestVal && p && 'a' in p) return { grossPnl: 1e6, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 5.0, sortino: 5.0, profitFactor: 5.0, trades: 15 };
-      if (inEarliestVal && p && 'b' in p) return { grossPnl: 100, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.0, sortino: 1.0, profitFactor: 1.0, trades: 15 };
-      if (inLaterVal && p && 'b' in p) return { grossPnl: 1e6, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 5.0, sortino: 5.0, profitFactor: 5.0, trades: 15 };
-      if (inLaterVal && p && 'a' in p) return { grossPnl: 100, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.0, sortino: 1.0, profitFactor: 1.0, trades: 15 };
+      if (inDeploymentVal && p && 'a' in p) return { grossPnl: 1e6, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 5.0, sortino: 5.0, profitFactor: 5.0, trades: 15 };
+      if (inDeploymentVal && p && 'b' in p) return { grossPnl: 100, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.0, sortino: 1.0, profitFactor: 1.0, trades: 15 };
+      if (inPreDeployVal && p && 'b' in p) return { grossPnl: 1e6, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 5.0, sortino: 5.0, profitFactor: 5.0, trades: 15 };
+      if (inPreDeployVal && p && 'a' in p) return { grossPnl: 100, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.0, sortino: 1.0, profitFactor: 1.0, trades: 15 };
       return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
     },
     { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
