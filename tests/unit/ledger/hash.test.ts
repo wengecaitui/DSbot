@@ -306,9 +306,12 @@ describe('Hash Edge Cases', () => {
   });
 
   it('should handle numeric values correctly', () => {
-    const record1 = createMockDecisionRecord({ confidence: 50 });
-    const record2 = createMockDecisionRecord({ confidence: 50.0 });
-    const record3 = createMockDecisionRecord({ confidence: 51 });
+    // Keep every other hashed field identical. Date.now()-backed fixture defaults can
+    // cross a millisecond boundary and turn this into a timestamp test by accident.
+    const timestamp = 1704067200000;
+    const record1 = createMockDecisionRecord({ timestamp, confidence: 50 });
+    const record2 = createMockDecisionRecord({ timestamp, confidence: 50.0 });
+    const record3 = createMockDecisionRecord({ timestamp, confidence: 51 });
 
     const hash1 = hashDecision(record1);
     const hash2 = hashDecision(record2);
