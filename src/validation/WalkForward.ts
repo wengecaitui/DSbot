@@ -155,21 +155,36 @@ export function runWalkForward(
         testM = makeMetrics(ts, costCfg);
       }
 
-      // Record this fold's selection for deployment resolution
+      // Record this fold's selection for deployment resolution.
+      // Invariant: the selected candidate was already evaluated through the ledger —
+      // its metrics MUST be available. Fallback simulator calls are forbidden.
       if (foldParams && foldCandidateId) {
-        validSelections.push({ foldIdx: s.fold, params: foldParams, candidateId: foldCandidateId, trainMetrics: allCandidates.find(c => c.id === foldCandidateId)?.metrics?.trainMetrics ?? makeMetrics(simulator(s.train.start, s.train.end, foldParams), costCfg), valMetrics: allCandidates.find(c => c.id === foldCandidateId)?.metrics?.validationMetrics ?? makeMetrics(simulator(s.validation.start, s.validation.end, foldParams), costCfg) });
+        const found = allCandidates.find(c => c.id === foldCandidateId);
+        if (!found) throw new Error(`CANDIDATE_NOT_FOUND: fold=${s.fold} id=${foldCandidateId}`);
+        if (!found.metrics?.trainMetrics || !found.metrics?.validationMetrics) {
+          throw new Error(`CANDIDATE_METRICS_MISSING: fold=${s.fold} id=${foldCandidateId}`);
+        }
+        validSelections.push({
+          foldIdx: s.fold, params: foldParams, candidateId: foldCandidateId,
+          trainMetrics: found.metrics.trainMetrics,
+          valMetrics: found.metrics.validationMetrics,
+        });
       }
 
+      // Use already-evaluated candidate's recorded metrics for audit display.
+      // If no candidate was accepted, fall back to the first evaluated candidate
+      // (which was already recorded in the ledger). Never call simulator again.
       const selectedCandidate = allCandidates.find(c => c.id === foldCandidateId);
-      const bestTrainMetrics = selectedCandidate?.metrics?.trainMetrics;
-      const bestValMetrics = selectedCandidate?.metrics?.validationMetrics;
+      const auditCandidate = selectedCandidate ?? allCandidates[0];
+      const bestTrainMetrics = auditCandidate?.metrics?.trainMetrics;
+      const bestValMetrics = auditCandidate?.metrics?.validationMetrics;
 
       const foldM: FoldMetrics = {
         fold: s.fold,
-        trainMetrics: bestTrainMetrics ?? makeMetrics(simulator(s.train.start, s.train.end, {}), costCfg),
-        validationMetrics: bestValMetrics ?? makeMetrics(simulator(s.validation.start, s.validation.end, {}), costCfg),
+        trainMetrics: bestTrainMetrics ?? (() => { throw new Error(`FOLD_METRICS_MISSING: fold=${s.fold}`); })(),
+        validationMetrics: bestValMetrics ?? (() => { throw new Error(`FOLD_METRICS_MISSING: fold=${s.fold}`); })(),
         testMetrics: testM,
-        selected: foldParams !== undefined,
+        selected: false,
         selectedParameters: foldParams,
         selectedCandidateId: foldCandidateId,
         candidateResults: results,
@@ -201,7 +216,7 @@ export function runWalkForward(
     }
   }
 
-  // ── Deployment resolution: only the FINAL valid selection fold ─
+  // ── Deployment resolution: only the FINAL valid selection fold ──
   let deploymentParams: Record<string, string | number> | undefined;
   let deploymentCandidateId: string | undefined;
   let selectedFoldIndex: number | undefined;
@@ -211,14 +226,19 @@ export function runWalkForward(
     deploymentParams = lastSel.params;
     deploymentCandidateId = lastSel.candidateId;
     selectedFoldIndex = lastSel.foldIdx;
-
-    // Mark only the last as usedForDeployment
-    const lastFold = foldMetrics.find(f => f.fold === lastSel.foldIdx);
-    if (lastFold) (lastFold as any).usedForDeployment = true;
   }
 
+  // ── Rebuild foldMetrics immutably: only the deployment fold gets
+  // selected=true and usedForDeployment=true. All earlier folds retain
+  // selectedParameters/id/results but have both flags set to false.
+  const finalFoldMetrics = foldMetrics.map(fm =>
+    fm.fold === selectedFoldIndex
+      ? { ...fm, selected: true, usedForDeployment: true }
+      : fm,
+  );
+
   // Assertions: exactly one fold usedForDeployment
-  const deployFoldCount = foldMetrics.filter(f => f.usedForDeployment).length;
+  const deployFoldCount = finalFoldMetrics.filter(f => f.usedForDeployment).length;
   if (validSelections.length > 0 && deployFoldCount !== 1) {
     throw new Error(`DEPLOYMENT_COUNT_MISMATCH: expected exactly 1 usedForDeployment, got ${deployFoldCount}`);
   }
@@ -228,24 +248,17 @@ export function runWalkForward(
 
   // ── Final Holdout evaluation (exactly one attempt, no retry) ──
   let finalHoldoutMetrics: PerformanceMetrics | undefined;
-  let finalHoldoutAttempts = 0;
 
   if (deploymentParams) {
-    finalHoldoutAttempts = 1;
     ledger.calls++; ledger.log.push({ phase: 'final-holdout', fold: -1, start: finalHoldoutConfig.start, end: finalHoldoutConfig.end });
-    try {
-      const fhSim = simulator(finalHoldoutConfig.start, finalHoldoutConfig.end, deploymentParams);
-      finalHoldoutMetrics = makeMetrics(fhSim, costCfg);
-    } catch (err) {
-      // Failure propagates — exactly one attempt was made, no retry
-      throw err;
-    }
+    const fhSim = simulator(finalHoldoutConfig.start, finalHoldoutConfig.end, deploymentParams);
+    finalHoldoutMetrics = makeMetrics(fhSim, costCfg);
   }
 
   const finalHoldoutEvaluationCount = deploymentParams ? 1 : 0;
 
   // ── Stress scenarios ─────────────────────────────────────────
-  const bm = foldMetrics[0];
+  const bm = finalFoldMetrics[0];
   const stressScenarios: StressScenario[] = bm ? [
     { name: 'baseline', multiplier: 1.0, metrics: bm.trainMetrics },
     { name: '1.5x', multiplier: 1.5, metrics: recomputeCosts(bm.trainMetrics, 1.5, costCfg) },
@@ -273,7 +286,7 @@ export function runWalkForward(
     contractVersion,
     config: cfg,
     costConfig: costCfg,
-    folds: foldMetrics,
+    folds: finalFoldMetrics,
     selectedFold: selectedFoldIndex,
     selectedParameters: deploymentParams,
     deploymentParameters: deploymentParams,

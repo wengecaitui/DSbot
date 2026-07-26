@@ -527,3 +527,80 @@ test('103. holdout: insufficient development bars throws', () => {
   const cfgSmall = { ...CFG, totalBars: 2000, trainBars: 800 };
   assert.throws(() => allocateFinalHoldout(cfgSmall));
 });
+
+// ═══ R8 corrective: ledger contract + deployment flag tests ═════
+
+// ── Simulator actual-call counter equals ledger.calls (grid path) ──
+test('104. ledger: simulator actual-call counter matches ledger.calls exactly', () => {
+  const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
+  let simCalls = 0;
+  const countingSim = (s: number, e: number, _p?: Record<string, string | number>) => {
+    simCalls++;
+    return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+  };
+  const l = mkLedger();
+  const r = runWalkForward(cfgA, COST, countingSim, { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l });
+  assert.equal(simCalls, l.calls, `simulator calls (${simCalls}) must equal ledger.calls (${l.calls})`);
+  assert.ok(r.folds.length > 0, 'must produce folds');
+});
+
+// ── Ledger contract: even when no candidate is accepted, simulator calls match ──
+test('105. ledger: simulator==ledger when all candidates rejected (no accepted)', () => {
+  const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
+  let simCalls = 0;
+  // All candidates have < 5 trades → rejected by evaluateFoldCandidates
+  const noAcceptSim = (s: number, e: number, _p?: Record<string, string | number>) => {
+    simCalls++;
+    return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 2 };
+  };
+  const l = mkLedger();
+  const r = runWalkForward(cfgA, COST, noAcceptSim, { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK, ledger: l });
+  assert.equal(simCalls, l.calls, `simulator calls (${simCalls}) must equal ledger.calls (${l.calls}) even with no accepted candidates`);
+  // No candidate accepted → no selection, no deployment, no holdout
+  assert.equal(r.deploymentParameters, undefined, 'no deployment params when all rejected');
+  assert.equal(r.finalHoldoutEvaluationCount, 0, 'no holdout evaluation when all rejected');
+});
+
+// ── Ledger contract: no-grid path also matches exactly ──────────
+test('106. ledger: no-grid simulator calls match ledger exactly', () => {
+  const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
+  let simCalls = 0;
+  const countingSim = (s: number, e: number, _p?: Record<string, string | number>) => {
+    simCalls++;
+    return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+  };
+  const l = mkLedger();
+  const r = runWalkForward(cfgA, COST, countingSim, { clock: CLOCK, ledger: l });
+  assert.equal(simCalls, l.calls, `no-grid simulator calls (${simCalls}) must equal ledger.calls (${l.calls})`);
+  assert.equal(r.folds.length, l.log.filter(x => x.phase === 'train').length, 'one train call per fold');
+  assert.equal(r.folds.length, l.log.filter(x => x.phase === 'validation').length, 'one validation call per fold');
+});
+
+// ── Deployment flags: selected===usedForDeployment, count===1 with params ──
+test('107. deployment: selected true count === usedForDeployment true count === 1 (with params)', () => {
+  const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
+  const r = wf(cfgA, [{ a: 1 }, { b: 2 }]);
+  const selTrue = r.folds.filter(f => f.selected).length;
+  const deployTrue = r.folds.filter(f => f.usedForDeployment).length;
+  assert.equal(selTrue, 1, `selected true count must be 1, got ${selTrue}`);
+  assert.equal(deployTrue, 1, `usedForDeployment true count must be 1, got ${deployTrue}`);
+  assert.equal(selTrue, deployTrue, 'selected and usedForDeployment counts must be equal');
+  // Verify the deployment fold is the one with both flags true
+  const deployFold = r.folds.find(f => f.usedForDeployment);
+  assert.ok(deployFold, 'must have a deployment fold');
+  assert.equal(deployFold!.selected, true, 'deployment fold must have selected=true');
+  assert.deepStrictEqual(r.deploymentParameters, deployFold!.selectedParameters,
+    'deploymentParameters must match the deploy fold selectedParameters');
+});
+
+// ── Deployment flags: selected===usedForDeployment, count===0 without params ──
+test('108. deployment: selected true count === usedForDeployment true count === 0 (no params)', () => {
+  const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
+  const r = wf(cfgA);
+  const selTrue = r.folds.filter(f => f.selected).length;
+  const deployTrue = r.folds.filter(f => f.usedForDeployment).length;
+  assert.equal(selTrue, 0, `selected true count must be 0 without params, got ${selTrue}`);
+  assert.equal(deployTrue, 0, `usedForDeployment true count must be 0 without params, got ${deployTrue}`);
+  assert.equal(r.deploymentParameters, undefined, 'no deployment params without grid');
+  assert.equal(r.selectedParameters, undefined, 'no selected params without grid');
+});

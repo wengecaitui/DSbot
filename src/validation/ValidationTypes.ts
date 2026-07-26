@@ -61,7 +61,7 @@ export interface FoldMetrics {
   trainMetrics: PerformanceMetrics;
   validationMetrics: PerformanceMetrics;
   testMetrics?: PerformanceMetrics;
-  /** True when this fold contributed a selected candidate (for display). */
+  /** @deprecated True when this fold supplied deploymentParameters (equals usedForDeployment). */
   selected: boolean;
   /** Parameters selected by this fold (causal-per-fold mode). */
   selectedParameters?: Readonly<Record<string, string | number>>;
@@ -123,7 +123,7 @@ export interface StressScenario { readonly name: string; readonly multiplier: nu
 export function makeReportId(
   cfg: WalkForwardConfig,
   cost: CostConfig,
-  effectiveHoldout: { start: number; end: number; count: number } | undefined,
+  effectiveHoldout?: { start: number; end: number; count: number },
   opts: {
     datasetHash?: string; selected?: Record<string, string | number>;
     simVersion?: string; contractVersion?: string;
