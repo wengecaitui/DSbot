@@ -1,8 +1,13 @@
-// Stage 4A4-R8: Walk-forward — causal-per-fold selection, FinalHoldout, deployment contract, phase ledger.
-import type { WalkForwardConfig, CostConfig, CostBreakdown, PerformanceMetrics, FoldMetrics, ParameterCandidate, ValidationReport, ValidationWarning, StressScenario, ValidationClock, FinalHoldoutConfig, FinalHoldoutMetrics, CandidateResult, SelectionMode } from './ValidationTypes';
+// Stage 4A4-R8: Walk-forward — causal-per-fold selection (R8 only), mandatory FinalHoldout, deployment contract, phase ledger.
+
+import type {
+  WalkForwardConfig, CostConfig, CostBreakdown, PerformanceMetrics, FoldMetrics,
+  ParameterCandidate, ValidationReport, ValidationWarning, StressScenario,
+  ValidationClock, FinalHoldoutConfig, CandidateResult,
+} from './ValidationTypes';
 import { makeReportId, deepFreeze, VALIDATION_WARNINGS, systemValidationClock } from './ValidationTypes';
 import { generateSplits, validateFoldIsolation } from './ChronologicalSplit';
-import { allocateFinalHoldout } from './FinalHoldout';
+import { allocateFinalHoldout, computeHoldoutCount } from './FinalHoldout';
 
 export interface SimResult { grossPnl: number; volume: number; turnover: number; maxDrawdown: number; sharpe: number; sortino: number; profitFactor: number; trades: number; }
 
@@ -29,7 +34,14 @@ export function recomputeCosts(baseMetrics: PerformanceMetrics, multiplier: numb
   return { grossReturn: baseMetrics.grossReturn, netReturn: c.netReturn, maxDrawdown: baseMetrics.maxDrawdown, sharpeRatio: baseMetrics.sharpeRatio, sortinoRatio: baseMetrics.sortinoRatio, profitFactor: baseMetrics.profitFactor, tradeCount: baseMetrics.tradeCount, turnover: t, costBreakdown: c, _volume: v };
 }
 
-export function selectParameters(candidates: ParameterCandidate[], minTrades: number = 5): { candidates: ParameterCandidate[]; selectedId?: string; selectedParams?: Record<string, string | number> } {
+/**
+ * Select best candidate from a list — accepts/rejects each, then ranks only accepted
+ * candidates by validationScore (descending), tie-breaking on params JSON.
+ *
+ * This is the ONLY deterministic selection method used in R8. There is no manual
+ * bestCandidate tracking that could strand on a rejected high-score candidate.
+ */
+export function selectParameters(candidates: ParameterCandidate[], minTrades: number = 5): ParameterSelectionResult {
   const out: ParameterCandidate[] = [];
   for (const c of candidates) {
     let accept = true; let reason = '';
@@ -38,10 +50,14 @@ export function selectParameters(candidates: ParameterCandidate[], minTrades: nu
     if (c.validationScore < c.trainScore * 0.5) { if (!reason) reason = 'VALIDATION_DEGRADATION'; accept = false; }
     out.push({ ...c, accepted: accept, rejectionReason: reason || undefined, selected: false });
   }
+  // Only accepted candidates compete for selection
   const pass = out.filter(c => c.accepted).sort((a, b) => b.validationScore - a.validationScore || JSON.stringify(a.params).localeCompare(JSON.stringify(b.params)));
   if (pass.length > 0) pass[0].selected = true;
   return { candidates: out, selectedId: pass[0]?.id, selectedParams: pass[0]?.params };
 }
+
+// Re-export for external consumers
+export type ParameterSelectionResult = { candidates: ParameterCandidate[]; selectedId?: string; selectedParams?: Record<string, string | number> };
 
 // ── Per-fold candidate evaluation (causal-per-fold mode) ────────
 function evaluateFoldCandidates(
@@ -76,66 +92,62 @@ export function runWalkForward(
 ): ValidationReport {
   const clock = opts.clock ?? systemValidationClock;
   const ledger = opts.ledger ?? { calls: 0, log: [] };
-  const mode: SelectionMode = cfg.selectionMode ?? 'global';
   const contractVersion = '4A4-R8';
 
-  // ── Final Holdout allocation ─────────────────────────────────
-  let finalHoldoutConfig: FinalHoldoutConfig | undefined;
-  if (cfg.finalHoldoutRatio !== undefined || cfg.finalHoldoutMinBars !== undefined) {
-    finalHoldoutConfig = allocateFinalHoldout(cfg);
-  }
+  // ── Final Holdout allocation (always-on, normalized defaults) ──
+  const finalHoldoutConfig = allocateFinalHoldout(cfg);
 
-  // ── Fold generation (constrained by holdout if present) ──────
-  const devBars = finalHoldoutConfig ? finalHoldoutConfig.developmentEndExclusive : cfg.totalBars;
+  // ── Fold generation (constrained by holdout) ──────────────────
+  const devBars = finalHoldoutConfig.developmentEndExclusive;
   const devCfg = { ...cfg, totalBars: devBars };
   const splits = generateSplits(devCfg);
   if (splits.length === 0) {
-    // If no development folds exist but holdout was requested, that's a config error
-    throw new Error(finalHoldoutConfig ? 'HOLDOUT_INSUFFICIENT_DEVELOPMENT' : 'SPLIT_INSUFFICIENT_DATA');
+    throw new Error('HOLDOUT_INSUFFICIENT_DEVELOPMENT');
   }
 
   const warnings: ValidationWarning[] = [];
-  const foldMetrics: FoldMetrics[] = [];
 
-  // Validate isolation
+  // ── Validate fold isolation — structural violations throw ─────
   for (let i = 0; i < splits.length; i++) {
     const issues = validateFoldIsolation(splits[i], splits[i + 1]);
-    if (issues.length > 0) warnings.push('LEAKAGE_DETECTED');
+    if (issues.length > 0) {
+      throw new Error(`FOLD_ISOLATION_VIOLATION: ${issues.join('; ')}`);
+    }
   }
 
-  let deploymentParams: Record<string, string | number> | undefined;
-  let deploymentCandidateId: string | undefined;
-  let selectedFoldIndex: number | undefined;
+  const foldMetrics: FoldMetrics[] = [];
 
-  // ── Mode dispatch ────────────────────────────────────────────
-  if (mode === 'causal-per-fold' && opts.paramGrid && opts.paramGrid.length > 0) {
-    // Causal-per-fold: each fold independently selects from its own train+validation
+  // Accumulate per-fold selections. Only the last valid selection fold
+  // becomes the deployment fold. usedForDeployment is set after the loop.
+  interface FoldSelection {
+    foldIdx: number;
+    params: Record<string, string | number>;
+    candidateId: string;
+    trainMetrics: PerformanceMetrics;
+    valMetrics: PerformanceMetrics;
+  }
+  const validSelections: FoldSelection[] = [];
+
+  // ── Causal-per-fold (R8 only mode) ────────────────────────────
+  if (opts.paramGrid && opts.paramGrid.length > 0) {
     for (const s of splits) {
       const results: CandidateResult[] = [];
-      let bestCandidate: ParameterCandidate | undefined;
-      let bestTrainMetrics: PerformanceMetrics | undefined;
-      let bestValMetrics: PerformanceMetrics | undefined;
+      const allCandidates: ParameterCandidate[] = [];
 
-      for (let ci = 0; ci < opts.paramGrid.length; ci++) {
-        const p = opts.paramGrid[ci];
+      for (const p of opts.paramGrid) {
         const ev = evaluateFoldCandidates(s.fold, s, p, simulator, costCfg, 5, ledger);
         if (!ev) continue;
         const { candidate, trainMetrics, valMetrics } = ev;
         results.push({ candidateId: candidate.id, params: candidate.params, validationScore: candidate.validationScore, trainScore: candidate.trainScore, accepted: candidate.accepted, rejectionReason: candidate.rejectionReason });
-
-        if (!bestCandidate || (candidate.accepted && candidate.validationScore > (bestCandidate.validationScore ?? -Infinity))) {
-          bestCandidate = candidate;
-          bestTrainMetrics = trainMetrics;
-          bestValMetrics = valMetrics;
-        }
+        allCandidates.push(candidate);
       }
 
-      // Select best for this fold
-      const foldParams = bestCandidate?.accepted ? bestCandidate.params : undefined;
-      const foldCandidateId = bestCandidate?.accepted ? bestCandidate.id : undefined;
-      if (bestCandidate && foldParams) bestCandidate.selected = true;
+      // Use selectParameters for accepted-only deterministic ranking
+      const sel = selectParameters(allCandidates);
+      const foldParams = sel.selectedParams;
+      const foldCandidateId = sel.selectedId;
 
-      // Run test with fold's own selection
+      // Run test with fold's own selection (only if accepted)
       let testM: PerformanceMetrics | undefined;
       if (foldParams) {
         ledger.calls++; ledger.log.push({ phase: 'test', fold: s.fold, start: s.test.start, end: s.test.end });
@@ -143,12 +155,14 @@ export function runWalkForward(
         testM = makeMetrics(ts, costCfg);
       }
 
-      // Deployment params = last valid selection
-      if (foldParams) {
-        deploymentParams = foldParams;
-        deploymentCandidateId = foldCandidateId;
-        selectedFoldIndex = s.fold;
+      // Record this fold's selection for deployment resolution
+      if (foldParams && foldCandidateId) {
+        validSelections.push({ foldIdx: s.fold, params: foldParams, candidateId: foldCandidateId, trainMetrics: allCandidates.find(c => c.id === foldCandidateId)?.metrics?.trainMetrics ?? makeMetrics(simulator(s.train.start, s.train.end, foldParams), costCfg), valMetrics: allCandidates.find(c => c.id === foldCandidateId)?.metrics?.validationMetrics ?? makeMetrics(simulator(s.validation.start, s.validation.end, foldParams), costCfg) });
       }
+
+      const selectedCandidate = allCandidates.find(c => c.id === foldCandidateId);
+      const bestTrainMetrics = selectedCandidate?.metrics?.trainMetrics;
+      const bestValMetrics = selectedCandidate?.metrics?.validationMetrics;
 
       const foldM: FoldMetrics = {
         fold: s.fold,
@@ -159,7 +173,8 @@ export function runWalkForward(
         selectedParameters: foldParams,
         selectedCandidateId: foldCandidateId,
         candidateResults: results,
-        usedForDeployment: foldParams !== undefined && foldParams === deploymentParams,
+        // usedForDeployment set AFTER the loop — only the final valid selection gets true
+        usedForDeployment: false,
       };
 
       if (bestTrainMetrics && bestTrainMetrics.tradeCount < 5) warnings.push('INSUFFICIENT_SAMPLE');
@@ -168,63 +183,14 @@ export function runWalkForward(
 
       foldMetrics.push(foldM);
     }
-  } else if (mode === 'global' && opts.paramGrid && opts.paramGrid.length > 0) {
-    // Global selection (backward-compatible): evaluate all candidates across all folds
-    const fullCandidates: ParameterCandidate[] = [];
-    for (let ci = 0; ci < opts.paramGrid.length; ci++) {
-      const p = opts.paramGrid[ci];
-      const valNets: number[] = [];
-      let minTrainTrades = Infinity; let minValTrades = Infinity;
-      let trainTotalNet = 0; let valTotalNet = 0;
-      let lastTrainMetrics: PerformanceMetrics | undefined;
-      let lastValMetrics: PerformanceMetrics | undefined;
-      for (const s of splits) {
-        const tr = simulator(s.train.start, s.train.end, p); ledger.calls++; ledger.log.push({ phase: 'train', fold: s.fold, candidateId: `p${ci}`, start: s.train.start, end: s.train.end });
-        const trainM = makeMetrics(tr, costCfg);
-        const vr = simulator(s.validation.start, s.validation.end, p); ledger.calls++; ledger.log.push({ phase: 'validation', fold: s.fold, candidateId: `p${ci}`, start: s.validation.start, end: s.validation.end });
-        const valM = makeMetrics(vr, costCfg);
-        valNets.push(valM.netReturn); minTrainTrades = Math.min(minTrainTrades, tr.trades); minValTrades = Math.min(minValTrades, vr.trades);
-        trainTotalNet += trainM.netReturn; valTotalNet += valM.netReturn;
-        lastTrainMetrics = trainM; lastValMetrics = valM;
-      }
-      const avgValNet = valTotalNet / splits.length;
-      fullCandidates.push({
-        id: `p${ci}`, params: p, validationScore: avgValNet, trainScore: trainTotalNet / splits.length,
-        foldScores: valNets,
-        metrics: { fold: 0, trainMetrics: lastTrainMetrics!, validationMetrics: lastValMetrics!, selected: false, usedForDeployment: false },
-        minTrainTrades, minValidationTrades: minValTrades,
-        accepted: true, selected: false,
-      });
-    }
-    const sel = selectParameters(fullCandidates);
-    if (sel.selectedId) { deploymentParams = sel.selectedParams; deploymentCandidateId = sel.selectedId; selectedFoldIndex = 0; }
-    if (sel.candidates.some(c => !c.accepted)) warnings.push('PARAMETER_INSTABILITY');
-
-    // Evaluate folds with global selection
-    for (const s of splits) {
-      const tr = simulator(s.train.start, s.train.end, deploymentParams); ledger.calls++; ledger.log.push({ phase: 'train', fold: s.fold, start: s.train.start, end: s.train.end });
-      const trainM = makeMetrics(tr, costCfg);
-      const vr = simulator(s.validation.start, s.validation.end, deploymentParams); ledger.calls++; ledger.log.push({ phase: 'validation', fold: s.fold, start: s.validation.start, end: s.validation.end });
-      const valM = makeMetrics(vr, costCfg);
-      let testM: PerformanceMetrics | undefined;
-      if (deploymentParams) {
-        const ts = simulator(s.test.start, s.test.end, deploymentParams); ledger.calls++; ledger.log.push({ phase: 'test', fold: s.fold, start: s.test.start, end: s.test.end });
-        testM = makeMetrics(ts, costCfg);
-      }
-      if (trainM.tradeCount < 5) warnings.push('INSUFFICIENT_SAMPLE');
-      if (valM.netReturn < trainM.netReturn * 0.7) warnings.push('VALIDATION_DEGRADATION');
-      foldMetrics.push({
-        fold: s.fold, trainMetrics: trainM, validationMetrics: valM, testMetrics: testM,
-        selected: s.fold === selectedFoldIndex,
-        usedForDeployment: s.fold === selectedFoldIndex,
-      });
-    }
   } else {
     // No paramGrid: evaluate with no selection
     for (const s of splits) {
-      const tr = simulator(s.train.start, s.train.end); ledger.calls++; ledger.log.push({ phase: 'train', fold: s.fold, start: s.train.start, end: s.train.end });
+      ledger.calls++; ledger.log.push({ phase: 'train', fold: s.fold, start: s.train.start, end: s.train.end });
+      const tr = simulator(s.train.start, s.train.end);
       const trainM = makeMetrics(tr, costCfg);
-      const vr = simulator(s.validation.start, s.validation.end); ledger.calls++; ledger.log.push({ phase: 'validation', fold: s.fold, start: s.validation.start, end: s.validation.end });
+      ledger.calls++; ledger.log.push({ phase: 'validation', fold: s.fold, start: s.validation.start, end: s.validation.end });
+      const vr = simulator(s.validation.start, s.validation.end);
       const valM = makeMetrics(vr, costCfg);
       if (trainM.tradeCount < 5) warnings.push('INSUFFICIENT_SAMPLE');
       if (valM.netReturn < trainM.netReturn * 0.7) warnings.push('VALIDATION_DEGRADATION');
@@ -235,15 +201,48 @@ export function runWalkForward(
     }
   }
 
-  // ── Final Holdout evaluation ─────────────────────────────────
-  let finalHoldoutMetrics: FinalHoldoutMetrics | undefined;
-  if (finalHoldoutConfig && deploymentParams) {
-    ledger.calls++; ledger.log.push({ phase: 'final-holdout', fold: -1, start: finalHoldoutConfig.start, end: finalHoldoutConfig.end });
-    const fhSim = simulator(finalHoldoutConfig.start, finalHoldoutConfig.end, deploymentParams);
-    finalHoldoutMetrics = { config: finalHoldoutConfig, metrics: makeMetrics(fhSim, costCfg), evaluationCount: 1 };
-  } else if (finalHoldoutConfig) {
-    finalHoldoutMetrics = { config: finalHoldoutConfig, metrics: undefined, evaluationCount: 0 };
+  // ── Deployment resolution: only the FINAL valid selection fold ─
+  let deploymentParams: Record<string, string | number> | undefined;
+  let deploymentCandidateId: string | undefined;
+  let selectedFoldIndex: number | undefined;
+
+  if (validSelections.length > 0) {
+    const lastSel = validSelections[validSelections.length - 1];
+    deploymentParams = lastSel.params;
+    deploymentCandidateId = lastSel.candidateId;
+    selectedFoldIndex = lastSel.foldIdx;
+
+    // Mark only the last as usedForDeployment
+    const lastFold = foldMetrics.find(f => f.fold === lastSel.foldIdx);
+    if (lastFold) (lastFold as any).usedForDeployment = true;
   }
+
+  // Assertions: exactly one fold usedForDeployment
+  const deployFoldCount = foldMetrics.filter(f => f.usedForDeployment).length;
+  if (validSelections.length > 0 && deployFoldCount !== 1) {
+    throw new Error(`DEPLOYMENT_COUNT_MISMATCH: expected exactly 1 usedForDeployment, got ${deployFoldCount}`);
+  }
+  if (validSelections.length > 0 && selectedFoldIndex !== validSelections[validSelections.length - 1].foldIdx) {
+    throw new Error('DEPLOYMENT_FOLD_NOT_LAST: deployment must be the final valid selection fold');
+  }
+
+  // ── Final Holdout evaluation (exactly one attempt, no retry) ──
+  let finalHoldoutMetrics: PerformanceMetrics | undefined;
+  let finalHoldoutAttempts = 0;
+
+  if (deploymentParams) {
+    finalHoldoutAttempts = 1;
+    ledger.calls++; ledger.log.push({ phase: 'final-holdout', fold: -1, start: finalHoldoutConfig.start, end: finalHoldoutConfig.end });
+    try {
+      const fhSim = simulator(finalHoldoutConfig.start, finalHoldoutConfig.end, deploymentParams);
+      finalHoldoutMetrics = makeMetrics(fhSim, costCfg);
+    } catch (err) {
+      // Failure propagates — exactly one attempt was made, no retry
+      throw err;
+    }
+  }
+
+  const finalHoldoutEvaluationCount = deploymentParams ? 1 : 0;
 
   // ── Stress scenarios ─────────────────────────────────────────
   const bm = foldMetrics[0];
@@ -253,32 +252,42 @@ export function runWalkForward(
     { name: '2x', multiplier: 2.0, metrics: recomputeCosts(bm.trainMetrics, 2.0, costCfg) },
   ] : [];
 
-  // ── Report identity ──────────────────────────────────────────
-  const reportId = makeReportId(cfg, costCfg, {
+  // ── Report identity (normalized defaults) ────────────────────
+  const effectiveHoldout = {
+    start: finalHoldoutConfig.start,
+    end: finalHoldoutConfig.end,
+    count: finalHoldoutConfig.count,
+  };
+  const reportId = makeReportId(cfg, costCfg, effectiveHoldout, {
     datasetHash: opts.datasetHash ?? '',
     selected: deploymentParams ?? {},
     simVersion: opts.simVersion ?? '',
     contractVersion,
-    holdoutConfig: finalHoldoutConfig,
     deploymentParams: deploymentParams ?? {},
   });
 
   return deepFreeze({
     reportId,
     createdAt: clock.nowISO(),
+    validationContractVersion: contractVersion,
     contractVersion,
     config: cfg,
     costConfig: costCfg,
-    selectionMode: mode,
     folds: foldMetrics,
     selectedFold: selectedFoldIndex,
-    selectedParameters: deploymentParams, // deprecated alias
+    selectedParameters: deploymentParams,
     deploymentParameters: deploymentParams,
     deploymentCandidateId,
     warnings,
     limitations: ['paper-only simulation', 'no forward-looking claims'],
     stressScenarios,
     simulatorVersion: opts.simVersion,
-    finalHoldout: finalHoldoutMetrics,
+    finalHoldoutRange: {
+      start: finalHoldoutConfig.start,
+      end: finalHoldoutConfig.end,
+      count: finalHoldoutConfig.count,
+    },
+    finalHoldoutMetrics,
+    finalHoldoutEvaluationCount,
   });
 }

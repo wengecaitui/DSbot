@@ -1,4 +1,5 @@
-// Stage 4A4-R8: FinalHoldout allocator — computes independent trailing holdout range.
+// Stage 4A4-R8: FinalHoldout allocator — always-on with normalized defaults, failure propagates after one attempt.
+
 import type { WalkForwardConfig, FinalHoldoutConfig } from './ValidationTypes';
 
 export const HOLDOUT_ERRORS = {
@@ -9,15 +10,37 @@ export const HOLDOUT_ERRORS = {
   HOLDOUT_EXCEEDS_TOTAL: 'HOLDOUT_EXCEEDS_TOTAL',
 } as const;
 
+/** Default final holdout ratio when not explicitly configured. */
+export const DEFAULT_HOLDOUT_RATIO = 0.15;
+
+/**
+ * Compute the effective final holdout bar count.
+ *
+ * Normalized defaults:
+ *   - ratio defaults to 0.15
+ *   - minBars defaults to 3 * testBars
+ *
+ * Formula: count = max(ceil(totalBars * effectiveRatio), effectiveMinBars)
+ *
+ * When ratio is explicit and min omitted: count = max(ceil(total*ratio), 3*testBars)
+ * When ratio omitted and min explicit: count = max(ceil(total*0.15), min)
+ * When both omitted: count = max(ceil(total*0.15), 3*testBars)
+ * When both explicit: count = max(ceil(total*ratio), min)
+ */
+export function computeHoldoutCount(totalBars: number, testBars: number, ratio?: number, minBars?: number): number {
+  const effectiveRatio = ratio ?? DEFAULT_HOLDOUT_RATIO;
+  const effectiveMin = minBars ?? 3 * testBars;
+  return Math.max(Math.ceil(totalBars * effectiveRatio), effectiveMin);
+}
+
 /**
  * Computes the Final Holdout allocation from a WalkForwardConfig.
+ *
+ * Always allocated — ratio defaults to 0.15, minBars defaults to 3 * testBars.
  *
  * finalHoldoutBars = max(ceil(totalBars * ratio), minBars)
  * gap = max(purgeBars, embargoBars, labelHorizonBars)
  * developmentEndExclusive = finalHoldoutStart - gap
- *
- * When finalHoldoutRatio is absent (undefined):
- *   finalHoldoutBars = max(3 * testBars, minBars ?? 0)
  *
  * Constraints:
  *   - 0 < ratio < 1 (finite)
@@ -27,24 +50,16 @@ export const HOLDOUT_ERRORS = {
  */
 export function allocateFinalHoldout(cfg: WalkForwardConfig): FinalHoldoutConfig {
   const { totalBars, testBars, purgeBars, embargoBars, labelHorizonBars } = cfg;
-  const ratio = cfg.finalHoldoutRatio;
-  const minBars = cfg.finalHoldoutMinBars ?? 0;
+  const ratio = cfg.finalHoldoutRatio ?? DEFAULT_HOLDOUT_RATIO;
+  const minBars = cfg.finalHoldoutMinBars ?? 3 * testBars;
   const lbl = labelHorizonBars ?? 0;
 
   // Validate config
-  if (ratio !== undefined) {
-    if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) throw new Error(HOLDOUT_ERRORS.INVALID_RATIO);
-  }
+  if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) throw new Error(HOLDOUT_ERRORS.INVALID_RATIO);
   if (!Number.isFinite(minBars) || minBars < 0 || !Number.isInteger(minBars)) throw new Error(HOLDOUT_ERRORS.INVALID_MIN_BARS);
 
   // Compute holdout bar count
-  let holdoutBars: number;
-  if (ratio !== undefined) {
-    holdoutBars = Math.max(Math.ceil(totalBars * ratio), minBars);
-  } else {
-    holdoutBars = Math.max(3 * testBars, minBars);
-  }
-  holdoutBars = Math.round(holdoutBars); // integer enforcement
+  const holdoutBars = Math.max(Math.ceil(totalBars * ratio), minBars);
 
   if (holdoutBars <= 0) throw new Error(HOLDOUT_ERRORS.ZERO_HOLDOUT_BARS);
   if (holdoutBars >= totalBars) throw new Error(HOLDOUT_ERRORS.HOLDOUT_EXCEEDS_TOTAL);
@@ -67,7 +82,7 @@ export function allocateFinalHoldout(cfg: WalkForwardConfig): FinalHoldoutConfig
     start: holdoutStart,
     end: holdoutEnd,
     count: holdoutBars,
-    ratio: ratio ?? 0,
+    ratio,
     minBars,
     gapBars,
     developmentEndExclusive,

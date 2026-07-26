@@ -1,4 +1,5 @@
-// Stage 4A4-R8: Causal-per-fold selection, FinalHoldout, deployment contract, deep freeze, deterministic clock.
+// Stage 4A4-R8: Causal-per-fold selection (R8 only mode), FinalHoldout, deployment contract, deep freeze, deterministic clock.
+
 import { createHash } from 'node:crypto';
 
 // ── Warnings ──────────────────────────────────────────────────
@@ -10,9 +11,6 @@ export const VALIDATION_WARNINGS = {
   HOLDOUT_INSUFFICIENT_BARS: 'HOLDOUT_INSUFFICIENT_BARS', HOLDOUT_ALLOCATION_SHRUNK: 'HOLDOUT_ALLOCATION_SHRUNK',
 } as const;
 export type ValidationWarning = typeof VALIDATION_WARNINGS[keyof typeof VALIDATION_WARNINGS];
-
-// ── Selection mode ────────────────────────────────────────────
-export type SelectionMode = 'global' | 'causal-per-fold';
 
 // ── Chronological split ───────────────────────────────────────
 export interface ChronologicalSplit {
@@ -27,7 +25,6 @@ export interface WalkForwardConfig {
   readonly totalBars: number; readonly trainBars: number; readonly validationBars: number;
   readonly testBars: number; readonly purgeBars: number; readonly embargoBars: number;
   readonly mode: 'rolling' | 'expanding';
-  readonly selectionMode?: SelectionMode;
   readonly featureLookbackBars?: number; readonly labelHorizonBars?: number;
   readonly minFoldBars?: number;
   readonly finalHoldoutRatio?: number; readonly finalHoldoutMinBars?: number;
@@ -37,8 +34,8 @@ export interface WalkForwardConfig {
 export interface FinalHoldoutConfig {
   readonly start: number; readonly end: number; readonly count: number;
   readonly ratio: number; readonly minBars: number;
-  readonly gapBars: number; // max(purge, embargo, labelHorizon)
-  readonly developmentEndExclusive: number; // bar index where development folds stop
+  readonly gapBars: number;
+  readonly developmentEndExclusive: number;
 }
 
 // ── Clock ─────────────────────────────────────────────────────
@@ -64,7 +61,7 @@ export interface FoldMetrics {
   trainMetrics: PerformanceMetrics;
   validationMetrics: PerformanceMetrics;
   testMetrics?: PerformanceMetrics;
-  /** @deprecated Use usedForDeployment instead. True when this fold supplied deployment parameters. */
+  /** True when this fold contributed a selected candidate (for display). */
   selected: boolean;
   /** Parameters selected by this fold (causal-per-fold mode). */
   selectedParameters?: Readonly<Record<string, string | number>>;
@@ -72,7 +69,7 @@ export interface FoldMetrics {
   selectedCandidateId?: string;
   /** All candidates evaluated by this fold (causal-per-fold mode). */
   candidateResults?: readonly CandidateResult[];
-  /** True when this fold's selected parameters are used as deployment parameters. */
+  /** True ONLY for the final valid selection fold whose params are deployment params. */
   usedForDeployment: boolean;
   rejectionReason?: string;
 }
@@ -81,17 +78,21 @@ export interface PerformanceMetrics {
   readonly grossReturn: number; readonly netReturn: number; readonly maxDrawdown: number;
   readonly sharpeRatio: number; readonly sortinoRatio: number; readonly profitFactor: number;
   readonly tradeCount: number; readonly turnover: number; readonly costBreakdown: CostBreakdown;
-  readonly _volume?: number; // internal: original volume for recomputation
+  readonly _volume?: number;
 }
 
 // ── Report ────────────────────────────────────────────────────
+export interface FinalHoldoutRange {
+  readonly start: number; readonly end: number; readonly count: number;
+}
+
 export interface ValidationReport {
   readonly reportId: string; readonly createdAt: string;
+  readonly validationContractVersion: string;
   readonly contractVersion: string;
   readonly config: WalkForwardConfig; readonly costConfig: CostConfig;
-  readonly selectionMode: SelectionMode;
   readonly folds: readonly FoldMetrics[]; readonly selectedFold?: number;
-  /** @deprecated Use deploymentParameters instead. Deep-equals deploymentParameters. */
+  /** @deprecated Use deploymentParameters instead. */
   readonly selectedParameters?: Readonly<Record<string, string | number>>;
   readonly deploymentParameters?: Readonly<Record<string, string | number>>;
   readonly deploymentCandidateId?: string;
@@ -99,31 +100,47 @@ export interface ValidationReport {
   readonly limitations: readonly string[];
   readonly stressScenarios?: readonly StressScenario[];
   readonly simulatorVersion?: string;
-  readonly finalHoldout?: FinalHoldoutMetrics;
-}
-
-export interface FinalHoldoutMetrics {
-  readonly config: FinalHoldoutConfig;
-  readonly metrics?: PerformanceMetrics;
-  readonly evaluationCount: number; // 0 if no paramGrid, 1 otherwise
+  /** Top-level holdout range (always present when final holdout is configured). */
+  readonly finalHoldoutRange?: FinalHoldoutRange;
+  /** Top-level holdout performance metrics (present when holdout was evaluated). */
+  readonly finalHoldoutMetrics?: PerformanceMetrics;
+  /** Top-level holdout evaluation count (0 if no deployment params, 1 otherwise). */
+  readonly finalHoldoutEvaluationCount: number;
 }
 
 export interface StressScenario { readonly name: string; readonly multiplier: number; readonly metrics: PerformanceMetrics; }
 
+/**
+ * Compute a deterministic report identity from the effective (default-resolved) config.
+ *
+ * Normalized defaults:
+ *   - finalHoldoutRatio defaults to 0.15
+ *   - finalHoldoutMinBars defaults to 3 * testBars
+ *   - effective holdout count = max(ceil(totalBars * effectiveRatio), effectiveMinBars)
+ *
+ * Omitted defaults and explicit equivalent defaults produce the same reportId.
+ */
 export function makeReportId(
-  cfg: WalkForwardConfig, cost: CostConfig,
+  cfg: WalkForwardConfig,
+  cost: CostConfig,
+  effectiveHoldout: { start: number; end: number; count: number } | undefined,
   opts: {
     datasetHash?: string; selected?: Record<string, string | number>;
     simVersion?: string; contractVersion?: string;
-    holdoutConfig?: FinalHoldoutConfig;
     deploymentParams?: Record<string, string | number>;
   } = {},
 ): string {
-  const hc = opts.holdoutConfig ? { start: opts.holdoutConfig.start, end: opts.holdoutConfig.end, count: opts.holdoutConfig.count } : {};
+  const effectiveRatio = cfg.finalHoldoutRatio ?? 0.15;
+  const effectiveMin = cfg.finalHoldoutMinBars ?? 3 * cfg.testBars;
+  const effectiveCount = effectiveHoldout
+    ? effectiveHoldout.count
+    : Math.max(Math.ceil(cfg.totalBars * effectiveRatio), effectiveMin);
   return createHash('sha256').update(JSON.stringify({
-    cfg, cost, datasetHash: opts.datasetHash ?? '', selected: opts.selected ?? {},
+    cfg: { ...cfg, finalHoldoutRatio: effectiveRatio, finalHoldoutMinBars: effectiveMin },
+    cost, datasetHash: opts.datasetHash ?? '', selected: opts.selected ?? {},
     simVersion: opts.simVersion ?? '', contractVersion: opts.contractVersion ?? '4A4-R8',
-    holdout: hc, deployment: opts.deploymentParams ?? {},
+    effectiveHoldoutCount: effectiveCount,
+    deployment: opts.deploymentParams ?? {},
   })).digest('hex').slice(0, 16);
 }
 
