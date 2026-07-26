@@ -1,0 +1,63 @@
+name: TradeIQ Private Proof Receipt
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/tradeiq-private-proof-receipt.yml'
+      - 'docs/releases/stage-4a10-tradeiq-proof-receipt.json'
+      - 'docs/releases/stage-4a10-tradeiq-private-proof.md'
+      - 'quant_engine/proof/**'
+      - 'quant_engine/tests/test_asset_proof.py'
+      - 'scripts/verify-tradeiq-proof-receipt.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  proof-receipt:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      RECEIPT_PATH: docs/releases/stage-4a10-tradeiq-proof-receipt.json
+      SUBJECT_PATH: artifacts/tradeiq-private-proof-receipt.json
+    steps:
+      - name: Checkout exact receipt commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install -r quant_engine/requirements.txt
+          npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Verify receipt and build attestation subject
+        run: node scripts/verify-tradeiq-proof-receipt.mjs "$RECEIPT_PATH" --source-commit "$SOURCE_COMMIT" --output "$SUBJECT_PATH"
+      - name: Upload source-free receipt subject
+        uses: actions/upload-artifact@v4
+        with:
+          name: tradeiq-private-proof-receipt-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.SUBJECT_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed digest receipt attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.SUBJECT_PATH }}
