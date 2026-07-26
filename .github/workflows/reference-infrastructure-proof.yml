@@ -1,0 +1,55 @@
+name: Reference Infrastructure Proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/reference-infrastructure-proof.yml'
+      - 'src/validation/**'
+      - 'scripts/run-reference-infrastructure-proof.mjs'
+      - 'scripts/run-tests.mjs'
+      - 'tests/validation/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  reference-proof:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      PROOF_PATH: artifacts/reference-infrastructure-proof.json
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Generate and independently re-verify reference proof
+        run: node scripts/run-reference-infrastructure-proof.mjs --source-commit "$SOURCE_COMMIT" --output "$PROOF_PATH"
+      - name: Upload proof subject
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-infrastructure-proof-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.PROOF_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed build provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.PROOF_PATH }}
