@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "stage-4a10.public-private-proof-receipt.v1",
+  "labels": [
+    "PUBLIC DIGEST RECEIPT ONLY",
+    "PRIVATE FULL RECOMPUTATION REQUIRED",
+    "NOT STRATEGY PROMOTION",
+    "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
+  ],
+  "engineCommit": "03d2472cee1c6b7fe5f196c36edfa0aeb40be978",
+  "asset": {
+    "id": "TradeIQCrazyScalping",
+    "pineSha256": "87b84ac22c43965e726f1487e7cc0211b7361fa1d868103a5ee07253b4bb64db",
+    "privateAdapterSha256": "28463ba77fbe2939a964ac45c865ada0a6ca99bc236b782f407192b936016ee0"
+  },
+  "dataset": {
+    "timeframe": "4h",
+    "rows": 12051,
+    "gapPolicy": "reject",
+    "gapCount": 0,
+    "sourceSha256": "87936180c44725c53c377f11690d8f769463c9777953a668e8e9ac698e4c8e6e",
+    "dataframeSha256": "2eea5c03be721e90b8d138d6cde3d953d02342f67446a45860be87b3127cce42"
+  },
+  "proof": {
+    "privateProofId": "88494390724c91b0f352e3c7329a9e4a117008dd9e0b9bcd5fe4d09cd6babc05",
+    "candidateGridSha256": "094639e7fabfb6b45bca1a45edcc1c69ae658e7f0f0ac083a3758b84ba6974a9",
+    "walkForwardReportId": "9bb3d28df79bd4f116e88efd07400d8bd9f75375aa22e81b9b3c2b2da8c124f5",
+    "developmentFolds": 3,
+    "testEvaluationCount": 3,
+    "finalHoldoutEvaluationCount": 1,
+    "finalHoldoutTrades": 15,
+    "finalHoldoutNetReturn": -0.04550228610545193,
+    "causalityCandidates": 3,
+    "causalityCheckpointsPerCandidate": 124,
+    "causalityFields": 9
+  },
+  "promotion": {
+    "eligible": false,
+    "reason": "NEGATIVE_FINAL_HOLDOUT_RETURN_AND_PRIVATE_ADAPTER_NOT_REGISTERED"
+  },
+  "receiptId": "c145bbae04be361a412f96c64d11ac9fe22d19011c8b333166b1665272fcdefb"
+}

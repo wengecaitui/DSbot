@@ -10,7 +10,7 @@ import pandas as pd
 
 from quant_engine.proof.asset_manifest import _text_file_sha256, build_asset_manifest, verify_asset_manifest
 from quant_engine.proof.gap_policy import GapPolicy, audit_ohlcv
-from quant_engine.proof.strategy_adapter import Action, simulate_window
+from quant_engine.proof.strategy_adapter import Action, Decision, simulate_window
 from quant_engine.proof.walk_forward import WalkForwardConfig, run_causal_walk_forward
 
 
@@ -37,10 +37,36 @@ class AlternatingAdapter:
     def __init__(self) -> None:
         self.history_lengths: list[int] = []
 
-    def decide(self, history: pd.DataFrame, parameters):
+    def decide(self, history: pd.DataFrame, parameters, context):
         self.history_lengths.append(len(history))
         period = int(parameters.get("period", 5))
         return Action.ENTER_LONG if len(history) % period == 0 else (Action.EXIT if len(history) % period == 2 else Action.HOLD)
+
+
+class StopAdapter:
+    strategy_id = "REFERENCE-STOP-NONPRODUCTION"
+    version = "1"
+    minimum_history = 2
+
+    def decide(self, history: pd.DataFrame, parameters, context):
+        return Decision(Action.ENTER_LONG, stop_distance=0.5) if len(history) == 2 else Action.HOLD
+
+
+class ContextAdapter:
+    strategy_id = "REFERENCE-CONTEXT-NONPRODUCTION"
+    version = "1"
+    minimum_history = 2
+
+    def __init__(self):
+        self.positions = []
+
+    def decide(self, history: pd.DataFrame, parameters, context):
+        self.positions.append(context.position)
+        if context.position == 0 and len(history) == 2:
+            return Action.ENTER_LONG
+        if context.position == 1:
+            return Action.EXIT
+        return Action.HOLD
 
 
 class AssetManifestTests(unittest.TestCase):
@@ -118,6 +144,20 @@ class StrategyProofTests(unittest.TestCase):
         self.assertGreater(result["tradeCount"], 0)
         self.assertGreater(result["decisionCalls"], result["tradeCount"])
         self.assertEqual(adapter.history_lengths, sorted(adapter.history_lengths))
+
+    def test_stop_executes_intrabar_after_next_open_entry(self):
+        frame = bars(12)
+        result = simulate_window(StopAdapter(), frame, {}, 0, len(frame), fee_bps=0, slippage_bps=0)
+        self.assertEqual(result["firstEntryIndex"], 2)
+        self.assertEqual(result["trades"][0]["exit_reason"], "stop")
+        self.assertEqual(result["trades"][0]["entry_index"], result["trades"][0]["exit_index"])
+
+    def test_adapter_receives_flat_and_open_position_context(self):
+        adapter = ContextAdapter()
+        result = simulate_window(adapter, bars(12), {}, 0, 12, fee_bps=0, slippage_bps=0)
+        self.assertIn(0, adapter.positions)
+        self.assertIn(1, adapter.positions)
+        self.assertEqual(result["trades"][0]["exit_reason"], "signal")
 
     def test_causal_walk_forward_test_and_holdout_exact_once(self):
         adapter = AlternatingAdapter()
