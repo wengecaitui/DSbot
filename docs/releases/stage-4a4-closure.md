@@ -1,4 +1,13 @@
-# Stage 4A4 Closure — Fold Isolation & Module Runtime
+# Stage 4A4-R8 Closure — Causal-Per-Fold Selection & Final Holdout
+
+**Contract version**: 4A4-R8
+
+## Selection Modes
+
+| Mode | Behavior | Default |
+|------|---------|---------|
+| `'global'` | All folds' train+validation scores are averaged; a single best parameter set is selected across all folds before any test call. (R7 backward-compatible.) | ✓ |
+| `'causal-per-fold'` | Each fold independently evaluates its own candidates on its own train+validation, freezes the selection, then runs its test with that fold's own parameters. Later folds cannot alter earlier fold selections. | |
 
 ## Inclusive-Index Timeline Model
 
@@ -8,28 +17,97 @@ All bar indices in the ChronologicalSplit use an **inclusive-index timeline** �
 
 | Term | Role | Constraint |
 |------|------|-----------|
-| **train** | Parameter estimation region | Rolling: fixed width `trainBars` starting after previous fold's test+embargo boundary (but permitted to reuse older history — train may overlap with past test data). Expanding: fixed start at `featureLookbackBars`, grows backward-compatibly. |
+| **train** | Parameter estimation region | Rolling: fixed width `trainBars`. Expanding: fixed start at `featureLookbackBars`, grows backward-compatibly. Training windows MAY reuse older history (prior test data is permitted during training). |
 | **validation** | Out-of-sample selection region | Separated from train by `max(purgeBars, labelHorizonBars)` gap. Used for candidate ranking. Must start after previous fold's `test.end + max(embargoBars, labelHorizonBars)`. |
-| **test** | Pure holdout region | Separated from validation by `max(purgeBars, labelHorizonBars)` gap. Each fold's test is evaluated exactly once, and only after parameter selection is finalized. |
-| **purgeBars** | Configured inter-phase gap | Nominal value. The effective gap is `Math.max(purgeBars, labelHorizonBars)`. |
-| **embargoBars** | Configured inter-fold gap | Nominal value. The effective gap is `Math.max(embargoBars, labelHorizonBars)`. |
+| **test** | Per-fold holdout region | Separated from validation by `max(purgeBars, labelHorizonBars)` gap. Each fold's test is evaluated exactly once, and only after parameter selection is finalized (for that fold in causal mode, or globally in global mode). |
+| **Final Holdout** | Trailing out-of-time evaluation | Allocated independently at the end of the dataset. Separated from the last development fold by `gap = max(purgeBars, embargoBars, labelHorizonBars)`. Evaluated exactly once after all development folds are decided. |
+| **purgeBars** | Configured inter-phase gap | Effective gap is `Math.max(purgeBars, labelHorizonBars)`. |
+| **embargoBars** | Configured inter-fold gap | Effective gap is `Math.max(embargoBars, labelHorizonBars)`. |
 | **featureLookbackBars** | Minimum history before train | Training cannot start before this bar. |
-| **labelHorizonBars** | Forward observation window | A label at bar `t` observes through bar `t + labelHorizonBars`. Every inter-phase and inter-fold gap is bounded below by `labelHorizonBars` via `Math.max()`. |
+| **labelHorizonBars** | Forward observation window | A label at bar `t` observes through bar `t + labelHorizonBars`. All gaps are bounded below by `labelHorizonBars` via `Math.max()`. |
 
-### Cross-Fold Eligible-Region Isolation
+## Causal-Per-Fold Selection
 
-The fundamental constraint is that a fold's **eligible region** (train + validation, where parameter selection occurs) must not observe data from the previous fold's test window plus its embargo and label horizon. Specifically:
+In `causal-per-fold` mode, each fold in oldest-to-newest order:
+
+1. **Evaluates** all parameter-grid candidates on its own `train` + `validation` (and only its own).
+2. **Freezes** `selectedCandidateId` and `selectedParameters` — no later fold can modify them.
+3. **Tests** with its own selected parameters (if any candidate passed acceptance).
+4. **Records** `candidateResults` (all candidates evaluated) and `usedForDeployment` on the last valid fold.
+
+The fold that supplies `deploymentParameters` is the **last** development fold whose selection was valid (accepted). Earlier folds' selections are preserved for comparison but do not drive deployment.
+
+### Per-Fold Fields
+
+| Field | Type | Description |
+|-------|------|------------|
+| `selectedParameters` | `Record<string,string\|number>?` | Parameters selected by this fold (causal mode only). |
+| `selectedCandidateId` | `string?` | Candidate ID selected by this fold. |
+| `candidateResults` | `CandidateResult[]?` | All candidates evaluated by this fold. |
+| `usedForDeployment` | `boolean` | True when this fold's selection became `deploymentParameters`. |
+| `selected` | `boolean` | **Deprecated** — aliases `usedForDeployment`. Maintained for backward compatibility. |
+
+## Final Holdout
+
+### Allocation
+
+```
+finalHoldoutBars = max(ceil(totalBars × finalHoldoutRatio), finalHoldoutMinBars)
+```
+When `finalHoldoutRatio` is absent: `finalHoldoutBars = max(3 × testBars, finalHoldoutMinBars)`.
+
+Constraints: `0 < ratio < 1` (finite), `minBars ≥ 0` (finite integer), result must be a positive integer strictly less than `totalBars`, and at least one valid development fold must be producible.
+
+The gap between development and holdout: `gap = max(purgeBars, embargoBars, labelHorizonBars)`.
+
+```
+developmentEndExclusive = finalHoldoutStart − gap
+finalHoldoutStart = totalBars − finalHoldoutBars
+finalHoldoutEnd = totalBars − 1 (inclusive)
+```
+
+### Evaluation
+
+- The Final Holdout is evaluated **exactly once**, after all development fold decisions are frozen.
+- Ledger phase: `'final-holdout'`, fold = `−1`, no `candidateId`.
+- With no `paramGrid`: `testMetrics` undefined, `deploymentParameters` undefined, `finalHoldout.evaluationCount = 0`.
+- With a `paramGrid`: holdout is evaluated with `deploymentParameters`, and `finalHoldout.evaluationCount = 1`.
+- The holdout range is **never** present in candidate evaluation calls — enforced by test 87.
+- Holdout failure **throws** (fail-closed) — no retry, no reselection.
+
+### Scalability Note
+
+Increasing the holdout ratio or minBars **reduces** the development region. Fewer development folds will be produced. The allocator throws `HOLDOUT_INSUFFICIENT_DEVELOPMENT` if no valid fold can be generated after reserve.
+
+## Deployment Contract
+
+```typescript
+interface ValidationReport {
+  contractVersion: '4A4-R8';
+  selectionMode: 'global' | 'causal-per-fold';
+  deploymentParameters?: Record<string, string | number>;   // from last valid fold
+  deploymentCandidateId?: string;
+  selectedParameters?: Record<string, string | number>;     // DEPRECATED — deep-equals deploymentParameters
+  selectedFold?: number;                                    // DEPRECATED — index of deployment fold
+  finalHoldout?: FinalHoldoutMetrics;
+}
+```
+
+- `deploymentParameters` and `deploymentCandidateId` come from the **last valid development fold** whose selection passed acceptance.
+- `selectedParameters` is a deprecated alias that **must deep-equal** `deploymentParameters`.
+- `selectedFold` is a deprecated alias for the index of the deployment fold.
+- Report identity (`reportId`) includes: contract version, normalized holdout config (start/end/count), deployment params, dataset hash, sim version, config, and cost config. Fail-closed: structural errors throw; performance issues emit warnings only.
+
+## Cross-Fold Eligible-Region Isolation
 
 - `fold[i].test.end + max(embargoBars, labelHorizonBars) < fold[i+1].validation.start`
 - `fold[i].test.end + max(embargoBars, labelHorizonBars) < fold[i+1].test.start`
 
-Training windows MAY reuse older history (prior test data is permitted during training for both rolling and expanding modes). This means `fold[i+1].train.start` may be ≤ `fold[i].test.end` — no check prevents this.
+Training windows MAY reuse older history (prior test data is permitted during training for both rolling and expanding modes).
 
 ### Fold Timeline — Numeric Example
 
 Config: `totalBars=15000, trainBars=800, validationBars=300, testBars=300, purgeBars=20, embargoBars=10, labelHorizonBars=0`.
-
-Effective gaps: `phaseGapBars=max(20,0)=20`, `outOfSampleGapBars=max(10,0)=10`, `foldStepBars=300+20+300+10=630`.
 
 **Rolling mode** (oldest→newest, after reversal):
 
@@ -38,8 +116,6 @@ Effective gaps: `phaseGapBars=max(20,0)=20`, `outOfSampleGapBars=max(10,0)=10`, 
 | 0 | [12010, 12809] (800 bars) | [12830, 13129] (300 bars) | [13150, 13449] (300 bars) |
 | 1 | [12640, 13439] (800 bars) | [13460, 13759] (300 bars) | [13780, 14079] (300 bars) |
 
-Fold 0 test end = 13449. Embargo + label = 10. Next eligible region starts at fold 1 validation start = 13460. 13449 + 10 = 13459 < 13460 ✓. Fold 1 train start = 12640, which is < 13449 (previous test end) — permitted historical data reuse.
-
 **Expanding mode** (same config):
 
 | Fold | train | validation | test |
@@ -47,55 +123,42 @@ Fold 0 test end = 13449. Embargo + label = 10. Next eligible region starts at fo
 | 0 | [0, 12809] (12810 bars) | [12830, 13129] (300 bars) | [13150, 13449] (300 bars) |
 | 1 | [0, 13439] (13440 bars) | [13460, 13759] (300 bars) | [13780, 14079] (300 bars) |
 
-Train starts from fixed origin (0). Fold 0 test end = 13449, fold 1 validation start = 13460. 13449 + 10 = 13459 < 13460 ✓. Train grows to include all past data, naturally incorporating prior test data.
+### Final Holdout Timeline — Numeric Example
 
-### ASCII Schematic
+Config: `totalBars=20000, testBars=300, finalHoldoutRatio=0.15, purgeBars=20, embargoBars=10`.
 
-```
-Bar 0 ──────────────────────────────────────────────────────────→ totalBars-1
+Holdout: `ceil(20000 × 0.15) = 3000` bars. Gap: `max(20, 10, 0) = 20`.
+- `finalHoldoutStart = 20000 − 3000 = 17000`
+- `finalHoldoutEnd = 19999`
+- `developmentEndExclusive = 17000 − 20 = 16980`
 
-Rolling:
-Fold 0:  [──train──][gap][val][gap][test]
-Fold 1:            [──train──][gap][val][gap][test]
-
-Expanding:
-Fold 0:  [─────────────train─────────────][gap][val][gap][test]
-Fold 1:  [──────────────────train──────────────────][gap][val][gap][test]
-
-gap = max(purgeBars, labelHorizonBars)
-inter-fold gap = max(embargoBars, labelHorizonBars)
-```
+Development folds are generated within [0, 16979]. Final Holdout occupies [17000, 19999].
 
 ## Isolation Validation
 
-`validateFoldIsolation(fold, nextFold?)` returns `string[]`. On valid folds (rolling or expanding), it returns exactly `[]`. It detects **eight** leakage classes:
+`validateFoldIsolation(fold, nextFold?)` returns `string[]`. On valid folds, returns exactly `[]`. Detects **nine** leakage classes:
 
-1. **train+purge crosses validation start** — `fold.train.end + fold.purgeBars >= fold.validation.start`
-2. **val+purge crosses test start** — `fold.validation.end + fold.purgeBars >= fold.test.start`
-3. **train label horizon crosses validation start** — `fold.train.end + fold.labelHorizonBars >= fold.validation.start`
-4. **validation label horizon crosses test start** — `fold.validation.end + fold.labelHorizonBars >= fold.test.start`
-5. **test+embargo crosses next test** — `fold.test.end + fold.embargoBars >= nextFold.test.start`
-6. **test label horizon crosses next test** — `fold.test.end + fold.labelHorizonBars >= nextFold.test.start`
-7. **test+embargo crosses next validation** — `fold.test.end + fold.embargoBars >= nextFold.validation.start` (cross-fold eligible-region)
-8. **test label horizon crosses next validation** — `fold.test.end + fold.labelHorizonBars >= nextFold.validation.start` (cross-fold eligible-region)
-9. **feature lookback before bar 0** — `fold.train.start < fold.featureLookbackBars`
+1. train+purge crosses validation start
+2. val+purge crosses test start
+3. train label horizon crosses validation start
+4. validation label horizon crosses test start
+5. test+embargo crosses next test
+6. test label horizon crosses next test
+7. test+embargo crosses next validation
+8. test label horizon crosses next validation
+9. feature lookback before bar 0
 
-## Holdout Proof
+## Limitations
 
-The walk-forward engine enforces strict test isolation:
-
-- **Test absent from candidate selection**: Phase ledger records no `test` phase calls until after parameter selection is finalized.
-- **Each fold tested exactly once**: After selection, the engine iterates every fold and calls the simulator on each fold's test region exactly once.
-- **testCalls.length === folds.length**: Test 47 verifies strict equality.
-- **No weak null-ish assertions**: Test 50 uses `assert.notEqual(..., undefined)`.
-- **Holdout experiment (Test 78)**: Two runs with identical train+validation outputs but deliberately different test outputs produce the same `selectedParameters` — proving the holdout wall is real. Test metrics differ between runs, confirming the simulator exercised different test paths without affecting selection.
+- `causal-per-fold` mode with expanding windows may trigger `VALIDATION_DEGRADATION` warnings when train bar count vastly exceeds validation bar count (per-bar simulators produce netReturn that scales linearly with bar span). This is correct behavior: the degradation check compares absolute netReturns, not per-bar returns. Use a simulator that normalizes for bar count, or accept the warning.
+- `selected` is deprecated — new code should use `usedForDeployment`.
+- `selectedParameters` on `ValidationReport` is a deprecated alias — new code should use `deploymentParameters`.
+- Final Holdout requires at least one valid development fold; insufficient data throws before any candidate evaluation begins.
 
 ## Module Runtime Contract
 
 `tsconfig.json` uses `module: "CommonJS"` with `moduleResolution: "Node"`. This is acceptable under the locked whole-repo toolchain because:
 
-1. **TypeScript 5.9.3** still resolves `"Node"` (aliased to `"node10"`) without emitting deprecation errors or warnings at build time.
-2. The project uses CommonJS (`module: "CommonJS"`) throughout — `"Node"` is the correct resolution strategy for CJS and produces extensionless `require()`-compatible output in `dist/`.
-3. Switching to `"node16"` or `"nodenext"` would require `.js` extensions in all ~200+ source file imports (or setting `"type": "module"` in package.json), which would break the entire codebase.
-4. The whole-repo toolchain (`tsx` for dev, `tsc` for build, `node` for runtime) all function correctly with `moduleResolution: "Node"`.
-5. `npm run typecheck` (tsc --noEmit) passes cleanly; `npm run build` produces valid `dist/`; `node -e "require('./dist/validation/ChronologicalSplit')"` succeeds.
+1. TypeScript 5.9.3 resolves `"Node"` (aliased to `"node10"`) for CommonJS output.
+2. Switching to `"node16"` or `"nodenext"` would require `.js` extensions in all ~200+ source imports, breaking the entire codebase.
+3. `npm run typecheck`, `npm run build`, and direct `require()` all function correctly.
