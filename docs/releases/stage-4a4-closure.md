@@ -20,7 +20,7 @@ All bar indices in the ChronologicalSplit use an **inclusive-index timeline** �
 |------|------|-----------|
 | **train** | Parameter estimation region | Rolling: fixed width `trainBars`. Expanding: fixed start at `featureLookbackBars`, grows backward-compatibly. Training windows MAY reuse older history (prior test data is permitted during training). |
 | **validation** | Out-of-sample selection region | Separated from train by `max(purgeBars, labelHorizonBars)` gap. Used for candidate ranking. Must start after previous fold's `test.end + max(embargoBars, labelHorizonBars)`. |
-| **test** | Per-fold holdout region | Separated from validation by `max(purgeBars, labelHorizonBars)` gap. Each fold's test is evaluated exactly once, and only after parameter selection is finalized (for that fold in causal mode, or globally in global mode). |
+| **test** | Per-fold holdout region | Separated from validation by `max(purgeBars, labelHorizonBars)` gap. Each fold's test is evaluated exactly once, after parameter selection is finalized for that fold. |
 | **Final Holdout** | Trailing out-of-time evaluation | Allocated independently at the end of the dataset. Separated from the last development fold by `gap = max(purgeBars, embargoBars, labelHorizonBars)`. Evaluated exactly once after all development folds are decided. |
 | **purgeBars** | Configured inter-phase gap | Effective gap is `Math.max(purgeBars, labelHorizonBars)`. |
 | **embargoBars** | Configured inter-fold gap | Effective gap is `Math.max(embargoBars, labelHorizonBars)`. |
@@ -52,12 +52,24 @@ The fold that supplies `deploymentParameters` is the **last** development fold w
 
 ### Allocation
 
-```
-finalHoldoutBars = max(ceil(totalBars × finalHoldoutRatio), finalHoldoutMinBars)
-```
-When `finalHoldoutRatio` is absent: `finalHoldoutBars = max(3 × testBars, finalHoldoutMinBars)`.
+The effective holdout bar count is computed as:
 
-Constraints: `0 < ratio < 1` (finite), `minBars ≥ 0` (finite; fractional accepted, rounded up via `Math.ceil` before `Math.max`), result must be a positive integer strictly less than `totalBars`, and at least one valid development fold must be producible.
+```
+effectiveRatio = finalHoldoutRatio ?? 0.15
+effectiveMin   = finalHoldoutMinBars ?? (3 × testBars)
+bars           = max(ceil(totalBars × effectiveRatio), ceil(effectiveMin))
+```
+
+Four cases depending on which fields are provided:
+
+| finalHoldoutRatio | finalHoldoutMinBars | Effective ratio | Effective min | bars |
+|---|---|---|---|---|
+| omitted | omitted | 0.15 | 3 × testBars | max(ceil(total×0.15), ceil(3×testBars)) |
+| explicit | omitted | explicit | 3 × testBars | max(ceil(total×explicit), ceil(3×testBars)) |
+| omitted | explicit | 0.15 | explicit | max(ceil(total×0.15), ceil(explicit)) |
+| explicit | explicit | explicit | explicit | max(ceil(total×explicit), ceil(explicit)) |
+
+All `bars` values must be positive integers strictly less than `totalBars`. Ratio must satisfy `0 < ratio < 1` (finite). MinBars must be `≥ 0` (finite; fractional accepted, rounded up via `Math.ceil` before `Math.max`). At least one valid development fold must be producible after holdout allocation.
 
 The minimum development footprint for one fold is: `featureLookback + train + validation + test + 2 × max(purge, labelHorizon)`. Inter-fold `outOfSampleGap`/embargo is NOT added — `finalHoldoutGap` already isolates development from holdout.
 
@@ -73,10 +85,11 @@ finalHoldoutEnd = totalBars − 1 (inclusive)
 
 - The Final Holdout is evaluated **exactly once**, after all development fold decisions are frozen.
 - Ledger phase: `'final-holdout'`, fold = `−1`, no `candidateId`.
-- With no `paramGrid`: `testMetrics` undefined, `deploymentParameters` undefined, `finalHoldout.evaluationCount = 0`.
-- With a `paramGrid`: holdout is evaluated with `deploymentParameters`, and `finalHoldout.evaluationCount = 1`.
-- The holdout range is **never** present in candidate evaluation calls — enforced by test 87.
+- With no `paramGrid`: `deploymentParameters` undefined, `finalHoldoutEvaluationCount = 0`, `finalHoldoutMetrics` undefined.
+- With a `paramGrid`: holdout evaluated with `deploymentParameters`, and `finalHoldoutEvaluationCount = 1`.
+- The holdout range is **never** present in candidate evaluation calls.
 - Holdout failure **throws** (fail-closed) — no retry, no reselection.
+- Top-level fields in `ValidationReport`: `finalHoldoutRange?: FinalHoldoutRange` (always present when holdout configured), `finalHoldoutMetrics?: PerformanceMetrics` (present when evaluated), `finalHoldoutEvaluationCount: number` (0 or 1).
 
 ### Scalability Note
 
@@ -88,18 +101,39 @@ Increasing the holdout ratio or minBars **reduces** the development region. Fewe
 interface ValidationReport {
   contractVersion: '4A4-R8';
   selectionMode: 'causal-per-fold';
-  deploymentParameters?: Record<string, string | number>;   // from last valid fold
+  deploymentParameters?: StrategyParameters;   // from last valid fold
   deploymentCandidateId?: string;
-  selectedParameters?: Record<string, string | number>;     // DEPRECATED — deep-equals deploymentParameters
-  selectedFold?: number;                                    // DEPRECATED — index of deployment fold
-  finalHoldout?: FinalHoldoutMetrics;
+  selectedParameters?: StrategyParameters;      // DEPRECATED — deep-equals deploymentParameters
+  selectedFold?: number;                        // DEPRECATED — identifier of deployment fold
+  finalHoldoutRange?: FinalHoldoutRange;        // always present when holdout configured
+  finalHoldoutMetrics?: PerformanceMetrics;     // present when holdout evaluated
+  finalHoldoutEvaluationCount: number;          // 0 or 1
 }
 ```
 
 - `deploymentParameters` and `deploymentCandidateId` come from the **last valid development fold** whose selection passed acceptance.
 - `selectedParameters` is a deprecated alias that **must deep-equal** `deploymentParameters`.
-- `selectedFold` is a deprecated alias for the index of the deployment fold.
+- `selectedFold` is a deprecated alias for the identifier of the deployment fold.
 - Report identity (`reportId`) includes: contract version, normalized holdout config (start/end/count), deployment params, dataset hash, sim version, config, and cost config. Fail-closed: structural errors throw; performance issues emit warnings only.
+
+## Parameter Ownership & Isolation
+
+Strategy parameters use flat `string | number` values (no nested objects). The type `StrategyParameters = Readonly<Record<string, string | number>>` is the canonical form for all stored parameter contracts.
+
+### Snapshot/Copy Discipline
+
+| Operation | Function | Returns | Frozen? | Used for |
+|---|---|---|---|---|
+| Canonical snapshot | `canonicalParamsSnapshot(params)` | `StrategyParameters` | ✓ | candidates, folds, deployment, reports |
+| Simulator copy | `paramsMutableCopy(snapshot)` | `Record<string, string \| number>` | ✗ | every simulator invocation |
+
+**Rules:**
+1. Each `paramGrid` entry is snapshotted once before any fold evaluation. No caller object is modified or frozen.
+2. Every simulator call (candidate train, candidate validation, fold test, final holdout) receives a **new mutable shallow copy** via `paramsMutableCopy`.
+3. No simulator ever receives a reference to a stored snapshot or to the caller's original grid object.
+4. Stored contracts (CandidateResult, FoldMetrics, deployment, ValidationReport) use only canonical snapshots.
+
+**Limitation:** This is a shallow copy. The `string | number` value contract guarantees full isolation. If a caller stores nested objects as param values (unsupported), mutations to those nested objects would propagate across copies. Do not use nested param values.
 
 ## Cross-Fold Eligible-Region Isolation
 
