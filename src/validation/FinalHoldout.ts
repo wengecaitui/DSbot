@@ -30,7 +30,7 @@ export const DEFAULT_HOLDOUT_RATIO = 0.15;
 export function computeHoldoutCount(totalBars: number, testBars: number, ratio?: number, minBars?: number): number {
   const effectiveRatio = ratio ?? DEFAULT_HOLDOUT_RATIO;
   const effectiveMin = minBars ?? 3 * testBars;
-  return Math.max(Math.ceil(totalBars * effectiveRatio), effectiveMin);
+  return Math.max(Math.ceil(totalBars * effectiveRatio), Math.ceil(effectiveMin));
 }
 
 /**
@@ -44,7 +44,7 @@ export function computeHoldoutCount(totalBars: number, testBars: number, ratio?:
  *
  * Constraints:
  *   - 0 < ratio < 1 (finite)
- *   - minBars >= 0 (finite, integer)
+ *   - minBars >= 0 (finite; fractional accepted, rounded up via Math.ceil)
  *   - finalHoldoutBars > 0
  *   - At least one valid development fold must be producible
  */
@@ -56,10 +56,10 @@ export function allocateFinalHoldout(cfg: WalkForwardConfig): FinalHoldoutConfig
 
   // Validate config
   if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) throw new Error(HOLDOUT_ERRORS.INVALID_RATIO);
-  if (!Number.isFinite(minBars) || minBars < 0 || !Number.isInteger(minBars)) throw new Error(HOLDOUT_ERRORS.INVALID_MIN_BARS);
+  if (!Number.isFinite(minBars) || minBars < 0) throw new Error(HOLDOUT_ERRORS.INVALID_MIN_BARS);
 
-  // Compute holdout bar count
-  const holdoutBars = Math.max(Math.ceil(totalBars * ratio), minBars);
+  // Compute holdout bar count — fractional minBars rounded upward
+  const holdoutBars = Math.max(Math.ceil(totalBars * ratio), Math.ceil(minBars));
 
   if (holdoutBars <= 0) throw new Error(HOLDOUT_ERRORS.ZERO_HOLDOUT_BARS);
   if (holdoutBars >= totalBars) throw new Error(HOLDOUT_ERRORS.HOLDOUT_EXCEEDS_TOTAL);
@@ -72,9 +72,10 @@ export function allocateFinalHoldout(cfg: WalkForwardConfig): FinalHoldoutConfig
   const holdoutEnd = totalBars - 1; // inclusive
   const developmentEndExclusive = holdoutStart - gapBars;
 
-  // Must have room for at least one fold
-  const minFoldFootprint = cfg.trainBars + cfg.validationBars + cfg.testBars + 2 * Math.max(cfg.purgeBars, lbl) + Math.max(cfg.embargoBars, lbl);
-  if (developmentEndExclusive < (cfg.featureLookbackBars ?? 0) + minFoldFootprint) {
+  // Must have room for at least one fold: featureLookback + train + val + test + 2*max(purge,labelHorizon).
+  // inter-fold outOfSampleGap/embargo is NOT added — finalHoldoutGap already isolates development from holdout.
+  const minFoldFootprint = (cfg.featureLookbackBars ?? 0) + cfg.trainBars + cfg.validationBars + cfg.testBars + 2 * Math.max(cfg.purgeBars, lbl);
+  if (developmentEndExclusive < minFoldFootprint) {
     throw new Error(HOLDOUT_ERRORS.INSUFFICIENT_DEVELOPMENT);
   }
 

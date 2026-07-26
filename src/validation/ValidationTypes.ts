@@ -28,6 +28,7 @@ export interface WalkForwardConfig {
   readonly featureLookbackBars?: number; readonly labelHorizonBars?: number;
   readonly minFoldBars?: number;
   readonly finalHoldoutRatio?: number; readonly finalHoldoutMinBars?: number;
+  readonly selectionMode?: 'causal-per-fold';
 }
 
 // ── Final Holdout ─────────────────────────────────────────────
@@ -90,6 +91,7 @@ export interface ValidationReport {
   readonly reportId: string; readonly createdAt: string;
   readonly validationContractVersion: string;
   readonly contractVersion: string;
+  readonly selectionMode: 'causal-per-fold';
   readonly config: WalkForwardConfig; readonly costConfig: CostConfig;
   readonly folds: readonly FoldMetrics[]; readonly selectedFold?: number;
   /** @deprecated Use deploymentParameters instead. */

@@ -6,8 +6,9 @@
 
 | Mode | Behavior | Default |
 |------|---------|---------|
-| `'global'` | All folds' train+validation scores are averaged; a single best parameter set is selected across all folds before any test call. (R7 backward-compatible.) | ✓ |
-| `'causal-per-fold'` | Each fold independently evaluates its own candidates on its own train+validation, freezes the selection, then runs its test with that fold's own parameters. Later folds cannot alter earlier fold selections. | |
+| `'causal-per-fold'` | Each fold independently evaluates its own candidates on its own train+validation, freezes the selection, then runs its test with that fold's own parameters. Later folds cannot alter earlier fold selections. | ✓ (R8 only mode) |
+
+Invalid `selectionMode` values throw `INVALID_SELECTION_MODE` (fail-closed). The `selectionMode` field appears in the `ValidationReport` as `'causal-per-fold'` and is also accepted as an optional config field on `WalkForwardConfig`.
 
 ## Inclusive-Index Timeline Model
 
@@ -56,7 +57,9 @@ finalHoldoutBars = max(ceil(totalBars × finalHoldoutRatio), finalHoldoutMinBars
 ```
 When `finalHoldoutRatio` is absent: `finalHoldoutBars = max(3 × testBars, finalHoldoutMinBars)`.
 
-Constraints: `0 < ratio < 1` (finite), `minBars ≥ 0` (finite integer), result must be a positive integer strictly less than `totalBars`, and at least one valid development fold must be producible.
+Constraints: `0 < ratio < 1` (finite), `minBars ≥ 0` (finite; fractional accepted, rounded up via `Math.ceil` before `Math.max`), result must be a positive integer strictly less than `totalBars`, and at least one valid development fold must be producible.
+
+The minimum development footprint for one fold is: `featureLookback + train + validation + test + 2 × max(purge, labelHorizon)`. Inter-fold `outOfSampleGap`/embargo is NOT added — `finalHoldoutGap` already isolates development from holdout.
 
 The gap between development and holdout: `gap = max(purgeBars, embargoBars, labelHorizonBars)`.
 
@@ -84,7 +87,7 @@ Increasing the holdout ratio or minBars **reduces** the development region. Fewe
 ```typescript
 interface ValidationReport {
   contractVersion: '4A4-R8';
-  selectionMode: 'global' | 'causal-per-fold';
+  selectionMode: 'causal-per-fold';
   deploymentParameters?: Record<string, string | number>;   // from last valid fold
   deploymentCandidateId?: string;
   selectedParameters?: Record<string, string | number>;     // DEPRECATED — deep-equals deploymentParameters

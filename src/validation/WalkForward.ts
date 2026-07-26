@@ -6,7 +6,7 @@ import type {
   ValidationClock, FinalHoldoutConfig, CandidateResult,
 } from './ValidationTypes';
 import { makeReportId, deepFreeze, VALIDATION_WARNINGS, systemValidationClock } from './ValidationTypes';
-import { generateSplits, validateFoldIsolation } from './ChronologicalSplit';
+import { generateSplits, validateFoldIsolation, assertFoldIsolation } from './ChronologicalSplit';
 import { allocateFinalHoldout, computeHoldoutCount } from './FinalHoldout';
 
 export interface SimResult { grossPnl: number; volume: number; turnover: number; maxDrawdown: number; sharpe: number; sortino: number; profitFactor: number; trades: number; }
@@ -97,6 +97,12 @@ export function runWalkForward(
   // ── Final Holdout allocation (always-on, normalized defaults) ──
   const finalHoldoutConfig = allocateFinalHoldout(cfg);
 
+  // ── Selection mode — only 'causal-per-fold' (R8), fail-closed on invalid ──
+  if (cfg.selectionMode !== undefined && cfg.selectionMode !== 'causal-per-fold') {
+    throw new Error(`INVALID_SELECTION_MODE: only 'causal-per-fold' is supported, got '${cfg.selectionMode}'`);
+  }
+  const selectionMode: 'causal-per-fold' = 'causal-per-fold';
+
   // ── Fold generation (constrained by holdout) ──────────────────
   const devBars = finalHoldoutConfig.developmentEndExclusive;
   const devCfg = { ...cfg, totalBars: devBars };
@@ -108,12 +114,7 @@ export function runWalkForward(
   const warnings: ValidationWarning[] = [];
 
   // ── Validate fold isolation — structural violations throw ─────
-  for (let i = 0; i < splits.length; i++) {
-    const issues = validateFoldIsolation(splits[i], splits[i + 1]);
-    if (issues.length > 0) {
-      throw new Error(`FOLD_ISOLATION_VIOLATION: ${issues.join('; ')}`);
-    }
-  }
+  assertFoldIsolation(splits);
 
   const foldMetrics: FoldMetrics[] = [];
 
@@ -284,6 +285,7 @@ export function runWalkForward(
     createdAt: clock.nowISO(),
     validationContractVersion: contractVersion,
     contractVersion,
+    selectionMode,
     config: cfg,
     costConfig: costCfg,
     folds: finalFoldMetrics,

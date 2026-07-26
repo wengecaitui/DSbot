@@ -68,3 +68,13 @@ export function validateFoldIsolation(fold: ChronologicalSplit, nextFold?: Chron
   if (fold.train.start < fold.featureLookbackBars) issues.push('LEAKAGE: feature lookback before bar 0');
   return issues;
 }
+
+/** Assert structural isolation across adjacent fold pairs. Throws on any violation. */
+export function assertFoldIsolation(folds: readonly ChronologicalSplit[]): void {
+  for (let i = 0; i < folds.length; i++) {
+    const issues = validateFoldIsolation(folds[i], folds[i + 1]);
+    if (issues.length > 0) {
+      throw new Error(`FOLD_ISOLATION_VIOLATION: ${issues.join('; ')}`);
+    }
+  }
+}
