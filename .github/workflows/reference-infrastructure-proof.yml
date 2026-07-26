@@ -36,6 +36,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install Python dependencies
+        run: python -m pip install -r quant_engine/requirements.txt
       - name: Install
         run: npm ci
       - name: Re-run canonical validation
