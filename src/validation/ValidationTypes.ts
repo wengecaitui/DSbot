@@ -1,5 +1,33 @@
-// Stage 4A4-R1: Validation types with feature lookback, label horizon, deep freeze, deterministic clock.
+// Stage 4A4-R8: Causal-per-fold selection (R8 only mode), FinalHoldout, deployment contract, deep freeze, deterministic clock.
+
 import { createHash } from 'node:crypto';
+
+// ── Parameter type ───────────────────────────────────────────
+/** Flat key-value strategy parameters. Values are string | number (no nested objects). */
+export type StrategyParameters = Readonly<Record<string, string | number>>;
+
+/**
+ * Create a canonical frozen shallow copy of strategy parameters.
+ * Used for all stored parameter contracts: candidates, folds, deployment, reports.
+ * No caller object is modified or frozen by this function.
+ */
+export function canonicalParamsSnapshot(params: Record<string, string | number>): StrategyParameters {
+  return Object.freeze({ ...params });
+}
+
+/**
+ * Create a new mutable shallow copy for simulator invocation.
+ * Every simulator call receives its own distinct copy — no simulator ever
+ * receives a reference to a stored snapshot or to the caller's original object.
+ *
+ * LIMITATION: This is a SHALLOW copy. If a caller stores nested objects as param
+ * values (not supported by the string|number contract), mutations to those nested
+ * objects would propagate across copies. The contract only guarantees isolation
+ * for flat string|number values.
+ */
+export function paramsMutableCopy(params: StrategyParameters): Record<string, string | number> {
+  return { ...params };
+}
 
 // ── Warnings ──────────────────────────────────────────────────
 export const VALIDATION_WARNINGS = {
@@ -7,6 +35,7 @@ export const VALIDATION_WARNINGS = {
   INSUFFICIENT_SAMPLE: 'INSUFFICIENT_SAMPLE', PARAMETER_INSTABILITY: 'PARAMETER_INSTABILITY',
   EXCESSIVE_TURNOVER: 'EXCESSIVE_TURNOVER', SELECTION_BIAS_RISK: 'SELECTION_BIAS_RISK',
   COST_SENSITIVITY: 'COST_SENSITIVITY', LEAKAGE_DETECTED: 'LEAKAGE_DETECTED',
+  HOLDOUT_INSUFFICIENT_BARS: 'HOLDOUT_INSUFFICIENT_BARS', HOLDOUT_ALLOCATION_SHRUNK: 'HOLDOUT_ALLOCATION_SHRUNK',
 } as const;
 export type ValidationWarning = typeof VALIDATION_WARNINGS[keyof typeof VALIDATION_WARNINGS];
 
@@ -25,6 +54,16 @@ export interface WalkForwardConfig {
   readonly mode: 'rolling' | 'expanding';
   readonly featureLookbackBars?: number; readonly labelHorizonBars?: number;
   readonly minFoldBars?: number;
+  readonly finalHoldoutRatio?: number; readonly finalHoldoutMinBars?: number;
+  readonly selectionMode?: 'causal-per-fold';
+}
+
+// ── Final Holdout ─────────────────────────────────────────────
+export interface FinalHoldoutConfig {
+  readonly start: number; readonly end: number; readonly count: number;
+  readonly ratio: number; readonly minBars: number;
+  readonly gapBars: number;
+  readonly developmentEndExclusive: number;
 }
 
 // ── Clock ─────────────────────────────────────────────────────
@@ -36,35 +75,133 @@ export interface CostConfig { readonly feeBps: number; readonly spreadBps: numbe
 export interface CostBreakdown { readonly grossReturn: number; readonly fees: number; readonly spreadCost: number; readonly slippageCost: number; readonly latencyCost: number; readonly netReturn: number; }
 
 // ── Metrics ───────────────────────────────────────────────────
-export interface FoldMetrics { fold: number; trainMetrics: PerformanceMetrics; validationMetrics: PerformanceMetrics; testMetrics?: PerformanceMetrics; selected: boolean; rejectionReason?: string; }
+export interface CandidateResult {
+  readonly candidateId: string;
+  readonly params: StrategyParameters;
+  readonly validationScore: number;
+  readonly trainScore: number;
+  readonly accepted: boolean;
+  readonly rejectionReason?: string;
+}
+
+export interface FoldMetrics {
+  fold: number;
+  trainMetrics: PerformanceMetrics;
+  validationMetrics: PerformanceMetrics;
+  testMetrics?: PerformanceMetrics;
+  /** @deprecated True when this fold supplied deploymentParameters (equals usedForDeployment). */
+  selected: boolean;
+  /** Parameters selected by this fold (causal-per-fold mode). */
+  selectedParameters?: StrategyParameters;
+  /** Candidate ID selected by this fold. */
+  selectedCandidateId?: string;
+  /** All candidates evaluated by this fold (causal-per-fold mode). */
+  candidateResults?: readonly CandidateResult[];
+  /** True ONLY for the final valid selection fold whose params are deployment params. */
+  usedForDeployment: boolean;
+  rejectionReason?: string;
+}
+
 export interface PerformanceMetrics {
   readonly grossReturn: number; readonly netReturn: number; readonly maxDrawdown: number;
   readonly sharpeRatio: number; readonly sortinoRatio: number; readonly profitFactor: number;
   readonly tradeCount: number; readonly turnover: number; readonly costBreakdown: CostBreakdown;
-  readonly _volume?: number; // internal: original volume for recomputation
+  readonly _volume?: number;
 }
 
 // ── Report ────────────────────────────────────────────────────
+export interface FinalHoldoutRange {
+  readonly start: number; readonly end: number; readonly count: number;
+}
+
 export interface ValidationReport {
   readonly reportId: string; readonly createdAt: string;
+  readonly validationContractVersion: string;
+  readonly contractVersion: string;
+  readonly selectionMode: 'causal-per-fold';
   readonly config: WalkForwardConfig; readonly costConfig: CostConfig;
   readonly folds: readonly FoldMetrics[]; readonly selectedFold?: number;
-  readonly selectedParameters?: Readonly<Record<string, string | number>>;
+  /** @deprecated Use deploymentParameters instead. */
+  readonly selectedParameters?: StrategyParameters;
+  readonly deploymentParameters?: StrategyParameters;
+  readonly deploymentCandidateId?: string;
   readonly warnings: readonly ValidationWarning[];
   readonly limitations: readonly string[];
   readonly stressScenarios?: readonly StressScenario[];
   readonly simulatorVersion?: string;
+  /** Top-level holdout range (always present when final holdout is configured). */
+  readonly finalHoldoutRange?: FinalHoldoutRange;
+  /** Top-level holdout performance metrics (present when holdout was evaluated). */
+  readonly finalHoldoutMetrics?: PerformanceMetrics;
+  /** Top-level holdout evaluation count (0 if no deployment params, 1 otherwise). */
+  readonly finalHoldoutEvaluationCount: number;
 }
+
 export interface StressScenario { readonly name: string; readonly multiplier: number; readonly metrics: PerformanceMetrics; }
 
-export function makeReportId(cfg: WalkForwardConfig, cost: CostConfig, datasetHash?: string, selected?: Record<string, string | number>, simVersion?: string): string {
-  return createHash('sha256').update(JSON.stringify({ cfg, cost, datasetHash: datasetHash ?? '', selected: selected ?? {}, simVersion: simVersion ?? '' })).digest('hex').slice(0, 16);
+/**
+ * Compute a deterministic report identity from the effective (default-resolved) config.
+ *
+ * Normalized defaults:
+ *   - finalHoldoutRatio defaults to 0.15
+ *   - finalHoldoutMinBars defaults to 3 * testBars
+ *   - effective holdout count = max(ceil(totalBars * effectiveRatio), effectiveMinBars)
+ *
+ * Omitted defaults and explicit equivalent defaults produce the same reportId.
+ *
+ * When `effectiveHoldout` is provided, the full normalized range (start, end, count)
+ * is serialized into the identity. When omitted, only the computed count is included.
+ */
+export function makeReportId(
+  cfg: WalkForwardConfig,
+  cost: CostConfig,
+  effectiveHoldout?: { start: number; end: number; count: number },
+  opts: {
+    datasetHash?: string; selected?: Record<string, string | number>;
+    simVersion?: string; contractVersion?: string;
+    deploymentParams?: Record<string, string | number>;
+  } = {},
+): string {
+  const effectiveRatio = cfg.finalHoldoutRatio ?? 0.15;
+  const effectiveMin = cfg.finalHoldoutMinBars ?? 3 * cfg.testBars;
+  const effectiveCount = effectiveHoldout
+    ? effectiveHoldout.count
+    : Math.max(Math.ceil(cfg.totalBars * effectiveRatio), Math.ceil(effectiveMin));
+  // Normalize selectionMode: omitted and explicit 'causal-per-fold' produce identical IDs.
+  const selectionMode: 'causal-per-fold' = 'causal-per-fold';
+  const featureLookback = cfg.featureLookbackBars ?? 0;
+  const labelHorizon = cfg.labelHorizonBars ?? 0;
+  const minFoldBars = cfg.minFoldBars ?? 0;
+  return createHash('sha256').update(JSON.stringify({
+    // Enumerate cfg fields explicitly for deterministic JSON key ordering.
+    cfg: {
+      totalBars: cfg.totalBars,
+      trainBars: cfg.trainBars,
+      validationBars: cfg.validationBars,
+      testBars: cfg.testBars,
+      purgeBars: cfg.purgeBars,
+      embargoBars: cfg.embargoBars,
+      mode: cfg.mode,
+      featureLookbackBars: featureLookback,
+      labelHorizonBars: labelHorizon,
+      minFoldBars,
+      finalHoldoutRatio: effectiveRatio,
+      finalHoldoutMinBars: effectiveMin,
+      selectionMode,
+    },
+    cost, datasetHash: opts.datasetHash ?? '', selected: opts.selected ?? {},
+    simVersion: opts.simVersion ?? '', contractVersion: opts.contractVersion ?? '4A4-R8',
+    finalHoldoutRange: effectiveHoldout
+      ? { start: effectiveHoldout.start, end: effectiveHoldout.end, count: effectiveHoldout.count }
+      : { count: effectiveCount },
+    deployment: opts.deploymentParams ?? {},
+  })).digest('hex').slice(0, 16);
 }
 
 // ── Parameter selection ───────────────────────────────────────
 export interface ParameterCandidate {
   readonly id: string;
-  readonly params: Readonly<Record<string, string | number>>;
+  readonly params: StrategyParameters;
   readonly validationScore: number;
   readonly trainScore: number;
   readonly foldScores: readonly number[];
@@ -77,7 +214,7 @@ export interface ParameterCandidate {
 }
 export interface ParameterSelectionResult {
   readonly candidates: readonly ParameterCandidate[];
-  readonly selectedId?: string; readonly selectedParams?: Readonly<Record<string, string | number>>;
+  readonly selectedId?: string; readonly selectedParams?: StrategyParameters;
 }
 
 // ── Deep freeze ───────────────────────────────────────────────
