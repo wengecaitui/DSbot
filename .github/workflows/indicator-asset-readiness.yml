@@ -1,0 +1,64 @@
+name: Indicator Asset Readiness Proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/indicator-asset-readiness.yml'
+      - 'docs/all_indicators_pine_v2.txt'
+      - 'quant_engine/**'
+      - 'scripts/run-indicator-asset-audit.py'
+      - 'scripts/run-private-ohlcv-audit.py'
+      - 'package.json'
+
+permissions:
+  contents: read
+
+jobs:
+  asset-readiness:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      PROOF_PATH: artifacts/indicator-asset-readiness.json
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install -r quant_engine/requirements.txt
+          npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Generate and independently re-verify asset readiness proof
+        run: |
+          python scripts/run-indicator-asset-audit.py --source-commit "$SOURCE_COMMIT" --output "$PROOF_PATH"
+          python scripts/run-indicator-asset-audit.py --source-commit "$SOURCE_COMMIT" --verify --output "$PROOF_PATH"
+      - name: Upload source-free proof subject
+        uses: actions/upload-artifact@v4
+        with:
+          name: indicator-asset-readiness-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.PROOF_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed build provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.PROOF_PATH }}
