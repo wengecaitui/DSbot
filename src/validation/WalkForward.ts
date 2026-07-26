@@ -3,9 +3,9 @@
 import type {
   WalkForwardConfig, CostConfig, CostBreakdown, PerformanceMetrics, FoldMetrics,
   ParameterCandidate, ValidationReport, ValidationWarning, StressScenario,
-  ValidationClock, CandidateResult,
+  ValidationClock, CandidateResult, StrategyParameters,
 } from './ValidationTypes';
-import { makeReportId, deepFreeze, systemValidationClock } from './ValidationTypes';
+import { makeReportId, deepFreeze, systemValidationClock, canonicalParamsSnapshot, paramsMutableCopy } from './ValidationTypes';
 import { generateSplits, assertFoldIsolation } from './ChronologicalSplit';
 import { allocateFinalHoldout } from './FinalHoldout';
 
@@ -62,16 +62,17 @@ export type ParameterSelectionResult = { candidates: ParameterCandidate[]; selec
 // ── Per-fold candidate evaluation (causal-per-fold mode) ────────
 function evaluateFoldCandidates(
   foldIdx: number, splits: { train: { start: number; end: number }; validation: { start: number; end: number } },
-  params: Record<string, string | number>,
+  params: StrategyParameters,
   simulator: (start: number, end: number, params?: Record<string, string | number>) => SimResult,
   costCfg: CostConfig, minTrades: number, ledger: SimCallLedger,
 ): { candidate: ParameterCandidate; trainMetrics: PerformanceMetrics; valMetrics: PerformanceMetrics } | null {
+  // params is the canonical snapshot — no simulator ever receives this reference.
   const cid = JSON.stringify(params);
   ledger.calls++; ledger.log.push({ phase: 'train', fold: foldIdx, candidateId: cid, start: splits.train.start, end: splits.train.end });
-  const tr = simulator(splits.train.start, splits.train.end, params);
+  const tr = simulator(splits.train.start, splits.train.end, paramsMutableCopy(params));
   const trainM = makeMetrics(tr, costCfg);
   ledger.calls++; ledger.log.push({ phase: 'validation', fold: foldIdx, candidateId: cid, start: splits.validation.start, end: splits.validation.end });
-  const vr = simulator(splits.validation.start, splits.validation.end, params);
+  const vr = simulator(splits.validation.start, splits.validation.end, paramsMutableCopy(params));
   const valM = makeMetrics(vr, costCfg);
 
   let accept = true; let reason = '';
@@ -122,7 +123,7 @@ export function runWalkForward(
   // becomes the deployment fold. usedForDeployment is set after the loop.
   interface FoldSelection {
     foldIdx: number;
-    params: Record<string, string | number>;
+    params: StrategyParameters;
     candidateId: string;
     trainMetrics: PerformanceMetrics;
     valMetrics: PerformanceMetrics;
@@ -131,12 +132,16 @@ export function runWalkForward(
 
   // ── Causal-per-fold (R8 only mode) ────────────────────────────
   if (opts.paramGrid && opts.paramGrid.length > 0) {
+    // Snapshot every paramGrid entry before any fold evaluation.
+    // No caller object is modified or frozen.
+    const canonicalGrid: StrategyParameters[] = opts.paramGrid.map(p => canonicalParamsSnapshot(p));
+
     for (const s of splits) {
       const results: CandidateResult[] = [];
       const allCandidates: ParameterCandidate[] = [];
 
-      for (const p of opts.paramGrid) {
-        const ev = evaluateFoldCandidates(s.fold, s, p, simulator, costCfg, 5, ledger);
+      for (const canonP of canonicalGrid) {
+        const ev = evaluateFoldCandidates(s.fold, s, canonP, simulator, costCfg, 5, ledger);
         if (!ev) continue;
         const { candidate, trainMetrics, valMetrics } = ev;
         results.push({ candidateId: candidate.id, params: candidate.params, validationScore: candidate.validationScore, trainScore: candidate.trainScore, accepted: candidate.accepted, rejectionReason: candidate.rejectionReason });
@@ -152,7 +157,7 @@ export function runWalkForward(
       let testM: PerformanceMetrics | undefined;
       if (foldParams) {
         ledger.calls++; ledger.log.push({ phase: 'test', fold: s.fold, start: s.test.start, end: s.test.end });
-        const ts = simulator(s.test.start, s.test.end, foldParams);
+        const ts = simulator(s.test.start, s.test.end, paramsMutableCopy(foldParams));
         testM = makeMetrics(ts, costCfg);
       }
 
@@ -218,7 +223,7 @@ export function runWalkForward(
   }
 
   // ── Deployment resolution: only the FINAL valid selection fold ──
-  let deploymentParams: Record<string, string | number> | undefined;
+  let deploymentParams: StrategyParameters | undefined;
   let deploymentCandidateId: string | undefined;
   let selectedFoldIndex: number | undefined;
 
@@ -252,7 +257,7 @@ export function runWalkForward(
 
   if (deploymentParams) {
     ledger.calls++; ledger.log.push({ phase: 'final-holdout', fold: -1, start: finalHoldoutConfig.start, end: finalHoldoutConfig.end });
-    const fhSim = simulator(finalHoldoutConfig.start, finalHoldoutConfig.end, deploymentParams);
+    const fhSim = simulator(finalHoldoutConfig.start, finalHoldoutConfig.end, paramsMutableCopy(deploymentParams));
     finalHoldoutMetrics = makeMetrics(fhSim, costCfg);
   }
 

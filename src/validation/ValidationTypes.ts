@@ -2,6 +2,33 @@
 
 import { createHash } from 'node:crypto';
 
+// ── Parameter type ───────────────────────────────────────────
+/** Flat key-value strategy parameters. Values are string | number (no nested objects). */
+export type StrategyParameters = Readonly<Record<string, string | number>>;
+
+/**
+ * Create a canonical frozen shallow copy of strategy parameters.
+ * Used for all stored parameter contracts: candidates, folds, deployment, reports.
+ * No caller object is modified or frozen by this function.
+ */
+export function canonicalParamsSnapshot(params: Record<string, string | number>): StrategyParameters {
+  return Object.freeze({ ...params });
+}
+
+/**
+ * Create a new mutable shallow copy for simulator invocation.
+ * Every simulator call receives its own distinct copy — no simulator ever
+ * receives a reference to a stored snapshot or to the caller's original object.
+ *
+ * LIMITATION: This is a SHALLOW copy. If a caller stores nested objects as param
+ * values (not supported by the string|number contract), mutations to those nested
+ * objects would propagate across copies. The contract only guarantees isolation
+ * for flat string|number values.
+ */
+export function paramsMutableCopy(params: StrategyParameters): Record<string, string | number> {
+  return { ...params };
+}
+
 // ── Warnings ──────────────────────────────────────────────────
 export const VALIDATION_WARNINGS = {
   VALIDATION_DEGRADATION: 'VALIDATION_DEGRADATION', TEST_DEGRADATION: 'TEST_DEGRADATION',
@@ -50,7 +77,7 @@ export interface CostBreakdown { readonly grossReturn: number; readonly fees: nu
 // ── Metrics ───────────────────────────────────────────────────
 export interface CandidateResult {
   readonly candidateId: string;
-  readonly params: Readonly<Record<string, string | number>>;
+  readonly params: StrategyParameters;
   readonly validationScore: number;
   readonly trainScore: number;
   readonly accepted: boolean;
@@ -65,7 +92,7 @@ export interface FoldMetrics {
   /** @deprecated True when this fold supplied deploymentParameters (equals usedForDeployment). */
   selected: boolean;
   /** Parameters selected by this fold (causal-per-fold mode). */
-  selectedParameters?: Readonly<Record<string, string | number>>;
+  selectedParameters?: StrategyParameters;
   /** Candidate ID selected by this fold. */
   selectedCandidateId?: string;
   /** All candidates evaluated by this fold (causal-per-fold mode). */
@@ -95,8 +122,8 @@ export interface ValidationReport {
   readonly config: WalkForwardConfig; readonly costConfig: CostConfig;
   readonly folds: readonly FoldMetrics[]; readonly selectedFold?: number;
   /** @deprecated Use deploymentParameters instead. */
-  readonly selectedParameters?: Readonly<Record<string, string | number>>;
-  readonly deploymentParameters?: Readonly<Record<string, string | number>>;
+  readonly selectedParameters?: StrategyParameters;
+  readonly deploymentParameters?: StrategyParameters;
   readonly deploymentCandidateId?: string;
   readonly warnings: readonly ValidationWarning[];
   readonly limitations: readonly string[];
@@ -174,7 +201,7 @@ export function makeReportId(
 // ── Parameter selection ───────────────────────────────────────
 export interface ParameterCandidate {
   readonly id: string;
-  readonly params: Readonly<Record<string, string | number>>;
+  readonly params: StrategyParameters;
   readonly validationScore: number;
   readonly trainScore: number;
   readonly foldScores: readonly number[];
@@ -187,7 +214,7 @@ export interface ParameterCandidate {
 }
 export interface ParameterSelectionResult {
   readonly candidates: readonly ParameterCandidate[];
-  readonly selectedId?: string; readonly selectedParams?: Readonly<Record<string, string | number>>;
+  readonly selectedId?: string; readonly selectedParams?: StrategyParameters;
 }
 
 // ── Deep freeze ───────────────────────────────────────────────

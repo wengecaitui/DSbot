@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateSplits, validateFoldIsolation, assertFoldIsolation } from '../../src/validation/ChronologicalSplit';
 import { computeCosts, makeMetrics, selectParameters, runWalkForward, recomputeCosts, type SimCallLedger, type SimResult } from '../../src/validation/WalkForward';
-import { deepFreeze, makeReportId } from '../../src/validation/ValidationTypes';
+import { deepFreeze, makeReportId, canonicalParamsSnapshot, paramsMutableCopy } from '../../src/validation/ValidationTypes';
 import { allocateFinalHoldout, computeHoldoutCount, DEFAULT_HOLDOUT_RATIO } from '../../src/validation/FinalHoldout';
 import type { WalkForwardConfig, CostConfig, ValidationClock, ParameterCandidate, ChronologicalSplit } from '../../src/validation/ValidationTypes';
 
@@ -940,4 +940,294 @@ test('120. reportId: omitted effectiveHoldout still produces deterministic ID (b
   // Omitted effectiveHoldout and one with only-count must differ from full-range
   const idWithRange = makeReportId(CFG, COST, { start: 40000, end: 45000, count: 1000 });
   assert.notEqual(id1, idWithRange, 'full-range ID must differ from count-only ID');
+});
+
+// ════════════════════════════════════════════════════════════════
+// RC1 adversarial mutation tests: parameter ownership isolation
+// ════════════════════════════════════════════════════════════════
+
+// ── A: Later-fold simulator mutation cannot change earlier fold ──
+test('121. isolation-A: later-fold simulator param mutation does NOT change earlier fold selection', () => {
+  const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
+  const holdoutCfg = allocateFinalHoldout(cfgA);
+  const devCfg = { ...cfgA, totalBars: holdoutCfg.developmentEndExclusive };
+  const splits = generateSplits(devCfg);
+  assert.ok(splits.length >= 2, `need >=2 folds, got ${splits.length}`);
+
+  const f0 = splits[0];
+  const laterSplits = splits.slice(1);
+  let mutationCount = 0;
+
+  // Run 1: baseline — uniform simulator, no mutation
+  const r1 = runWalkForward(cfgA, COST, sim, { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
+
+  // Run 2: later-fold simulator MUTATES params — delete keys, add garbage
+  const r2 = runWalkForward(cfgA, COST,
+    (s, e, p) => {
+      const isLaterFold = laterSplits.some(sp =>
+        (s === sp.train.start && e === sp.train.end) ||
+        (s === sp.validation.start && e === sp.validation.end) ||
+        (s === sp.test.start && e === sp.test.end));
+      // Mutate params on later folds — delete keys, add junk
+      if (isLaterFold && p) {
+        delete p.a;
+        delete p.b;
+        p.mutated = 'YES';
+        mutationCount++;
+      }
+      // But still return uniform output so selection doesn't change
+      return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+    },
+    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
+
+  assert.ok(mutationCount > 0, 'later-fold mutation path must execute');
+
+  // Fold 0 must be IDENTICAL — selection, params, testMetrics, candidateResults
+  assert.deepStrictEqual(r1.folds[0].selectedCandidateId, r2.folds[0].selectedCandidateId,
+    'fold0 selectedCandidateId must be unchanged by later-fold mutation');
+  assert.deepStrictEqual(r1.folds[0].selectedParameters, r2.folds[0].selectedParameters,
+    'fold0 selectedParameters must be unchanged by later-fold mutation');
+  assert.deepStrictEqual(r1.folds[0].testMetrics, r2.folds[0].testMetrics,
+    'fold0 testMetrics must be unchanged by later-fold mutation');
+  assert.deepStrictEqual(r1.folds[0].candidateResults, r2.folds[0].candidateResults,
+    'fold0 candidateResults must be unchanged by later-fold mutation');
+
+  // Fold0 stored params must not contain the mutation markers
+  if (r2.folds[0].selectedParameters) {
+    assert.equal(r2.folds[0].selectedParameters.mutated, undefined,
+      'fold0 stored params must not contain mutation marker');
+  }
+  if (r2.folds[0].candidateResults) {
+    for (const cr of r2.folds[0].candidateResults) {
+      assert.equal(cr.params.mutated, undefined,
+        'fold0 candidate params must not contain mutation marker');
+    }
+  }
+
+  // Deployment params must not contain mutation markers
+  if (r2.deploymentParameters) {
+    assert.equal(r2.deploymentParameters.mutated, undefined,
+      'deploymentParams must not contain mutation marker');
+  }
+});
+
+// ── B: Final-holdout mutation cannot change deployment/folds ────
+test('122. isolation-B: final-holdout param mutation does NOT change deployment alias or folds', () => {
+  const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
+  const r1 = runWalkForward(cfgA, COST, sim, { paramGrid: [{ a: 1 }], clock: CLOCK });
+
+  const hStart = r1.finalHoldoutRange!.start;
+  const hEnd = r1.finalHoldoutRange!.end;
+  let holdoutMutationCount = 0;
+
+  const r2 = runWalkForward(cfgA, COST,
+    (s, e, p) => {
+      const isHoldout = s === hStart && e === hEnd;
+      if (isHoldout && p) {
+        // Mutate holdout params — delete keys, add junk
+        delete p.a;
+        p.holdoutMutated = 'YES';
+        holdoutMutationCount++;
+      }
+      return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+    },
+    { paramGrid: [{ a: 1 }], clock: CLOCK });
+
+  assert.equal(holdoutMutationCount, 1, 'final holdout mutation must execute exactly once');
+
+  // Deployment must be identical
+  assert.deepStrictEqual(r1.deploymentParameters, r2.deploymentParameters,
+    'deploymentParameters must be unchanged by holdout mutation');
+  assert.deepStrictEqual(r1.deploymentCandidateId, r2.deploymentCandidateId,
+    'deploymentCandidateId must be unchanged by holdout mutation');
+
+  // All folds must be identical
+  assert.deepStrictEqual(r1.folds, r2.folds,
+    'folds must be unchanged by holdout mutation');
+
+  // Holdout metrics may differ (simulator returned same values but mutation happened)
+  // but deployment params must not carry mutation marker
+  if (r2.deploymentParameters) {
+    assert.equal(r2.deploymentParameters.holdoutMutated, undefined,
+      'deploymentParams must not contain holdout mutation marker');
+  }
+});
+
+// ── C: Caller original grid values and frozen states unchanged ──
+test('123. isolation-C: caller original paramGrid values unchanged and NOT frozen by walk-forward', () => {
+  const originalGrid: Record<string, string | number>[] = [
+    { a: 1, b: 'hello' },
+    { c: 42, d: 'world' },
+  ];
+  // Deep-clone before running
+  const clone = originalGrid.map(p => ({ ...p }));
+
+  const r = runWalkForward(
+    { ...CFG, trainBars: 500, totalBars: 50000 },
+    COST, sim,
+    { paramGrid: originalGrid, clock: CLOCK });
+
+  // Verify original grid is unchanged
+  assert.deepStrictEqual(originalGrid, clone,
+    'caller paramGrid must be unchanged after walk-forward');
+  // Individual entries must still have their original values
+  assert.equal(originalGrid[0].a, 1);
+  assert.equal(originalGrid[0].b, 'hello');
+  assert.equal(originalGrid[1].c, 42);
+  assert.equal(originalGrid[1].d, 'world');
+
+  // Verify original grid is NOT frozen (caller retains ownership)
+  assert.equal(Object.isFrozen(originalGrid), false,
+    'caller paramGrid array must not be frozen');
+  assert.equal(Object.isFrozen(originalGrid[0]), false,
+    'caller paramGrid entries must not be frozen');
+  assert.equal(Object.isFrozen(originalGrid[1]), false,
+    'caller paramGrid entries must not be frozen');
+
+  // But stored snapshots in report MUST be frozen
+  assert.ok(r.reportId.length > 0, 'report must be produced');
+  // The report itself is deep-frozen
+  assert.ok(Object.isFrozen(r), 'report must be frozen');
+  if (r.deploymentParameters) {
+    assert.ok(Object.isFrozen(r.deploymentParameters),
+      'deploymentParameters snapshot must be frozen');
+  }
+  for (const fm of r.folds) {
+    if (fm.selectedParameters) {
+      assert.ok(Object.isFrozen(fm.selectedParameters),
+        `fold ${fm.fold} selectedParameters snapshot must be frozen`);
+    }
+    if (fm.candidateResults) {
+      for (const cr of fm.candidateResults) {
+        assert.ok(Object.isFrozen(cr.params),
+          `fold ${fm.fold} candidate params snapshot must be frozen`);
+      }
+    }
+  }
+});
+
+// ── D: Every parameterized simulator call receives a distinct mutable reference ──
+test('124. isolation-D: every parameterized simulator call receives distinct mutable copy', () => {
+  const calls: Array<{ start: number; end: number; params: Record<string, string | number> }> = [];
+  const cfgA = { ...CFG, trainBars: 500, totalBars: 50000 };
+  const holdoutCfg = allocateFinalHoldout(cfgA);
+  const splits = generateSplits({ ...cfgA, totalBars: holdoutCfg.developmentEndExclusive });
+
+  const r = runWalkForward(
+    cfgA,
+    COST,
+    (s, e, p) => {
+      if (p !== undefined) {
+        calls.push({ start: s, end: e, params: p });
+        p.mutableProbe = 1;
+        delete p.mutableProbe;
+      }
+      return { grossPnl: (e - s) * 3, volume: 5000, turnover: 3, maxDrawdown: 0.12, sharpe: 1.8, sortino: 2.2, profitFactor: 1.6, trades: 15 };
+    },
+    { paramGrid: [{ a: 1 }, { b: 2 }], clock: CLOCK });
+
+  const paramRefs = calls.map(call => call.params);
+  assert.ok(paramRefs.length > 0, 'parameterized simulator calls must be observed');
+
+  // Every param ref must be a distinct object (no two calls share the same reference)
+  for (let i = 0; i < paramRefs.length; i++) {
+    for (let j = i + 1; j < paramRefs.length; j++) {
+      assert.notStrictEqual(paramRefs[i], paramRefs[j],
+        `param refs at [${i}] and [${j}] must be distinct objects`);
+    }
+  }
+
+  // Every param ref must be mutable (not frozen)
+  for (let i = 0; i < paramRefs.length; i++) {
+    assert.equal(Object.isFrozen(paramRefs[i]), false,
+      `param ref [${i}] must be mutable (not frozen)`);
+  }
+
+  // Test and final-holdout param refs must differ from stored report snapshots
+  if (r.deploymentParameters) {
+    for (let i = 0; i < paramRefs.length; i++) {
+      assert.notStrictEqual(paramRefs[i], r.deploymentParameters,
+        `paramRef [${i}] must not be the same object as deploymentParameters snapshot`);
+    }
+  }
+
+  const finalHoldoutCall = calls.find(call =>
+    call.start === r.finalHoldoutRange?.start && call.end === r.finalHoldoutRange?.end);
+  assert.ok(finalHoldoutCall, 'final holdout parameterized call must be observed');
+  assert.notStrictEqual(finalHoldoutCall.params, r.deploymentParameters,
+    'final holdout params must differ from deployment snapshot');
+
+  for (const fold of r.folds) {
+    const split = splits.find(candidate => candidate.fold === fold.fold);
+    assert.ok(split, `split for fold ${fold.fold} must exist`);
+    const foldTestCall = calls.find(call =>
+      call.start === split.test.start && call.end === split.test.end);
+    assert.ok(foldTestCall, `fold ${fold.fold} test parameterized call must be observed`);
+    assert.notStrictEqual(foldTestCall.params, fold.selectedParameters,
+      `fold ${fold.fold} test params must differ from stored fold snapshot`);
+  }
+
+  // Candidate stored params must NOT be same object as any simulator ref
+  for (const fm of r.folds) {
+    if (fm.candidateResults) {
+      for (const cr of fm.candidateResults) {
+        for (let i = 0; i < paramRefs.length; i++) {
+          assert.notStrictEqual(paramRefs[i], cr.params,
+            `paramRef [${i}] must not be same object as stored candidate params`);
+        }
+      }
+    }
+  }
+});
+
+// ── E: Stored fold/deployment/alias snapshots frozen while originals are not ──
+test('125. isolation-E: stored snapshots frozen, caller originals NOT frozen', () => {
+  const callerGrid: Record<string, string | number>[] = [
+    { x: 10, y: 20 },
+    { x: 30, y: 40 },
+  ];
+
+  const r = runWalkForward(
+    { ...CFG, trainBars: 500, totalBars: 50000 },
+    COST, sim,
+    { paramGrid: callerGrid, clock: CLOCK });
+
+  // Caller grid is NOT frozen
+  assert.equal(Object.isFrozen(callerGrid), false, 'caller grid array must not be frozen');
+  assert.equal(Object.isFrozen(callerGrid[0]), false, 'caller grid[0] must not be frozen');
+  assert.equal(Object.isFrozen(callerGrid[1]), false, 'caller grid[1] must not be frozen');
+
+  // All stored deployment/candidate/fold param snapshots ARE frozen
+  if (r.deploymentParameters) {
+    assert.ok(Object.isFrozen(r.deploymentParameters),
+      'deploymentParameters must be frozen');
+  }
+
+  for (const fm of r.folds) {
+    if (fm.selectedParameters) {
+      assert.ok(Object.isFrozen(fm.selectedParameters),
+        `fold ${fm.fold} selectedParameters must be frozen`);
+    }
+    if (fm.candidateResults) {
+      for (const cr of fm.candidateResults) {
+        assert.ok(Object.isFrozen(cr.params),
+          `fold ${fm.fold} candidate ${cr.candidateId} params must be frozen`);
+      }
+    }
+  }
+
+  // canonicalParamsSnapshot function correctness
+  const snap = canonicalParamsSnapshot({ foo: 'bar', num: 99 });
+  assert.ok(Object.isFrozen(snap), 'canonicalParamsSnapshot result must be frozen');
+  assert.deepStrictEqual(snap, { foo: 'bar', num: 99 }, 'snapshot must preserve values');
+
+  // paramsMutableCopy correctness: returns mutable distinct copy
+  const copy = paramsMutableCopy(snap);
+  assert.equal(Object.isFrozen(copy), false, 'paramsMutableCopy result must not be frozen');
+  assert.notStrictEqual(copy, snap, 'paramsMutableCopy must return a distinct object');
+  assert.deepStrictEqual(copy, snap, 'paramsMutableCopy must preserve values');
+  // Mutate the copy — must not affect snapshot
+  copy.foo = 'mutated';
+  assert.equal(snap.foo, 'bar', 'snapshot must be unaffected by copy mutation');
+  assert.equal(copy.foo, 'mutated', 'copy must accept mutation');
 });
