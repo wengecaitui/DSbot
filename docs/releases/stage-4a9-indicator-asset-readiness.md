@@ -16,7 +16,7 @@ NOT APPROVED FOR PAPER, TESTNET OR LIVE
 - 9 assets are indicator components and must not be promoted into standalone strategies merely to increase the count.
 - Consequently, the current real-Walk-Forward-ready count is 0. This is a fail-closed readiness result, not a zero-trade backtest.
 
-The machine-readable proof is generated with `scripts/run-indicator-asset-audit.py`. It includes no Pine or Python source text and no host-specific private paths.
+The machine-readable proof is generated with `scripts/run-indicator-asset-audit.py`. Text identities use canonical UTF-8/LF bytes so Windows and Linux recompute the same digest. The artifact includes no Pine or Python source text and no host-specific private paths.
 
 ## Conservative lifecycle boundary
 

@@ -60,6 +60,11 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _text_file_sha256(path: Path) -> str:
+    """Hash canonical UTF-8/LF text, independent of checkout line endings."""
+    return _sha256(path.read_text(encoding="utf-8").encode("utf-8"))
+
+
 def _repo_file(repo: Path, relative: str) -> Path:
     path = (repo / relative).resolve()
     if repo.resolve() not in path.parents:
@@ -141,7 +146,7 @@ def build_asset_manifest(repo: Path, source_commit: str = "LOCAL") -> dict[str, 
             **pine,
             "registryName": contract["registry"],
             "pythonPath": contract["python"],
-            "pythonFileSha256": _sha256(python_path.read_bytes()),
+            "pythonFileSha256": _text_file_sha256(python_path),
             "pythonSymbol": contract["symbol"],
             "pythonSymbolSha256": _symbol_sha256(python_path, contract["symbol"]),
             "registryPath": registry_relative,
@@ -161,12 +166,12 @@ def build_asset_manifest(repo: Path, source_commit: str = "LOCAL") -> dict[str, 
         "sourceCommit": source_commit,
         "pineCollection": {
             "path": "docs/all_indicators_pine_v2.txt",
-            "sha256": _sha256(pine_path.read_bytes()),
+            "sha256": _text_file_sha256(pine_path),
             "assetCount": len(assets),
         },
         "registry": {
-            "daemonSha256": _sha256(daemon_path.read_bytes()),
-            "indicatorRegistrySha256": _sha256(registry_path.read_bytes()),
+            "daemonSha256": _text_file_sha256(daemon_path),
+            "indicatorRegistrySha256": _text_file_sha256(registry_path),
         },
         "counts": {
             "pineAssetsVerified": len(assets),

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
 from pathlib import Path
 
 import pandas as pd
 
-from quant_engine.proof.asset_manifest import build_asset_manifest, verify_asset_manifest
+from quant_engine.proof.asset_manifest import _text_file_sha256, build_asset_manifest, verify_asset_manifest
 from quant_engine.proof.gap_policy import GapPolicy, audit_ohlcv
 from quant_engine.proof.strategy_adapter import Action, simulate_window
 from quant_engine.proof.walk_forward import WalkForwardConfig, run_causal_walk_forward
@@ -75,6 +76,14 @@ class AssetManifestTests(unittest.TestCase):
         manifest = build_asset_manifest(REPO, "expected")
         with self.assertRaisesRegex(ValueError, "COMMIT_MISMATCH"):
             verify_asset_manifest(REPO, manifest, expected_source_commit="different")
+
+    def test_text_hash_is_checkout_line_ending_independent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lf = Path(directory) / "lf.txt"
+            crlf = Path(directory) / "crlf.txt"
+            lf.write_bytes(b"alpha\nbeta\n")
+            crlf.write_bytes(b"alpha\r\nbeta\r\n")
+            self.assertEqual(_text_file_sha256(lf), _text_file_sha256(crlf))
 
 
 class GapPolicyTests(unittest.TestCase):
