@@ -334,3 +334,73 @@ export function createRealBlockedPaperReadinessAudit(timestamp: string): AppendO
   audit.append({ timestamp, fromState: 'UNREVIEWED', toState: 'REVIEW_BLOCKED', eventType: 'TRANSITION', payload: { reason: PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY, paperApproved: false, liveApproved: false } });
   return audit;
 }
+
+// ── Stage 4B2 Decision Receipt (source-free, deterministic) ─────
+export const STAGE_4B2_RECEIPT_SCHEMA = 'stage-4b2.paper-readiness-receipt.v1' as const;
+
+export interface Stage4B2Receipt {
+  readonly schemaVersion: typeof STAGE_4B2_RECEIPT_SCHEMA;
+  readonly sourceCommit: string;
+  readonly stage4AClosureAuditId: string;
+  readonly stage4B1ProofId: string;
+  readonly stage4B1DecisionId: string;
+  readonly reviewEligible: false;
+  readonly paperApproved: false;
+  readonly testnetApproved: false;
+  readonly liveApproved: false;
+  readonly paperRuntimeChanges: false;
+  readonly liveExecutionChanges: false;
+  readonly status: typeof PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY;
+  readonly generatedAt: string;
+  readonly receiptId: string;
+}
+
+export function createStage4B2Receipt(opts: {
+  sourceCommit: string;
+  stage4AClosureAuditId: string;
+  stage4B1ProofId: string;
+  stage4B1DecisionId: string;
+  generatedAt: string;
+}): Stage4B2Receipt {
+  if (typeof opts.sourceCommit !== 'string' || opts.sourceCommit.length !== 40) throw new Error('RECEIPT_INVALID:SOURCE_COMMIT');
+  if (typeof opts.stage4AClosureAuditId !== 'string' || opts.stage4AClosureAuditId.length !== 64) throw new Error('RECEIPT_INVALID:STAGE_4A_CLOSURE');
+  if (typeof opts.stage4B1ProofId !== 'string' || opts.stage4B1ProofId.length !== 64) throw new Error('RECEIPT_INVALID:STAGE_4B1_PROOF');
+  if (typeof opts.stage4B1DecisionId !== 'string' || opts.stage4B1DecisionId.length !== 64) throw new Error('RECEIPT_INVALID:STAGE_4B1_DECISION');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(opts.generatedAt)) throw new Error('RECEIPT_INVALID:TIMESTAMP');
+  const body: Omit<Stage4B2Receipt, 'receiptId'> = {
+    schemaVersion: STAGE_4B2_RECEIPT_SCHEMA, sourceCommit: opts.sourceCommit,
+    stage4AClosureAuditId: opts.stage4AClosureAuditId, stage4B1ProofId: opts.stage4B1ProofId,
+    stage4B1DecisionId: opts.stage4B1DecisionId, reviewEligible: false, paperApproved: false,
+    testnetApproved: false, liveApproved: false, paperRuntimeChanges: false, liveExecutionChanges: false,
+    status: PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY, generatedAt: opts.generatedAt,
+  };
+  return Object.freeze({ ...body, receiptId: canonicalSha256({ domain: 'CloddsBot:Stage4B2Receipt:v1', ...body }) });
+}
+
+export function verifyStage4B2Receipt(receipt: unknown, expected: {
+  sourceCommit: string;
+  stage4AClosureAuditId: string;
+  stage4B1ProofId: string;
+  stage4B1DecisionId: string;
+}): Stage4B2Receipt {
+  const r = receipt as Record<string, unknown>;
+  if (!r || typeof r !== 'object') throw new Error('RECEIPT_VERIFY:NOT_OBJECT');
+  if (r.schemaVersion !== STAGE_4B2_RECEIPT_SCHEMA) throw new Error('RECEIPT_VERIFY:SCHEMA');
+  if (r.sourceCommit !== expected.sourceCommit) throw new Error('RECEIPT_VERIFY:SOURCE_COMMIT');
+  if (r.stage4AClosureAuditId !== expected.stage4AClosureAuditId) throw new Error('RECEIPT_VERIFY:STAGE_4A_CLOSURE');
+  if (r.stage4B1ProofId !== expected.stage4B1ProofId) throw new Error('RECEIPT_VERIFY:STAGE_4B1_PROOF');
+  if (r.stage4B1DecisionId !== expected.stage4B1DecisionId) throw new Error('RECEIPT_VERIFY:STAGE_4B1_DECISION');
+  if (r.reviewEligible !== false) throw new Error('RECEIPT_VERIFY:REVIEW_ELIGIBLE');
+  if (r.paperApproved !== false) throw new Error('RECEIPT_VERIFY:PAPER_APPROVED');
+  if (r.testnetApproved !== false) throw new Error('RECEIPT_VERIFY:TESTNET_APPROVED');
+  if (r.liveApproved !== false) throw new Error('RECEIPT_VERIFY:LIVE_APPROVED');
+  if (r.paperRuntimeChanges !== false) throw new Error('RECEIPT_VERIFY:PAPER_RUNTIME');
+  if (r.liveExecutionChanges !== false) throw new Error('RECEIPT_VERIFY:LIVE_EXECUTION');
+  if (r.status !== PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY) throw new Error('RECEIPT_VERIFY:STATUS');
+  if (typeof r.generatedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(r.generatedAt)) throw new Error('RECEIPT_VERIFY:TIMESTAMP');
+  const body = { ...r } as Record<string, unknown>;
+  delete body.receiptId;
+  const expectedReceiptId = canonicalSha256({ domain: 'CloddsBot:Stage4B2Receipt:v1', ...body });
+  if (r.receiptId !== expectedReceiptId) throw new Error('RECEIPT_VERIFY:RECEIPT_ID');
+  return receipt as Stage4B2Receipt;
+}
