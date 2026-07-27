@@ -1,0 +1,88 @@
+{
+  "artifactBindings": {
+    "candidateManifestId": "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa",
+    "consumedEvidenceSeedId": "f58c1c6e7378ea341b3cafe39405588858fffa45342d33f8302ae3d40343b153",
+    "evidenceGovernanceContractId": "1c9219c4738e6e4cd2e507fb50d6032a6d256056941d497b93ef995485510b39",
+    "failureAttributionReportId": "77918dcef9e2c30bd2ac30f71817a6ce10bc4d8df614875ab49562d2330424d1",
+    "promotionDecisionReceiptId": "4f8f23a24bd117d21b41872bbcd1788fdf1898d02b42c8a29cab79755a1d149f",
+    "tradeIqReceiptId": "3ccf8bb3d56596044312b918d3ddb5be54c9a5586fd22f2e1e2e53c169a28ea2"
+  },
+  "auditId": "af9dc5cbb832b32b0c403631b2805bcb93996d215c044a47a06e4b3347db40cc",
+  "baselineCommit": "88defe1973002d55950f45366bd7e9fc3ea93056",
+  "closedStages": [
+    {
+      "mergeCommit": "d735e270ce0f2fd335db3905ade2aec7474a2c6a",
+      "stage": "4A4"
+    },
+    {
+      "mergeCommit": "c1617a786950e424c3e1effc1941aa1c61ea5e49",
+      "stage": "4A5"
+    },
+    {
+      "mergeCommit": "4a913ae359be5f660c19cf71c83a0cb46e4a2cd6",
+      "stage": "4A6"
+    },
+    {
+      "mergeCommit": "9a702b919d864336261edce713b9dc468cbcb644",
+      "stage": "4A7"
+    },
+    {
+      "mergeCommit": "9e8c7f745c61229129d5f447b469c82af2b0a9b0",
+      "stage": "4A8"
+    },
+    {
+      "mergeCommit": "5a76014995f051a4cf594bcd98f52aeea25a8321",
+      "stage": "4A9"
+    },
+    {
+      "mergeCommit": "2e9df3dfb2e43825344a086abc274f326f9e8894",
+      "stage": "4A10"
+    },
+    {
+      "mergeCommit": "458aa6664b693e612760a29d30d26c080777d829",
+      "stage": "4A11"
+    },
+    {
+      "mergeCommit": "4b34e6a58e0b7bf93774bc8f3055fea60e28117d",
+      "stage": "4A12"
+    },
+    {
+      "mergeCommit": "88defe1973002d55950f45366bd7e9fc3ea93056",
+      "stage": "4A13"
+    }
+  ],
+  "closureEvidence": {
+    "blockedLifecycleAssets": 4,
+    "consumedEvidenceEvaluations": 40,
+    "consumedEvidenceWindows": 10,
+    "derivedBacktestsCompleted": 4,
+    "derivedCandidateCount": 4,
+    "derivedFinalHoldoutEvaluations": 40,
+    "derivedPromotionEligible": 0,
+    "derivedRobustnessPassed": 0,
+    "directStrategies": 1,
+    "failureAttributionUsesFinalHoldout": false,
+    "freshEvidenceWindowAvailable": false,
+    "moduleRuntimeContract": "CommonJS Node runtime verified in Stage 4A4 and canonical CI",
+    "nextGenerationFrozenSpecCount": 0,
+    "pineAssetsVerified": 14,
+    "pureIndicators": 9,
+    "referenceInfrastructureProof": true,
+    "strategyDesignUsesFinalHoldout": false,
+    "tradeIqFinalHoldoutEvaluations": 1,
+    "tradeIqPromotionEligible": false
+  },
+  "labels": [
+    "STAGE 4A TERMINAL CLOSURE AUDIT",
+    "NO STAGE 4A14 AUTHORIZED",
+    "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
+  ],
+  "liveApproved": false,
+  "liveExecutionChanges": false,
+  "nextStage": "STAGE 4B1 STRATEGY ACTIVATION CONTRACT",
+  "paperApproved": false,
+  "schemaVersion": "stage-4a.closure-audit.v1",
+  "stage4A14Authorized": false,
+  "stage4AClosed": true,
+  "testnetApproved": false
+}
