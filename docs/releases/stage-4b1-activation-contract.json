@@ -12,7 +12,8 @@
     "promotionDecisionReceiptId": "4f8f23a24bd117d21b41872bbcd1788fdf1898d02b42c8a29cab79755a1d149f",
     "consumedEvidenceSeedId": "f58c1c6e7378ea341b3cafe39405588858fffa45342d33f8302ae3d40343b153",
     "evidenceGovernanceContractId": "1c9219c4738e6e4cd2e507fb50d6032a6d256056941d497b93ef995485510b39",
-    "stage4AClosureAuditId": "af9dc5cbb832b32b0c403631b2805bcb93996d215c044a47a06e4b3347db40cc"
+    "stage4AClosureAuditId": "af9dc5cbb832b32b0c403631b2805bcb93996d215c044a47a06e4b3347db40cc",
+    "stage4AClosureBaselineCommit": "88defe1973002d55950f45366bd7e9fc3ea93056"
   },
   "counts": {
     "candidateStrategies": 4,
@@ -28,14 +29,15 @@
     "reasonCodes": [
       "BLOCKED_NO_PROMOTED_STRATEGY"
     ],
-    "baselineCommit": "88defe1973002d55950f45366bd7e9fc3ea93056",
+    "baselineCommit": "9f659d7a02a4c025b9cef86ad6fa855e00f99b15",
     "identity": null,
     "sourceBindings": {
       "candidateManifestId": "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa",
       "promotionDecisionReceiptId": "4f8f23a24bd117d21b41872bbcd1788fdf1898d02b42c8a29cab79755a1d149f",
       "consumedEvidenceSeedId": "f58c1c6e7378ea341b3cafe39405588858fffa45342d33f8302ae3d40343b153",
       "evidenceGovernanceContractId": "1c9219c4738e6e4cd2e507fb50d6032a6d256056941d497b93ef995485510b39",
-      "stage4AClosureAuditId": "af9dc5cbb832b32b0c403631b2805bcb93996d215c044a47a06e4b3347db40cc"
+      "stage4AClosureAuditId": "af9dc5cbb832b32b0c403631b2805bcb93996d215c044a47a06e4b3347db40cc",
+      "stage4AClosureBaselineCommit": "88defe1973002d55950f45366bd7e9fc3ea93056"
     },
     "counts": {
       "candidateStrategies": 4,
@@ -46,7 +48,7 @@
     "paperApproved": false,
     "testnetApproved": false,
     "liveApproved": false,
-    "proofId": "1b67afdaa2343a6be7af7318f909f9e6fc85fbde688cf09756224c83310484f4"
+    "proofId": "7d35edaa205593ad07ccb8b254a67acad09511118939817e649166028535f1fb"
   },
   "activationRequest": null,
   "activationDecision": {
@@ -57,14 +59,14 @@
     "reasonCodes": [
       "BLOCKED_NO_PROMOTED_STRATEGY"
     ],
-    "eligibilityProofId": "1b67afdaa2343a6be7af7318f909f9e6fc85fbde688cf09756224c83310484f4",
+    "eligibilityProofId": "7d35edaa205593ad07ccb8b254a67acad09511118939817e649166028535f1fb",
     "requestId": null,
     "requestedScope": null,
     "verifiedApproverIds": [],
     "paperApproved": false,
     "testnetApproved": false,
     "liveApproved": false,
-    "decisionId": "0531f8daed6d3e25ac5df6daf76d4e3f575f748640559e10af42e8dcbf53731c"
+    "decisionId": "80268cc673363290bea5f65aec0e7811041ecd6c608e06d6944aecfe5c2c39aa"
   },
   "stateMachine": {
     "initialState": "INACTIVE",
@@ -78,7 +80,7 @@
   "audit": {
     "schemaVersion": "stage-4b1.activation-audit.v1",
     "rootEventId": "cb93172348ffc53d8b6dad0367fac2f8d5dfbd19bb7bf468c3e2e9dd0ec78ac1",
-    "tipEventId": "aeafd39dacf57fade6c9bce029ab9dcd5c6e06f87414034ada1c65a72a985a84",
+    "tipEventId": "b6a086d7bc153e767d77b3a69106feaa778105380646dc8cd6a27d3a2a5ef844",
     "eventCount": 3,
     "events": [
       {
@@ -101,21 +103,21 @@
         "fromState": "INACTIVE",
         "toState": "ELIGIBILITY_CHECKED",
         "eventType": "TRANSITION",
-        "payloadDigest": "3660b1e9b521268ac2142f224d4900417a9e77636494629ff0344bce9a30a83c",
+        "payloadDigest": "7f73c9b4b83f0b90adbf72bc107343dd8fa37494a89c8325cae5a0ea57948015",
         "requestId": null,
-        "eventId": "7a296c5728ebc4e9bb273ea5d32538ef50df3379f9ce595f270fc5651dd15473"
+        "eventId": "d2afe272650a9cf0948d50a25acc91c73c72c7caae9af3d3e6f6f346b70fb387"
       },
       {
         "schemaVersion": "stage-4b1.activation-audit-event.v1",
         "sequence": 2,
         "timestamp": "2026-07-27T00:00:00.000Z",
-        "previousEventId": "7a296c5728ebc4e9bb273ea5d32538ef50df3379f9ce595f270fc5651dd15473",
+        "previousEventId": "d2afe272650a9cf0948d50a25acc91c73c72c7caae9af3d3e6f6f346b70fb387",
         "fromState": "ELIGIBILITY_CHECKED",
         "toState": "ACTIVATION_BLOCKED",
         "eventType": "TRANSITION",
-        "payloadDigest": "7ccd5c54718d63be15bf33064c42e7f3546e827e4fbeda2bfa19a1d8fc9bee96",
+        "payloadDigest": "1965dec638264dee9511838148b3de3b588f13a59bb62dcb454ece01afffd0ee",
         "requestId": null,
-        "eventId": "aeafd39dacf57fade6c9bce029ab9dcd5c6e06f87414034ada1c65a72a985a84"
+        "eventId": "b6a086d7bc153e767d77b3a69106feaa778105380646dc8cd6a27d3a2a5ef844"
       }
     ]
   },
@@ -124,5 +126,5 @@
   "testnetApproved": false,
   "liveApproved": false,
   "liveExecutionChanges": false,
-  "artifactId": "b91977cd4fc1784b2575b34e8aea2ad6448f1d3df29b5f3ab38d0e21cbfd7380"
+  "artifactId": "f320f0e51ef6c0900a189dd7455d0c3ee77726bb4c6d1820d422d725629bf52e"
 }

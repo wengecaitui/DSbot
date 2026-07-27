@@ -85,13 +85,18 @@ function validateCommit(value: string, code: string): void {
 
 export function buildStage4B1Artifact(baselineCommit: string, inputs: Stage4AArtifactTextBundle): Stage4B1Artifact {
   validateCommit(baselineCommit, 'STAGE_4B1_BASELINE_COMMIT_INVALID');
-  const proof = verifyProductionEligibility(inputs);
+  const proof = verifyProductionEligibility(inputs, baselineCommit);
   if (proof.status !== 'BLOCKED_NO_PROMOTED_STRATEGY' || proof.counts.candidateStrategies !== 4
       || proof.counts.promotionEligible !== 0 || proof.counts.consumedWindows !== 10
       || proof.counts.consumedEvaluations !== 40) throw new Error('STAGE_4B1_REAL_ELIGIBILITY_INVALID');
-  const activationDecision = evaluateActivationDecision(proof, null, [], [], Date.parse(ARTIFACT_TIMESTAMP));
+  const activationDecision = evaluateActivationDecision(
+    proof, null, [], [], Date.parse(ARTIFACT_TIMESTAMP), inputs, baselineCommit,
+  );
   if (activationDecision.status !== 'ACTIVATION_BLOCKED' || activationDecision.requestId !== null) {
     throw new Error('STAGE_4B1_REAL_DECISION_INVALID');
+  }
+  if (activationDecision.reasonCodes.length !== 1 || activationDecision.reasonCodes[0] !== 'BLOCKED_NO_PROMOTED_STRATEGY') {
+    throw new Error('STAGE_4B1_REAL_DECISION_REASON_INVALID');
   }
   const audit = createRealBlockedAudit(proof, ARTIFACT_TIMESTAMP);
   const events = audit.events;

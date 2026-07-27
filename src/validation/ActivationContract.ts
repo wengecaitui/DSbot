@@ -15,7 +15,15 @@ export const ACTIVATION_AUDIT_SCHEMA = 'stage-4b1.activation-audit.v1' as const;
 export const ACTIVATION_APPROVAL_SCHEMA = 'stage-4b1.activation-approval.v1' as const;
 export const REFERENCE_FIXTURE_LABEL = 'REFERENCE TEST FIXTURE ONLY' as const;
 export const REQUESTED_SCOPE = 'PAPER_READINESS_REVIEW' as const;
+export const STAGE_4B1_VERIFIED_BASELINE = '9f659d7a02a4c025b9cef86ad6fa855e00f99b15' as const;
 const APPROVAL_DOMAIN = 'CloddsBot:ActivationApproval:stage-4b1.activation-contract.v1' as const;
+const VERIFIED_SOURCE_BINDINGS = {
+  candidateManifestId: '7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa',
+  promotionDecisionReceiptId: '4f8f23a24bd117d21b41872bbcd1788fdf1898d02b42c8a29cab79755a1d149f',
+  consumedEvidenceSeedId: 'f58c1c6e7378ea341b3cafe39405588858fffa45342d33f8302ae3d40343b153',
+  evidenceGovernanceContractId: '1c9219c4738e6e4cd2e507fb50d6032a6d256056941d497b93ef995485510b39',
+  stage4AClosureAuditId: 'af9dc5cbb832b32b0c403631b2805bcb93996d215c044a47a06e4b3347db40cc',
+} as const;
 
 export type ActivationState =
   | 'INACTIVE'
@@ -31,6 +39,8 @@ export const ACTIVATION_REASONS = {
   ARTIFACT_MALFORMED: 'ARTIFACT_MALFORMED',
   ARTIFACT_DIGEST_INVALID: 'ARTIFACT_DIGEST_INVALID',
   ARTIFACT_BINDING_MISMATCH: 'ARTIFACT_BINDING_MISMATCH',
+  BASELINE_MISMATCH: 'BASELINE_MISMATCH',
+  PROOF_REVERIFICATION_FAILED: 'PROOF_REVERIFICATION_FAILED',
   STAGE_4A_NOT_CLOSED: 'STAGE_4A_NOT_CLOSED',
   STAGE_4A14_SOURCE_REJECTED: 'STAGE_4A14_SOURCE_REJECTED',
   PROMOTION_FALSE: 'PROMOTION_FALSE',
@@ -52,6 +62,7 @@ export const ACTIVATION_REASONS = {
   APPROVAL_EXPIRED: 'APPROVAL_EXPIRED',
   APPROVAL_SIGNATURE_INVALID: 'APPROVAL_SIGNATURE_INVALID',
   APPROVAL_BINDING_MISMATCH: 'APPROVAL_BINDING_MISMATCH',
+  APPROVAL_OUTSIDE_REQUEST_WINDOW: 'APPROVAL_OUTSIDE_REQUEST_WINDOW',
   REPLAY_REJECTED: 'REPLAY_REJECTED',
   INVALID_TRANSITION: 'INVALID_TRANSITION',
   TERMINAL_STATE: 'TERMINAL_STATE',
@@ -237,6 +248,12 @@ function lexicalCanonical(value: unknown): string {
   return fail('ACTIVATION_ARTIFACT_INVALID:LEXICAL_VALUE');
 }
 
+function containsReservedNumberSentinel(value: unknown): boolean {
+  if (typeof value === 'string') return value.startsWith('\u0000NUMBER:');
+  if (Array.isArray(value)) return value.some(containsReservedNumberSentinel);
+  return isRecord(value) && Object.values(value).some(containsReservedNumberSentinel);
+}
+
 function verifyRawSelfDigest(json: string, idField: string): Record<string, unknown> {
   if (typeof json !== 'string' || json.length === 0) fail('ARTIFACT_MALFORMED');
   let plain: unknown;
@@ -248,6 +265,7 @@ function verifyRawSelfDigest(json: string, idField: string): Record<string, unkn
     return fail('ARTIFACT_MALFORMED');
   }
   if (!isRecord(plain) || !isRecord(lexical) || !shaPattern(plain[idField])) fail('ARTIFACT_MALFORMED');
+  if (containsReservedNumberSentinel(plain)) fail('ARTIFACT_MALFORMED:RESERVED_NUMBER_SENTINEL');
   const lexicalId = lexical[idField];
   delete lexical[idField];
   const calculated = createHash('sha256').update(lexicalCanonical(lexical), 'utf8').digest('hex');
@@ -303,7 +321,13 @@ function arrayField(record: Record<string, unknown>, key: string): readonly unkn
   return value;
 }
 
-function verifyProductionEligibilityUnchecked(inputValue: Stage4AArtifactTextBundle): ActivationEligibilityProof {
+function verifyProductionEligibilityUnchecked(
+  inputValue: Stage4AArtifactTextBundle,
+  expectedBaselineCommit: string,
+): ActivationEligibilityProof {
+  if (expectedBaselineCommit !== STAGE_4B1_VERIFIED_BASELINE) {
+    return blockedProof('BLOCKED_INVALID_EVIDENCE', [ACTIVATION_REASONS.BASELINE_MISMATCH], expectedBaselineCommit);
+  }
   let input: Stage4AArtifactTextBundle;
   try { input = safeClone(inputValue); } catch { return blockedProof('BLOCKED_INVALID_EVIDENCE', [ACTIVATION_REASONS.ARTIFACT_MALFORMED]); }
   let artifacts: ParsedBundle;
@@ -320,6 +344,7 @@ function verifyProductionEligibilityUnchecked(inputValue: Stage4AArtifactTextBun
     consumedEvidenceSeedId: String(seed.seedId ?? ''),
     evidenceGovernanceContractId: String(governance.contractId ?? ''),
     stage4AClosureAuditId: String(closure.auditId ?? ''),
+    stage4AClosureBaselineCommit: String(closure.baselineCommit ?? ''),
   };
   const countsObject = isRecord(promotion.counts) ? promotion.counts : {};
   const counts = {
@@ -339,6 +364,9 @@ function verifyProductionEligibilityUnchecked(inputValue: Stage4AArtifactTextBun
     && governance.schemaVersion === 'stage-4a13.governance-contract.v1'
     && closure.schemaVersion === 'stage-4a.closure-audit.v1';
   if (!expectedSchemas) reasons.push(ACTIVATION_REASONS.ARTIFACT_BINDING_MISMATCH);
+  if (Object.entries(VERIFIED_SOURCE_BINDINGS).some(([key, value]) => bindings[key as keyof typeof VERIFIED_SOURCE_BINDINGS] !== value)) {
+    reasons.push(ACTIVATION_REASONS.ARTIFACT_BINDING_MISMATCH);
+  }
   if (promotion.candidateManifestId !== manifest.manifestId
       || seed.sourceReceiptId !== promotion.receiptId
       || seed.sourceProofId !== promotion.privateProofId
@@ -352,8 +380,21 @@ function verifyProductionEligibilityUnchecked(inputValue: Stage4AArtifactTextBun
   if (closure.stage4AClosed !== true || closure.nextStage !== 'STAGE 4B1 STRATEGY ACTIVATION CONTRACT') {
     reasons.push(ACTIVATION_REASONS.STAGE_4A_NOT_CLOSED);
   }
-  if (closure.stage4A14Authorized !== false || String(promotion.engineCommit ?? '').includes('4a14')) {
+  const origins: unknown[] = [];
+  const collectOrigins = (value: unknown): void => {
+    if (Array.isArray(value)) { value.forEach(collectOrigins); return; }
+    if (!isRecord(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      const normalized = key.toLowerCase().replace(/[^a-z]/g, '');
+      if (['stageorigin', 'sourcestage', 'originstage', 'sourceorigin'].includes(normalized)) origins.push(child);
+      collectOrigins(child);
+    }
+  };
+  [manifest, promotion, seed, governance, closure].forEach(collectOrigins);
+  if (closure.stage4A14Authorized !== false || origins.some(value => String(value).toUpperCase().replace(/[^A-Z0-9]/g, '') === 'STAGE4A14')) {
     reasons.push(ACTIVATION_REASONS.STAGE_4A14_SOURCE_REJECTED);
+  } else if (origins.length > 0) {
+    reasons.push(ACTIVATION_REASONS.ARTIFACT_BINDING_MISMATCH);
   }
   const forbiddenApproval = approvalValues.some(value => ['paperApproved', 'testnetApproved', 'liveApproved']
     .some(key => value[key] !== false));
@@ -418,20 +459,23 @@ function verifyProductionEligibilityUnchecked(inputValue: Stage4AArtifactTextBun
   if (specs.some(spec => !isRecord(spec) || evaluations.filter(event => event.strategyId === spec.strategyId).length !== 10)) {
     reasons.push(ACTIVATION_REASONS.EVIDENCE_BINDING_MISSING);
   }
-  if (reasons.length > 0) return blockedProof('BLOCKED_INVALID_EVIDENCE', reasons, String(closure.baselineCommit ?? ''), bindings, counts);
+  if (reasons.length > 0) return blockedProof('BLOCKED_INVALID_EVIDENCE', reasons, expectedBaselineCommit, bindings, counts);
   if (counts.promotionEligible === 0) {
-    return blockedProof('BLOCKED_NO_PROMOTED_STRATEGY', [ACTIVATION_REASONS.NO_PROMOTED_STRATEGY], String(closure.baselineCommit ?? ''), bindings, counts);
+    return blockedProof('BLOCKED_NO_PROMOTED_STRATEGY', [ACTIVATION_REASONS.NO_PROMOTED_STRATEGY], expectedBaselineCommit, bindings, counts);
   }
-  if (counts.promotionEligible !== 1) return blockedProof('BLOCKED_INVALID_EVIDENCE', [ACTIVATION_REASONS.PROMOTION_COUNT_MISMATCH], String(closure.baselineCommit ?? ''), bindings, counts);
-  return verifyPromotedCandidateEvidence(artifacts, bindings, counts);
+  if (counts.promotionEligible !== 1) return blockedProof('BLOCKED_INVALID_EVIDENCE', [ACTIVATION_REASONS.PROMOTION_COUNT_MISMATCH], expectedBaselineCommit, bindings, counts);
+  return verifyPromotedCandidateEvidence(artifacts, bindings, counts, expectedBaselineCommit);
 }
 
 /** Fail-closed production verification over exact serialized Stage 4A artifacts. */
-export function verifyProductionEligibility(inputValue: Stage4AArtifactTextBundle): ActivationEligibilityProof {
+export function verifyProductionEligibility(
+  inputValue: Stage4AArtifactTextBundle,
+  expectedBaselineCommit: string,
+): ActivationEligibilityProof {
   try {
-    return verifyProductionEligibilityUnchecked(inputValue);
+    return verifyProductionEligibilityUnchecked(inputValue, expectedBaselineCommit);
   } catch {
-    return blockedProof('BLOCKED_INVALID_EVIDENCE', [ACTIVATION_REASONS.ARTIFACT_MALFORMED]);
+    return blockedProof('BLOCKED_INVALID_EVIDENCE', [ACTIVATION_REASONS.ARTIFACT_MALFORMED], expectedBaselineCommit);
   }
 }
 
@@ -439,6 +483,7 @@ function verifyPromotedCandidateEvidence(
   artifacts: ParsedBundle,
   bindings: Readonly<Record<string, string>>,
   counts: ActivationEligibilityProof['counts'],
+  expectedBaselineCommit: string,
 ): ActivationEligibilityProof {
   const specs = arrayField(artifacts.manifest, 'specs').filter(isRecord);
   const decisions = arrayField(artifacts.promotion, 'decisions').filter(isRecord);
@@ -479,18 +524,24 @@ function verifyPromotedCandidateEvidence(
   if (foreign) return blockedProof('BLOCKED_INVALID_EVIDENCE', [ACTIVATION_REASONS.EVIDENCE_FOREIGN_FAMILY]);
   const body: Omit<ActivationEligibilityProof, 'proofId'> = {
     schemaVersion: ACTIVATION_PROOF_SCHEMA, contractVersion: ACTIVATION_CONTRACT_VERSION, mode: 'PRODUCTION',
-    status: 'ELIGIBLE_FOR_ACTIVATION_REVIEW', reasonCodes: [], baselineCommit: String(artifacts.closure.baselineCommit),
+    status: 'ELIGIBLE_FOR_ACTIVATION_REVIEW', reasonCodes: [], baselineCommit: expectedBaselineCommit,
     identity: { ...identity }, sourceBindings: { ...bindings }, counts: { ...counts },
     paperApproved: false, testnetApproved: false, liveApproved: false,
   };
   return immutable({ ...body, proofId: domainId('CloddsBot:ActivationEligibilityProof:v1', body) });
 }
 
-function assertProductionProof(proof: ActivationEligibilityProof): void {
+function assertProductionProof(
+  proof: ActivationEligibilityProof,
+  artifacts: Stage4AArtifactTextBundle,
+  expectedBaselineCommit: string,
+): void {
   const { proofId: _proofId, ...body } = proof;
+  const verified = verifyProductionEligibility(artifacts, expectedBaselineCommit);
   if (proof.mode !== 'PRODUCTION' || proof.status !== 'ELIGIBLE_FOR_ACTIVATION_REVIEW'
-      || !proof.identity || proof.proofId !== domainId('CloddsBot:ActivationEligibilityProof:v1', proofPayload(body))) {
-    fail('ACTIVATION_REQUEST_REJECTED');
+      || !proof.identity || proof.proofId !== domainId('CloddsBot:ActivationEligibilityProof:v1', proofPayload(body))
+      || canonicalJson(verified) !== canonicalJson(proof)) {
+    fail(`ACTIVATION_REQUEST_REJECTED:${ACTIVATION_REASONS.PROOF_REVERIFICATION_FAILED}`);
   }
 }
 
@@ -498,9 +549,11 @@ export function createActivationRequest(
   proofInput: ActivationEligibilityProof,
   issuedAt: string,
   expiresAt: string,
+  artifacts: Stage4AArtifactTextBundle,
+  expectedBaselineCommit: string,
 ): ActivationRequest {
   const proof = safeClone(proofInput);
-  assertProductionProof(proof);
+  assertProductionProof(proof, artifacts, expectedBaselineCommit);
   if (!canonicalIso(issuedAt) || !canonicalIso(expiresAt) || Date.parse(expiresAt) <= Date.parse(issuedAt)) fail('ACTIVATION_REQUEST_INVALID');
   const body: Omit<ActivationRequest, 'requestId'> = {
     schemaVersion: ACTIVATION_REQUEST_SCHEMA,
@@ -550,11 +603,20 @@ export function evaluateActivationDecision(
   approvalsInput: readonly ActivationApproval[],
   trustedInput: readonly TrustedActivationApprover[],
   nowMs: number,
+  artifacts: Stage4AArtifactTextBundle,
+  expectedBaselineCommit: string,
   consumedRequestIds: readonly string[] = [],
 ): ActivationDecision {
   let proof: ActivationEligibilityProof;
   try { proof = safeClone(proofInput); } catch { return decision('PRODUCTION', 'ACTIVATION_BLOCKED', [ACTIVATION_REASONS.REQUEST_INVALID], '', null); }
   if (proof.mode !== 'PRODUCTION') return decision('PRODUCTION', 'ACTIVATION_BLOCKED', [ACTIVATION_REASONS.REFERENCE_FIXTURE_REJECTED], proof.proofId ?? '', requestInput?.requestId ?? null);
+  const verified = verifyProductionEligibility(artifacts, expectedBaselineCommit);
+  if (canonicalJson(verified) !== canonicalJson(proof)) {
+    return decision('PRODUCTION', 'ACTIVATION_BLOCKED', [ACTIVATION_REASONS.PROOF_REVERIFICATION_FAILED], proof.proofId, requestInput?.requestId ?? null);
+  }
+  if (verified.status !== 'ELIGIBLE_FOR_ACTIVATION_REVIEW' || !verified.identity) {
+    return decision('PRODUCTION', 'ACTIVATION_BLOCKED', verified.reasonCodes, verified.proofId, null);
+  }
   if (proof.status !== 'ELIGIBLE_FOR_ACTIVATION_REVIEW' || !proof.identity) {
     return decision('PRODUCTION', 'ACTIVATION_BLOCKED', proof.reasonCodes.length ? proof.reasonCodes : [ACTIVATION_REASONS.PROMOTION_FALSE], proof.proofId, null);
   }
@@ -579,7 +641,7 @@ export function evaluateActivationDecision(
   try { keys = trustedKeys(trustedInput); } catch { return decision('PRODUCTION', 'ACTIVATION_BLOCKED', [ACTIVATION_REASONS.APPROVAL_UNTRUSTED_KEY], proof.proofId, request.requestId); }
   const reasons: ActivationReasonCode[] = [];
   const seen = new Set<string>();
-  const verified: string[] = [];
+  const verifiedApprovers: string[] = [];
   for (const approvalValue of approvals as readonly unknown[]) {
     if (!isRecord(approvalValue) || !nonEmpty(approvalValue.approverId) || !nonEmpty(approvalValue.keyId)
         || !nonEmpty(approvalValue.signature)) { reasons.push(ACTIVATION_REASONS.APPROVAL_MALFORMED); continue; }
@@ -595,6 +657,10 @@ export function evaluateActivationDecision(
     if (!canonicalIso(statement.issuedAt) || !canonicalIso(statement.expiresAt) || Date.parse(statement.expiresAt) <= Date.parse(statement.issuedAt)) {
       reasons.push(ACTIVATION_REASONS.APPROVAL_MALFORMED); continue;
     }
+    if (Date.parse(statement.issuedAt) < Date.parse(request.issuedAt)
+        || Date.parse(statement.expiresAt) > Date.parse(request.expiresAt)) {
+      reasons.push(ACTIVATION_REASONS.APPROVAL_OUTSIDE_REQUEST_WINDOW); continue;
+    }
     if (nowMs < Date.parse(statement.issuedAt)) { reasons.push(ACTIVATION_REASONS.APPROVAL_NOT_YET_VALID); continue; }
     if (nowMs >= Date.parse(statement.expiresAt)) { reasons.push(ACTIVATION_REASONS.APPROVAL_EXPIRED); continue; }
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(approval.signature) || approval.signature.length % 4 !== 0) {
@@ -605,10 +671,10 @@ export function evaluateActivationDecision(
         || !verifySignature(null, makeActivationApprovalSigningPayload(statement), key.key, signature)) {
       reasons.push(ACTIVATION_REASONS.APPROVAL_SIGNATURE_INVALID); continue;
     }
-    verified.push(approval.approverId);
+    verifiedApprovers.push(approval.approverId);
   }
-  if (reasons.length > 0 || verified.length === 0) return decision('PRODUCTION', 'ACTIVATION_BLOCKED', reasons.length ? reasons : [ACTIVATION_REASONS.APPROVAL_MISSING], proof.proofId, request.requestId, verified);
-  return decision('PRODUCTION', 'ACTIVATION_REVIEW_READY', [], proof.proofId, request.requestId, verified);
+  if (reasons.length > 0 || verifiedApprovers.length === 0) return decision('PRODUCTION', 'ACTIVATION_BLOCKED', reasons.length ? reasons : [ACTIVATION_REASONS.APPROVAL_MISSING], proof.proofId, request.requestId, verifiedApprovers);
+  return decision('PRODUCTION', 'ACTIVATION_REVIEW_READY', [], proof.proofId, request.requestId, verifiedApprovers);
 }
 
 export interface ReferenceEligibilityFixture {
@@ -734,6 +800,10 @@ export function evaluateReferenceContractDecision(
       reasons.push(ACTIVATION_REASONS.APPROVAL_BINDING_MISMATCH); continue;
     }
     if (!canonicalIso(statement.issuedAt) || !canonicalIso(statement.expiresAt)) { reasons.push(ACTIVATION_REASONS.APPROVAL_MALFORMED); continue; }
+    if (Date.parse(statement.issuedAt) < Date.parse(request.issuedAt)
+        || Date.parse(statement.expiresAt) > Date.parse(request.expiresAt)) {
+      reasons.push(ACTIVATION_REASONS.APPROVAL_OUTSIDE_REQUEST_WINDOW); continue;
+    }
     if (nowMs < Date.parse(statement.issuedAt)) { reasons.push(ACTIVATION_REASONS.APPROVAL_NOT_YET_VALID); continue; }
     if (nowMs >= Date.parse(statement.expiresAt)) { reasons.push(ACTIVATION_REASONS.APPROVAL_EXPIRED); continue; }
     const signature = Buffer.from(approval.signature, 'base64');

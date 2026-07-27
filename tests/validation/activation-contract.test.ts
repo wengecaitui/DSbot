@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
@@ -9,6 +10,7 @@ import {
   AppendOnlyActivationAudit,
   REFERENCE_FIXTURE_LABEL,
   REQUESTED_SCOPE,
+  STAGE_4B1_VERIFIED_BASELINE,
   canonicalJson,
   canonicalSha256,
   createActivationRequest,
@@ -17,16 +19,18 @@ import {
   evaluateActivationDecision,
   evaluateReferenceContractDecision,
   makeReferenceApprovalSigningPayload,
+  makeActivationApprovalSigningPayload,
   verifyProductionEligibility,
   verifyReferenceEligibilityFixture,
   type ActivationApproval,
   type ActivationEligibilityProof,
+  type ActivationRequest,
   type ReferenceActivationApproval,
   type ReferenceEligibilityFixture,
   type Stage4AArtifactTextBundle,
 } from '../../src/validation/ActivationContract';
 
-const BASELINE = '9f659d7a02a4c025b9cef86ad6fa855e00f99b15';
+const BASELINE = STAGE_4B1_VERIFIED_BASELINE;
 const NOW = '2026-07-27T00:00:00.000Z';
 const LATER = '2026-07-28T00:00:00.000Z';
 const SHA_A = 'a'.repeat(64);
@@ -59,6 +63,46 @@ function referenceFixture(): ReferenceEligibilityFixture {
   };
 }
 
+function forgedProductionProof(overrides: Partial<ActivationEligibilityProof> = {}): ActivationEligibilityProof {
+  const body: Omit<ActivationEligibilityProof, 'proofId'> = {
+    schemaVersion: 'stage-4b1.activation-eligibility-proof.v1',
+    contractVersion: 'stage-4b1.activation-contract.v1',
+    mode: 'PRODUCTION', status: 'ELIGIBLE_FOR_ACTIVATION_REVIEW', reasonCodes: [],
+    baselineCommit: 'f'.repeat(40), identity: referenceFixture().identity, sourceBindings: {},
+    counts: { candidateStrategies: 1, promotionEligible: 1, consumedWindows: 1, consumedEvaluations: 1 },
+    paperApproved: false, testnetApproved: false, liveApproved: false,
+    ...(({ proofId: _proofId, ...rest }) => rest)(overrides as ActivationEligibilityProof),
+  };
+  return { ...body, proofId: canonicalSha256({ domain: 'CloddsBot:ActivationEligibilityProof:v1', payload: body }) };
+}
+
+function forgedProductionRequest(proof: ActivationEligibilityProof): ActivationRequest {
+  const body: Omit<ActivationRequest, 'requestId'> = {
+    schemaVersion: 'stage-4b1.activation-request.v1', eligibilityProofId: proof.proofId,
+    identity: { ...proof.identity! }, requestedScope: REQUESTED_SCOPE, issuedAt: NOW, expiresAt: LATER,
+  };
+  return { ...body, requestId: canonicalSha256({ domain: 'CloddsBot:ActivationRequest:v1', payload: body }) };
+}
+
+function stage4A14RehashedBundle(): Stage4AArtifactTextBundle {
+  const python = [
+    'import hashlib,json,sys',
+    'b=json.loads(sys.stdin.read())',
+    "def digest(v): return hashlib.sha256(json.dumps(v,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode()).hexdigest()",
+    'def seal(v,k): v.pop(k,None); v[k]=digest(v); return v',
+    "p=json.loads(b['promotionDecisionJson']); p['stageOrigin']='STAGE 4A14'; seal(p,'receiptId')",
+    "s=json.loads(b['consumedEvidenceSeedJson']); s['sourceReceiptId']=p['receiptId']; seal(s,'seedId')",
+    "c=json.loads(b['closureAuditJson']); c['artifactBindings']['promotionDecisionReceiptId']=p['receiptId']; c['artifactBindings']['consumedEvidenceSeedId']=s['seedId']; seal(c,'auditId')",
+    "b['promotionDecisionJson']=json.dumps(p,sort_keys=True,separators=(',',':'))+'\\n'",
+    "b['consumedEvidenceSeedJson']=json.dumps(s,sort_keys=True,separators=(',',':'))+'\\n'",
+    "b['closureAuditJson']=json.dumps(c,sort_keys=True,separators=(',',':'))+'\\n'",
+    'print(json.dumps(b))',
+  ].join('\n');
+  const result = spawnSync('python', ['-c', python], { input: JSON.stringify(stage4A()), encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout) as Stage4AArtifactTextBundle;
+}
+
 function signedReferenceApproval(
   overrides: Partial<ReferenceActivationApproval> = {},
   keyPair = generateKeyPairSync('ed25519'),
@@ -83,10 +127,12 @@ function signedReferenceApproval(
 }
 
 test('real Stage 4A artifacts deterministically block with no promoted strategy', () => {
-  const first = verifyProductionEligibility(stage4A());
-  const second = verifyProductionEligibility(stage4A());
+  const first = verifyProductionEligibility(stage4A(), BASELINE);
+  const second = verifyProductionEligibility(stage4A(), BASELINE);
   assert.deepEqual(first, second);
   assert.equal(first.status, 'BLOCKED_NO_PROMOTED_STRATEGY');
+  assert.equal(first.baselineCommit, BASELINE);
+  assert.equal(first.sourceBindings.stage4AClosureBaselineCommit, '88defe1973002d55950f45366bd7e9fc3ea93056');
   assert.deepEqual(first.reasonCodes, [ACTIVATION_REASONS.NO_PROMOTED_STRATEGY]);
   assert.deepEqual(first.counts, { candidateStrategies: 4, promotionEligible: 0, consumedWindows: 10, consumedEvaluations: 40 });
   assert.equal(first.identity, null);
@@ -96,25 +142,56 @@ test('real Stage 4A artifacts deterministically block with no promoted strategy'
 });
 
 test('real blocked proof creates exact fail-closed state path and no request', () => {
-  const proof = verifyProductionEligibility(stage4A());
+  const proof = verifyProductionEligibility(stage4A(), BASELINE);
   const audit = createRealBlockedAudit(proof, NOW);
   assert.deepEqual(audit.events.map(event => event.toState), ['INACTIVE', 'ELIGIBILITY_CHECKED', 'ACTIVATION_BLOCKED']);
   assert.ok(audit.events.every(event => event.requestId === null));
-  assert.throws(() => createActivationRequest(proof, NOW, LATER), /ACTIVATION_REQUEST_REJECTED/);
+  assert.throws(() => createActivationRequest(proof, NOW, LATER, stage4A(), BASELINE), /ACTIVATION_REQUEST_REJECTED/);
 });
 
 test('promotion=false is rejected before approvals', () => {
-  const proof = verifyProductionEligibility(stage4A());
-  const result = evaluateActivationDecision(proof, null, [], [], Date.parse(NOW));
+  const proof = verifyProductionEligibility(stage4A(), BASELINE);
+  const result = evaluateActivationDecision(proof, null, [], [], Date.parse(NOW), stage4A(), BASELINE);
   assert.equal(result.status, 'ACTIVATION_BLOCKED');
-  assert.ok(result.reasonCodes.includes(ACTIVATION_REASONS.NO_PROMOTED_STRATEGY));
+  assert.deepEqual(result.reasonCodes, [ACTIVATION_REASONS.NO_PROMOTED_STRATEGY]);
+});
+
+test('forged self-consistent production proof is reverified and blocked at both trust boundaries', () => {
+  const proof = forgedProductionProof();
+  const request = forgedProductionRequest(proof);
+  const keyPair = generateKeyPairSync('ed25519');
+  const statement = {
+    schemaVersion: ACTIVATION_APPROVAL_SCHEMA,
+    eligibilityProofId: proof.proofId, requestId: request.requestId, identity: { ...proof.identity! },
+    requestedScope: REQUESTED_SCOPE, approverId: 'forged-reviewer', keyId: 'forged-key', issuedAt: NOW, expiresAt: LATER,
+  } as const;
+  const approval: ActivationApproval = {
+    ...statement,
+    signature: sign(null, makeActivationApprovalSigningPayload(statement), keyPair.privateKey).toString('base64'),
+  };
+  const trusted = [{ approverId: 'forged-reviewer', keyId: 'forged-key', publicKeyPem: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+  assert.throws(
+    () => createActivationRequest(proof, NOW, LATER, stage4A(), BASELINE),
+    /PROOF_REVERIFICATION_FAILED/,
+  );
+  const result = evaluateActivationDecision(proof, request, [approval], trusted, Date.parse(NOW), stage4A(), BASELINE);
+  assert.equal(result.status, 'ACTIVATION_BLOCKED');
+  assert.deepEqual(result.reasonCodes, [ACTIVATION_REASONS.PROOF_REVERIFICATION_FAILED]);
+});
+
+test('wrong expected baseline and self-consistent altered source bindings reject', () => {
+  const wrongBaseline = verifyProductionEligibility(stage4A(), 'f'.repeat(40));
+  assert.deepEqual(wrongBaseline.reasonCodes, [ACTIVATION_REASONS.BASELINE_MISMATCH]);
+  const proof = forgedProductionProof({ baselineCommit: BASELINE, sourceBindings: { candidateManifestId: SHA_A } });
+  const result = evaluateActivationDecision(proof, forgedProductionRequest(proof), [], [], Date.parse(NOW), stage4A(), BASELINE);
+  assert.deepEqual(result.reasonCodes, [ACTIVATION_REASONS.PROOF_REVERIFICATION_FAILED]);
 });
 
 test('tampered digest and commit/SHA binding fail closed without partial state', () => {
   const original = stage4A();
   for (const key of Object.keys(original) as (keyof Stage4AArtifactTextBundle)[]) {
     const changed = { ...original, [key]: original[key].replace(/[a-f0-9]{40,64}/, match => `${match[0] === '0' ? '1' : '0'}${match.slice(1)}`) };
-    const proof = verifyProductionEligibility(changed);
+    const proof = verifyProductionEligibility(changed, BASELINE);
     assert.equal(proof.status, 'BLOCKED_INVALID_EVIDENCE', key);
     assert.ok(proof.reasonCodes.includes(ACTIVATION_REASONS.ARTIFACT_DIGEST_INVALID), key);
   }
@@ -122,24 +199,40 @@ test('tampered digest and commit/SHA binding fail closed without partial state',
 
 test('malformed and Stage 4A14 relabelled sources fail closed', () => {
   const malformed = { ...stage4A(), closureAuditJson: '{bad' };
-  assert.deepEqual(verifyProductionEligibility(malformed).reasonCodes, [ACTIVATION_REASONS.ARTIFACT_MALFORMED]);
+  assert.deepEqual(verifyProductionEligibility(malformed, BASELINE).reasonCodes, [ACTIVATION_REASONS.ARTIFACT_MALFORMED]);
   const closure = JSON.parse(stage4A().closureAuditJson);
   closure.stage4A14Authorized = true;
   const unsigned = { ...closure };
   delete unsigned.auditId;
   closure.auditId = canonicalSha256(unsigned);
-  const result = verifyProductionEligibility({ ...stage4A(), closureAuditJson: `${JSON.stringify(closure)}\n` });
+  const result = verifyProductionEligibility({ ...stage4A(), closureAuditJson: `${JSON.stringify(closure)}\n` }, BASELINE);
   assert.equal(result.status, 'BLOCKED_INVALID_EVIDENCE');
   assert.ok(result.reasonCodes.includes(ACTIVATION_REASONS.STAGE_4A14_SOURCE_REJECTED));
+});
+
+test('explicit Stage 4A14 origin rejects after receipt, seed, closure bindings and self-digests are recomputed', () => {
+  const result = verifyProductionEligibility(stage4A14RehashedBundle(), BASELINE);
+  assert.equal(result.status, 'BLOCKED_INVALID_EVIDENCE');
+  assert.ok(result.reasonCodes.includes(ACTIVATION_REASONS.STAGE_4A14_SOURCE_REJECTED));
+});
+
+test('reserved lexical number sentinel string cannot spoof a canonical digest', () => {
+  const bundle = stage4A();
+  bundle.closureAuditJson = bundle.closureAuditJson.replace(
+    '"STAGE 4A TERMINAL CLOSURE AUDIT"',
+    '"\\u0000NUMBER:1"',
+  );
+  const result = verifyProductionEligibility(bundle, BASELINE);
+  assert.deepEqual(result.reasonCodes, [ACTIVATION_REASONS.ARTIFACT_MALFORMED]);
 });
 
 test('reference exact-once evidence verifies but is production-incompatible', () => {
   const proof = verifyReferenceEligibilityFixture(referenceFixture());
   assert.equal(proof.mode, 'REFERENCE');
   assert.equal(proof.status, 'REFERENCE_CONTRACT_VERIFIED');
-  assert.throws(() => createActivationRequest(proof, NOW, LATER), /ACTIVATION_REQUEST_REJECTED/);
+  assert.throws(() => createActivationRequest(proof, NOW, LATER, stage4A(), BASELINE), /ACTIVATION_REQUEST_REJECTED/);
   const request = createReferenceActivationRequest(proof, NOW, LATER);
-  const production = evaluateActivationDecision(proof, request as never, [], [], Date.parse(NOW));
+  const production = evaluateActivationDecision(proof, request as never, [], [], Date.parse(NOW), stage4A(), BASELINE);
   assert.deepEqual(production.reasonCodes, [ACTIVATION_REASONS.REFERENCE_FIXTURE_REJECTED]);
 });
 
@@ -187,6 +280,13 @@ test('expired, not-yet-valid, bad signature and identity/SHA binding reject', ()
   assert.ok(evaluateReferenceContractDecision(base.proof, base.request, [mismatch], base.trusted, Date.parse(NOW)).reasonCodes.includes(ACTIVATION_REASONS.APPROVAL_BINDING_MISMATCH));
 });
 
+test('approval interval must be nested inside its request interval', () => {
+  const preIssued = signedReferenceApproval({ issuedAt: '2026-07-26T23:59:59.999Z' });
+  assert.ok(evaluateReferenceContractDecision(preIssued.proof, preIssued.request, [preIssued.approval], preIssued.trusted, Date.parse(NOW)).reasonCodes.includes(ACTIVATION_REASONS.APPROVAL_OUTSIDE_REQUEST_WINDOW));
+  const overlong = signedReferenceApproval({ expiresAt: '2026-07-28T00:00:00.001Z' });
+  assert.ok(evaluateReferenceContractDecision(overlong.proof, overlong.request, [overlong.approval], overlong.trusted, Date.parse(NOW)).reasonCodes.includes(ACTIVATION_REASONS.APPROVAL_OUTSIDE_REQUEST_WINDOW));
+});
+
 test('strategy version, spec, lineage and semantic copy changes reject', () => {
   for (const [key, value] of [['strategyVersion', '2.0.0'], ['specId', SHA_C], ['lineageId', SHA_A], ['semanticFingerprint', SHA_C]] as const) {
     const fixture = referenceFixture();
@@ -207,7 +307,7 @@ test('state machine rejects skips, replay, backward and post-terminal mutation',
 });
 
 function blockedAudit() {
-  return createRealBlockedAudit(verifyProductionEligibility(stage4A()), NOW);
+  return createRealBlockedAudit(verifyProductionEligibility(stage4A(), BASELINE), NOW);
 }
 
 test('append-only audit rejects body, previous hash, sequence and transition tamper', () => {

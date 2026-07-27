@@ -1,4 +1,4 @@
-# Stage 4B1 — Strategy Activation Contract
+# Stage 4B1 - Strategy Activation Contract
 
 ## Classification
 
@@ -15,7 +15,7 @@ This stage defines a readiness-review contract. It neither imports nor calls a b
 The verifier recomputes the five Stage 4A inputs from their exact serialized JSON, checks every self-digest and cross-artifact identifier, and observes four candidates with zero promotion-eligible strategies. The only permitted real path is:
 
 ```text
-INACTIVE → ELIGIBILITY_CHECKED → ACTIVATION_BLOCKED
+INACTIVE -> ELIGIBILITY_CHECKED -> ACTIVATION_BLOCKED
 ```
 
 The committed artifact contains no activation request. `paperApproved`, `testnetApproved`, `liveApproved`, and `liveExecutionChanges` are all false. Stage 4A14 is rejected as a source.
@@ -35,6 +35,6 @@ Positive-path cryptographic tests use only objects labelled `REFERENCE TEST FIXT
 
 ## Deterministic evidence
 
-The committed JSON is regenerated from the target baseline `9f659d7a02a4c025b9cef86ad6fa855e00f99b15` and the exact Stage 4A artifacts. Its artifact ID is `b91977cd4fc1784b2575b34e8aea2ad6448f1d3df29b5f3ab38d0e21cbfd7380`.
+The committed JSON is regenerated from the target baseline `9f659d7a02a4c025b9cef86ad6fa855e00f99b15` and the exact Stage 4A artifacts. Its artifact ID is `f320f0e51ef6c0900a189dd7455d0c3ee77726bb4c6d1820d422d725629bf52e`.
 
 GitHub Actions recomputes the artifact, runs the canonical validation suite, uploads only the source-free real blocked artifact plus a commit-bound subject, and creates OIDC-backed attestations for those subjects.
