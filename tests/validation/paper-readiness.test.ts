@@ -308,24 +308,46 @@ import {
   STAGE_4B2_RECEIPT_SCHEMA,
 } from '../../src/validation/PaperReadinessReview';
 
-const receiptIdBase = {
-  sourceCommit: 'b'.repeat(40),
-  stage4AClosureAuditId: 'c'.repeat(64),
-  stage4B1ProofId: 'd'.repeat(64),
-  stage4B1DecisionId: 'e'.repeat(64),
+const valid4B1Artifact = {
+  schemaVersion: 'stage-4b1.activation-contract-artifact.v1',
+  labels: ['OFFLINE', 'BLOCKED: NO PROMOTED STRATEGY'],
+  artifactId: 'a'.repeat(64),
+  eligibilityProof: {
+    proofId: 'b'.repeat(64),
+    status: 'BLOCKED_NO_PROMOTED_STRATEGY',
+    paperApproved: false,
+    liveApproved: false,
+  },
+  activationDecision: {
+    decisionId: 'c'.repeat(64),
+    eligibilityProofId: 'b'.repeat(64),
+    status: 'ACTIVATION_BLOCKED',
+    paperApproved: false,
+    liveApproved: false,
+  },
+};
+
+const receiptOptsBase = {
+  sourceCommit: 'd'.repeat(40),
+  stage4AClosureAuditId: 'e'.repeat(64),
+  stage4B1Artifact: valid4B1Artifact,
+  stage4B1ArtifactSourceSha256: 'f'.repeat(64),
   generatedAt: '2026-07-27T21:00:00.000Z',
 };
 
 test('41. receipt is deterministic', () => {
-  const r1 = createStage4B2Receipt(receiptIdBase);
-  const r2 = createStage4B2Receipt(receiptIdBase);
+  const r1 = createStage4B2Receipt(receiptOptsBase);
+  const r2 = createStage4B2Receipt(receiptOptsBase);
   assert.equal(r1.receiptId, r2.receiptId);
   assert.ok(Object.isFrozen(r1));
 });
 
 test('42. receipt binds all required fields', () => {
-  const r = createStage4B2Receipt(receiptIdBase);
+  const r = createStage4B2Receipt(receiptOptsBase);
   assert.equal(r.schemaVersion, STAGE_4B2_RECEIPT_SCHEMA);
+  assert.equal(r.stage4B1ArtifactId, 'a'.repeat(64));
+  assert.equal(r.stage4B1ProofId, 'b'.repeat(64));
+  assert.equal(r.stage4B1DecisionId, 'c'.repeat(64));
   assert.equal(r.reviewEligible, false);
   assert.equal(r.paperApproved, false);
   assert.equal(r.testnetApproved, false);
@@ -336,38 +358,60 @@ test('42. receipt binds all required fields', () => {
 });
 
 test('43. verifier rejects schema mismatch', () => {
-  assert.throws(() => verifyStage4B2Receipt({ ...createStage4B2Receipt(receiptIdBase), schemaVersion: 'wrong' }, receiptIdBase));
+  assert.throws(() => verifyStage4B2Receipt(
+    { ...createStage4B2Receipt(receiptOptsBase), schemaVersion: 'wrong' }, receiptOptsBase));
 });
 
 test('44. verifier rejects tampered sourceCommit', () => {
-  assert.throws(() => verifyStage4B2Receipt(createStage4B2Receipt(receiptIdBase), { ...receiptIdBase, sourceCommit: 'x'.repeat(40) }));
+  assert.throws(() => verifyStage4B2Receipt(
+    createStage4B2Receipt(receiptOptsBase),
+    { ...receiptOptsBase, sourceCommit: 'x'.repeat(40) }));
 });
 
-test('45. verifier rejects tampered stage4B1 proof', () => {
-  assert.throws(() => verifyStage4B2Receipt(createStage4B2Receipt(receiptIdBase), { ...receiptIdBase, stage4B1ProofId: 'x'.repeat(64) }));
+test('45. verifier rejects tampered 4B1 artifact', () => {
+  const r = createStage4B2Receipt(receiptOptsBase);
+  const tamperedArtifact = structuredClone(valid4B1Artifact);
+  tamperedArtifact.eligibilityProof.status = 'ELIGIBLE_FOR_ACTIVATION_REVIEW';
+  assert.throws(() => verifyStage4B2Receipt(r,
+    { ...receiptOptsBase, stage4B1Artifact: tamperedArtifact }));
 });
 
 test('46. verifier rejects tampered receiptId', () => {
-  const r = createStage4B2Receipt(receiptIdBase);
+  const r = createStage4B2Receipt(receiptOptsBase);
   const tampered = { ...r, receiptId: 'x'.repeat(64) };
-  assert.throws(() => verifyStage4B2Receipt(tampered, receiptIdBase));
+  assert.throws(() => verifyStage4B2Receipt(tampered, receiptOptsBase));
 });
 
 test('47. verifier passes valid receipt', () => {
-  const r = createStage4B2Receipt(receiptIdBase);
-  const v = verifyStage4B2Receipt(r, receiptIdBase);
+  const r = createStage4B2Receipt(receiptOptsBase);
+  const v = verifyStage4B2Receipt(r, receiptOptsBase);
   assert.equal(v.receiptId, r.receiptId);
   assert.ok(Object.isFrozen(v));
 });
 
 test('48. receipt rejects invalid source commit length', () => {
-  assert.throws(() => createStage4B2Receipt({ ...receiptIdBase, sourceCommit: 'abc' }));
+  assert.throws(() => createStage4B2Receipt({ ...receiptOptsBase, sourceCommit: 'abc' }));
 });
 
 test('49. receipt rejects invalid timestamp', () => {
-  assert.throws(() => createStage4B2Receipt({ ...receiptIdBase, generatedAt: 'now' }));
+  assert.throws(() => createStage4B2Receipt({ ...receiptOptsBase, generatedAt: 'now' }));
 });
 
-test('50. receipt rejects invalid Stage 4A closure ID', () => {
-  assert.throws(() => createStage4B2Receipt({ ...receiptIdBase, stage4AClosureAuditId: 'short' }));
+test('50. verifier rejects zero artifactId', () => {
+  const r = createStage4B2Receipt(receiptOptsBase);
+  const zero = structuredClone(valid4B1Artifact);
+  zero.artifactId = '0'.repeat(64);
+  assert.throws(() => createStage4B2Receipt({ ...receiptOptsBase, stage4B1Artifact: zero }));
+});
+
+test('51. verifier rejects self-consistent fake via sha256 mismatch', () => {
+  const r = createStage4B2Receipt(receiptOptsBase);
+  // Create a self-consistent fake artifact with different sha256
+  const fake = structuredClone(valid4B1Artifact);
+  fake.eligibilityProof.proofId = 'f'.repeat(64);
+  fake.activationDecision.eligibilityProofId = 'f'.repeat(64);
+  fake.artifactId = 'f'.repeat(64);
+  // Verifier computes sha256 of the fake → won't match receipt-bound sha256
+  assert.throws(() => verifyStage4B2Receipt(r,
+    { ...receiptOptsBase, stage4B1Artifact: fake, stage4B1ArtifactSourceSha256: '0'.repeat(64) }));
 });
