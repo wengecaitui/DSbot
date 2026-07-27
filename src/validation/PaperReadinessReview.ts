@@ -198,7 +198,7 @@ export class PaperReadinessReviewPolicy {
     // 5. Independent reverification of 4B1 artifacts
     const reverified = this.verifier.reverifyArtifacts(bundle);
     if (!reverified.stage4AClosed) reasons.push(PAPER_READINESS_REASONS.STAGE_4A_NOT_CLOSED);
-    if (reverified.artifactDigest !== request.artifactDigest) reasons.push(PAPER_READINESS_REASONS.DIGEST_MISMATCH);
+    if (reverified.artifactsDigest !== request.artifactDigest) reasons.push(PAPER_READINESS_REASONS.DIGEST_MISMATCH);
     if (!reverified.promotionEligible) reasons.push(PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY);
 
     // 6. Proof identity verification (not trusting proof.verified by caller)
