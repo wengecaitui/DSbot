@@ -1,0 +1,81 @@
+name: Stage 4A12 Candidate Robustness Receipt
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/stage-4a12-candidate-proof.yml'
+      - 'docs/releases/stage-4a12-candidate-manifest.json'
+      - 'docs/releases/stage-4a12-promotion-decision.json'
+      - 'docs/releases/stage-4a12-strategy-candidate-factory.md'
+      - 'quant_engine/proof/**'
+      - 'quant_engine/tests/test_candidate_factory.py'
+      - 'scripts/run-stage-4a12-candidate-factory.py'
+      - 'scripts/stage-4a12-promotion-receipt.py'
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-proof:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      MANIFEST_PATH: docs/releases/stage-4a12-candidate-manifest.json
+      RECEIPT_PATH: docs/releases/stage-4a12-promotion-decision.json
+      SUBJECT_DIR: artifacts/stage-4a12
+    steps:
+      - name: Checkout exact receipt commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install -r quant_engine/requirements.txt
+          npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Verify engine ancestry and candidate manifest
+        shell: bash
+        run: |
+          ENGINE_COMMIT="$(python -c "import json; print(json.load(open('$RECEIPT_PATH'))['engineCommit'])")"
+          git merge-base --is-ancestor "$ENGINE_COMMIT" "$SOURCE_COMMIT"
+          python scripts/run-stage-4a12-candidate-factory.py --source-commit "$ENGINE_COMMIT" --output "$SUBJECT_DIR/recomputed-candidate-manifest.json"
+          cmp "$MANIFEST_PATH" "$SUBJECT_DIR/recomputed-candidate-manifest.json"
+          python scripts/run-stage-4a12-candidate-factory.py --source-commit "$ENGINE_COMMIT" --verify --output "$MANIFEST_PATH"
+      - name: Verify decision receipt and build attestation subject
+        run: >-
+          python scripts/stage-4a12-promotion-receipt.py
+          --candidate-manifest "$MANIFEST_PATH"
+          --receipt "$RECEIPT_PATH"
+          --verify
+          --receipt-commit "$SOURCE_COMMIT"
+          --subject-output "$SUBJECT_DIR/promotion-decision.json"
+      - name: Upload source-free proof subjects
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-4a12-candidate-proof-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.SUBJECT_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed provenance attestations
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.SUBJECT_DIR }}/*.json
