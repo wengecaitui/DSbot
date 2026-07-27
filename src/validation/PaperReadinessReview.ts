@@ -86,7 +86,8 @@ export function createArtifactVerifier(baselineCommit: string): ActivationArtifa
     reverifyArtifacts(bundle: Stage4AArtifactTextBundle): ArtifactReverificationResult {
       const reasons: PaperReadinessReasonCode[] = [];
       const proof = verifyProductionEligibility(bundle, baselineCommit);
-      const stage4AClosed = !proof.reasonCodes.includes('STAGE_4A_NOT_CLOSED' as any);
+      const stage4AClosed = proof.status !== 'BLOCKED_INVALID_EVIDENCE'
+        && !proof.reasonCodes.includes('STAGE_4A_NOT_CLOSED' as any);
       const promotionEligible = proof.status === 'ELIGIBLE_FOR_ACTIVATION_REVIEW';
       if (!stage4AClosed) reasons.push(PAPER_READINESS_REASONS.STAGE_4A_NOT_CLOSED);
       if (!promotionEligible) reasons.push(PAPER_READINESS_REASONS.PROMOTION_NOT_ELIGIBLE);

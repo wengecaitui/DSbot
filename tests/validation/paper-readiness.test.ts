@@ -218,14 +218,18 @@ test('29. audit chain intact', () => {
 });
 
 test('30. audit detection of broken chain', () => {
-  const a = new AppendOnlyPaperReadinessAudit([{
-    schemaVersion: PAPER_READINESS_REASONS.AUDIT_CHAIN_BROKEN as any,
-    sequence: 0, timestamp: '2026-01-01T00:00:00.000Z', previousEventId: null,
-    fromState: null, toState: 'UNREVIEWED', eventType: 'ROOT', payloadDigest: 'aa',
-    requestId: null, eventId: 'bb',
-  } as any]);
-  // Should fail — schema mismatch
-  try { a.validate(); } catch { return; }
+  // Constructor validates input — broken chain should throw at construction time
+  try {
+    new AppendOnlyPaperReadinessAudit([{
+      schemaVersion: PAPER_READINESS_REASONS.AUDIT_CHAIN_BROKEN as any,
+      sequence: 0, timestamp: '2026-01-01T00:00:00.000Z', previousEventId: null,
+      fromState: null, toState: 'UNREVIEWED', eventType: 'ROOT', payloadDigest: 'aa',
+      requestId: null, eventId: 'bb',
+    } as any]);
+    assert.fail('should have thrown on broken chain');
+  } catch {
+    // Expected — constructor validate detected schema mismatch
+  }
 });
 
 test('31. createRealBlockedAudit produces valid chain', () => {
