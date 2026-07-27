@@ -7,7 +7,7 @@ on:
     paths:
       - '.github/workflows/reference-infrastructure-proof.yml'
       - 'src/validation/**'
-      - 'scripts/run-reference-infrastructure-proof.mjs'
+      - 'scripts/run-reference-infrastructure-proof.mts'
       - 'scripts/run-tests.mjs'
       - 'tests/validation/**'
       - 'package.json'
@@ -49,7 +49,7 @@ jobs:
       - name: Re-run canonical validation
         run: npm run ci
       - name: Generate and independently re-verify reference proof
-        run: node scripts/run-reference-infrastructure-proof.mjs --source-commit "$SOURCE_COMMIT" --output "$PROOF_PATH"
+        run: npx tsx scripts/run-reference-infrastructure-proof.mts --source-commit "$SOURCE_COMMIT" --output "$PROOF_PATH"
       - name: Upload proof subject
         uses: actions/upload-artifact@v4
         with:

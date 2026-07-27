@@ -4,22 +4,27 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import {
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const {
   createReferenceInfrastructureProof,
   verifyReferenceInfrastructureProof,
-} from '../dist/validation/ReferenceInfrastructureProof.js';
+}: {
+  createReferenceInfrastructureProof: typeof import('../src/validation/ReferenceInfrastructureProof').createReferenceInfrastructureProof;
+  verifyReferenceInfrastructureProof: typeof import('../src/validation/ReferenceInfrastructureProof').verifyReferenceInfrastructureProof;
+} = require('../src/validation/ReferenceInfrastructureProof');
 
-function argument(name, fallback) {
+function argument(name: string, fallback?: string): string | undefined {
   const index = process.argv.indexOf(name);
   if (index === -1) return fallback;
   if (!process.argv[index + 1]) throw new Error(`Missing value for ${name}`);
   return process.argv[index + 1];
 }
 
-const repository = argument('--repository', process.env.GITHUB_REPOSITORY ?? 'wengecaitui/DSbot');
+const repository = argument('--repository', process.env.GITHUB_REPOSITORY ?? 'wengecaitui/DSbot')!;
 const sourceCommit = argument('--source-commit', process.env.SOURCE_COMMIT);
-const workflow = argument('--workflow', '.github/workflows/reference-infrastructure-proof.yml');
-const output = path.resolve(argument('--output', 'artifacts/reference-infrastructure-proof.json'));
+const workflow = argument('--workflow', '.github/workflows/reference-infrastructure-proof.yml')!;
+const output = path.resolve(argument('--output', 'artifacts/reference-infrastructure-proof.json')!);
 if (!sourceCommit) throw new Error('SOURCE_COMMIT or --source-commit is required');
 
 const simulatorSource = path.resolve('src/validation/ReferenceInfrastructureProof.ts');
