@@ -1,0 +1,1159 @@
+{
+  "approvals": {
+    "liveApproved": false,
+    "paperApproved": false,
+    "testnetApproved": false
+  },
+  "baselineCommit": "4b34e6a58e0b7bf93774bc8f3055fea60e28117d",
+  "candidateManifestId": "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa",
+  "developmentId": "c05a8d0947f84d92828d7fed5ff49687f1930d9beba249b8851198dd0476cd47",
+  "diagnostics": [
+    {
+      "causalClaim": false,
+      "costDegradationMean": 0.019532688050602143,
+      "developmentTestSummary": {
+        "evaluationCount": 30,
+        "maxDrawdown": 0.2906727327673312,
+        "meanNetReturn": -0.022641999097150253,
+        "meanTradesPerEvaluation": 16.9,
+        "positiveEvaluationCount": 9,
+        "positiveEvaluationFraction": 0.3,
+        "totalTrades": 507
+      },
+      "folds": [
+        {
+          "fold": 0,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.3049964202609471,
+            "meanNetReturn": -0.0709814331782452,
+            "medianNetReturn": -0.037669719505887655,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 199,
+            "worstNetReturn": -0.28729713868726414
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD",
+            "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.002530742910602457,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.46862596148949287,
+            "meanNetReturn": -0.15424056490163598,
+            "medianNetReturn": -0.12541268515517434,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 1529,
+            "worstNetReturn": -0.46862596148949287
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.2906727327673312,
+            "meanNetReturn": -0.048551849872786434,
+            "medianNetReturn": -0.011926147821632316,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 199,
+            "worstNetReturn": -0.27086084065417204
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.11398989222909589,
+            "meanNetReturn": -0.018889055908871733,
+            "medianNetReturn": -0.014805227198395332,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 171,
+            "worstNetReturn": -0.061119346671849706
+          }
+        },
+        {
+          "fold": 1,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.11886354063377431,
+            "meanNetReturn": -0.032308459692181116,
+            "medianNetReturn": -0.04119817857411201,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 165,
+            "worstNetReturn": -0.057566369642611415
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.011046908560803148,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.6461188930766248,
+            "meanNetReturn": -0.19972233698837025,
+            "medianNetReturn": -0.15010471441344775,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 1916,
+            "worstNetReturn": -0.6362348034114922
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.1156857306249427,
+            "meanNetReturn": -0.013000210576719273,
+            "medianNetReturn": -0.018768631217868814,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 165,
+            "worstNetReturn": -0.035832038456637516
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.164681066147651,
+            "meanNetReturn": -0.03867368941286783,
+            "medianNetReturn": -0.020238422360626673,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 161,
+            "worstNetReturn": -0.14400804031295378
+          }
+        },
+        {
+          "fold": 2,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.1369483883120487,
+            "meanNetReturn": -0.02323416857283086,
+            "medianNetReturn": -0.018771894550795643,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 143,
+            "worstNetReturn": -0.0857390998470362
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.0010662232546991834,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.6918071417705814,
+            "meanNetReturn": -0.22943654377240938,
+            "medianNetReturn": -0.18602290674552557,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 2274,
+            "worstNetReturn": -0.6539106361043701
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.1224288275563187,
+            "meanNetReturn": -0.0063739368419450495,
+            "medianNetReturn": -0.0015557780284875533,
+            "positiveDatasetCount": 5,
+            "positiveDatasetFraction": 0.5,
+            "totalTrades": 143,
+            "worstNetReturn": -0.06801567830311128
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.22128034520702425,
+            "meanNetReturn": -0.039299896755017626,
+            "medianNetReturn": -0.026801547165227813,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 199,
+            "worstNetReturn": -0.1641124079598164
+          }
+        }
+      ],
+      "highCostStressSummary": {
+        "evaluationCount": 30,
+        "maxDrawdown": 0.3049964202609471,
+        "meanNetReturn": -0.042174687147752396,
+        "meanTradesPerEvaluation": 16.9,
+        "positiveEvaluationCount": 3,
+        "positiveEvaluationFraction": 0.1,
+        "totalTrades": 507
+      },
+      "holdoutMetricsUsed": false,
+      "observedFailureSignals": [
+        "HIGH_COST_TEST_BELOW_THRESHOLD",
+        "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+        "TEST_CROSS_MARKET_INCONSISTENT",
+        "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT",
+        "TEST_MEDIAN_NON_POSITIVE",
+        "VALIDATION_MEDIAN_NON_POSITIVE"
+      ],
+      "parameterSensitivity": {
+        "foldCount": 3,
+        "maxMedianReturnDelta": 0.011046908560803148,
+        "stableFoldCount": 3
+      },
+      "selectionCount": 9,
+      "semanticFingerprint": "080d0a5aec83113c227d8b08a112b0f4c42abc0bac24380c65b6f14b95e806f0",
+      "specId": "9c77fe6bb80c79481707e4820ad1493c28cec61c41e156073fe28e9e78eafec6",
+      "strategyId": "derived-trend-stochastic-confirmation-ca529176d8c82a01"
+    },
+    {
+      "causalClaim": false,
+      "costDegradationMean": 0.01340554732735458,
+      "developmentTestSummary": {
+        "evaluationCount": 30,
+        "maxDrawdown": 0.17655810008930897,
+        "meanNetReturn": -0.0004136209540729167,
+        "meanTradesPerEvaluation": 11.3,
+        "positiveEvaluationCount": 8,
+        "positiveEvaluationFraction": 0.26666666666666666,
+        "totalTrades": 339
+      },
+      "folds": [
+        {
+          "fold": 0,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.17853199235341666,
+            "meanNetReturn": -0.02198433923290405,
+            "medianNetReturn": -0.0328597654248316,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 119,
+            "worstNetReturn": -0.08949946696178834
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.002222400193170715,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.4647647948561388,
+            "meanNetReturn": -0.11149507276307022,
+            "medianNetReturn": -0.0992545771676906,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 1024,
+            "worstNetReturn": -0.39842307978424474
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.17655810008930897,
+            "meanNetReturn": -0.008028198506995987,
+            "medianNetReturn": -0.01876867206836913,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 119,
+            "worstNetReturn": -0.07073449153114864
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.11594606543701336,
+            "meanNetReturn": -0.002572434142520319,
+            "medianNetReturn": -0.006307785090285456,
+            "positiveDatasetCount": 4,
+            "positiveDatasetFraction": 0.4,
+            "totalTrades": 99,
+            "worstNetReturn": -0.031943647484949156
+          }
+        },
+        {
+          "fold": 1,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.1310934115801326,
+            "meanNetReturn": -0.016267834552238382,
+            "medianNetReturn": -0.020523980014058252,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 98,
+            "worstNetReturn": -0.07495007634340045
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.008133241386874601,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.4652743706743357,
+            "meanNetReturn": -0.12427116794589403,
+            "medianNetReturn": -0.1313045028399003,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 1256,
+            "worstNetReturn": -0.335154488881077
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.12481470371246342,
+            "meanNetReturn": -0.004594194225918846,
+            "medianNetReturn": -0.007499375811975351,
+            "positiveDatasetCount": 4,
+            "positiveDatasetFraction": 0.4,
+            "totalTrades": 98,
+            "worstNetReturn": -0.0660268280363332
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.13252072082389288,
+            "meanNetReturn": -0.008696390874454252,
+            "medianNetReturn": -0.005364436553542351,
+            "positiveDatasetCount": 3,
+            "positiveDatasetFraction": 0.3,
+            "totalTrades": 118,
+            "worstNetReturn": -0.030530686929400308
+          }
+        },
+        {
+          "fold": 2,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.09224296094149576,
+            "meanNetReturn": -0.0032053310591400597,
+            "medianNetReturn": -0.03136698599527188,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 122,
+            "worstNetReturn": -0.04690177650127192
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.0019198507550433064,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.4652743706743357,
+            "meanNetReturn": -0.14567260775334262,
+            "medianNetReturn": -0.14833386427428047,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 1490,
+            "worstNetReturn": -0.25802148732529107
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.08678004268096229,
+            "meanNetReturn": 0.011381529870696083,
+            "medianNetReturn": -0.016145351376780415,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 122,
+            "worstNetReturn": -0.034237470934567193
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.2292050136314337,
+            "meanNetReturn": 0.014907333102964371,
+            "medianNetReturn": 0.02396595715717864,
+            "positiveDatasetCount": 8,
+            "positiveDatasetFraction": 0.8,
+            "totalTrades": 113,
+            "worstNetReturn": -0.17229536921024624
+          }
+        }
+      ],
+      "highCostStressSummary": {
+        "evaluationCount": 30,
+        "maxDrawdown": 0.17853199235341666,
+        "meanNetReturn": -0.013819168281427496,
+        "meanTradesPerEvaluation": 11.3,
+        "positiveEvaluationCount": 5,
+        "positiveEvaluationFraction": 0.16666666666666666,
+        "totalTrades": 339
+      },
+      "holdoutMetricsUsed": false,
+      "observedFailureSignals": [
+        "HIGH_COST_TEST_BELOW_THRESHOLD",
+        "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+        "TEST_CROSS_MARKET_INCONSISTENT",
+        "TEST_MEDIAN_NON_POSITIVE",
+        "VALIDATION_MEDIAN_NON_POSITIVE"
+      ],
+      "parameterSensitivity": {
+        "foldCount": 3,
+        "maxMedianReturnDelta": 0.008133241386874601,
+        "stableFoldCount": 3
+      },
+      "selectionCount": 9,
+      "semanticFingerprint": "4cff0ac82b5b2455823198daf9984ef1a4ae4569b729ab3ae593c1f19e6e94b7",
+      "specId": "139bf050c03982325ab4450a022744f342520b35e1e8971f44e861b11cf4d527",
+      "strategyId": "derived-stc-trend-filter-5682c752bef50a0c"
+    },
+    {
+      "causalClaim": false,
+      "costDegradationMean": 0.028627553508306355,
+      "developmentTestSummary": {
+        "evaluationCount": 30,
+        "maxDrawdown": 0.3523026021808924,
+        "meanNetReturn": -0.023457714695046483,
+        "meanTradesPerEvaluation": 24.866666666666667,
+        "positiveEvaluationCount": 10,
+        "positiveEvaluationFraction": 0.3333333333333333,
+        "totalTrades": 746
+      },
+      "folds": [
+        {
+          "fold": 0,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.36993462104671127,
+            "meanNetReturn": -0.09615461908789387,
+            "medianNetReturn": -0.06307037783674674,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 266,
+            "worstNetReturn": -0.3218118929091873
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD",
+            "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.02644804510418325,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.8497744243562488,
+            "meanNetReturn": -0.32649452285442837,
+            "medianNetReturn": -0.23148499700092784,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 2281,
+            "worstNetReturn": -0.7937764815478565
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.3523026021808924,
+            "meanNetReturn": -0.06687587303364861,
+            "medianNetReturn": -0.029173713018523062,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 266,
+            "worstNetReturn": -0.3003188617694055
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.3307645931856546,
+            "meanNetReturn": -0.07018885429452226,
+            "medianNetReturn": -0.04932252127902104,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 258,
+            "worstNetReturn": -0.22163403376742563
+          }
+        },
+        {
+          "fold": 1,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.2671759440633413,
+            "meanNetReturn": -0.0534145413588059,
+            "medianNetReturn": -0.06631669470887203,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 247,
+            "worstNetReturn": -0.12352841746375398
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD",
+            "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.01703776789162137,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.8982895128903905,
+            "meanNetReturn": -0.38880108146688774,
+            "medianNetReturn": -0.286123658726798,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 2839,
+            "worstNetReturn": -0.8904811408053774
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.25738706481935514,
+            "meanNetReturn": -0.024899554062362394,
+            "medianNetReturn": -0.038048842611706324,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 247,
+            "worstNetReturn": -0.10116066865194717
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.24289502552894077,
+            "meanNetReturn": -0.03684560100866728,
+            "medianNetReturn": -0.037090283357879006,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 268,
+            "worstNetReturn": -0.08690029336414151
+          }
+        },
+        {
+          "fold": 2,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.2723634174048144,
+            "meanNetReturn": -0.006686644163358757,
+            "medianNetReturn": 0.0019555841550758513,
+            "positiveDatasetCount": 5,
+            "positiveDatasetFraction": 0.5,
+            "totalTrades": 233,
+            "worstNetReturn": -0.07257871330112031
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.026828017623477196,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.9170835998678508,
+            "meanNetReturn": -0.4242662315894662,
+            "medianNetReturn": -0.33761845955900993,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 3386,
+            "worstNetReturn": -0.8851502843242661
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.2618096387065698,
+            "meanNetReturn": 0.021402283010871558,
+            "medianNetReturn": 0.025680212480077347,
+            "positiveDatasetCount": 8,
+            "positiveDatasetFraction": 0.8,
+            "totalTrades": 233,
+            "worstNetReturn": -0.038583277794075665
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.3464167983703,
+            "meanNetReturn": -0.04802917026253843,
+            "medianNetReturn": -0.05269206305968538,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 290,
+            "worstNetReturn": -0.09852178103708242
+          }
+        }
+      ],
+      "highCostStressSummary": {
+        "evaluationCount": 30,
+        "maxDrawdown": 0.36993462104671127,
+        "meanNetReturn": -0.05208526820335284,
+        "meanTradesPerEvaluation": 24.866666666666667,
+        "positiveEvaluationCount": 6,
+        "positiveEvaluationFraction": 0.2,
+        "totalTrades": 746
+      },
+      "holdoutMetricsUsed": false,
+      "observedFailureSignals": [
+        "HIGH_COST_TEST_BELOW_THRESHOLD",
+        "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+        "TEST_CROSS_MARKET_INCONSISTENT",
+        "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT",
+        "TEST_MEDIAN_NON_POSITIVE",
+        "VALIDATION_MEDIAN_NON_POSITIVE"
+      ],
+      "parameterSensitivity": {
+        "foldCount": 3,
+        "maxMedianReturnDelta": 0.026828017623477196,
+        "stableFoldCount": 3
+      },
+      "selectionCount": 9,
+      "semanticFingerprint": "91643f7ea4efeae8b295f7d185f5bce203110a1234870f35dc2609fc7481faf2",
+      "specId": "58156d6fd0c244449e58bb362c28732688615fa68a4771e4d26b2187ced1babe",
+      "strategyId": "derived-mean-reversion-trend-guard-262ffac08c1acf35"
+    },
+    {
+      "causalClaim": false,
+      "costDegradationMean": 0.03179617714051176,
+      "developmentTestSummary": {
+        "evaluationCount": 30,
+        "maxDrawdown": 0.41179553671706026,
+        "meanNetReturn": -0.03550505328447335,
+        "meanTradesPerEvaluation": 28.033333333333335,
+        "positiveEvaluationCount": 9,
+        "positiveEvaluationFraction": 0.3,
+        "totalTrades": 841
+      },
+      "folds": [
+        {
+          "fold": 0,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.43181910678152013,
+            "meanNetReturn": -0.12598328302806916,
+            "medianNetReturn": -0.06671239703873283,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 286,
+            "worstNetReturn": -0.3962260154350885
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD",
+            "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.03341825655412556,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.8013779113904367,
+            "meanNetReturn": -0.3235682504474397,
+            "medianNetReturn": -0.24540482479016612,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 2510,
+            "worstNetReturn": -0.7761131299588455
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.41179553671706026,
+            "meanNetReturn": -0.09579936079527497,
+            "medianNetReturn": -0.033070395087280324,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 286,
+            "worstNetReturn": -0.3695713662252216
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.3341860621339153,
+            "meanNetReturn": -0.06120679510493855,
+            "medianNetReturn": -0.03762863344318362,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 290,
+            "worstNetReturn": -0.2139745033550261
+          }
+        },
+        {
+          "fold": 1,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.34568823116711983,
+            "meanNetReturn": -0.04557803806943308,
+            "medianNetReturn": -0.05583077825315158,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 288,
+            "worstNetReturn": -0.07805563875015109
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_MEDIAN_NON_POSITIVE",
+            "TEST_CROSS_MARKET_INCONSISTENT",
+            "HIGH_COST_TEST_BELOW_THRESHOLD",
+            "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.030748272155737277,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.9017784481959058,
+            "meanNetReturn": -0.39301417550775936,
+            "medianNetReturn": -0.2860595371905274,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 3122,
+            "worstNetReturn": -0.8881504557737264
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.32657005916945386,
+            "meanNetReturn": -0.012062282847443073,
+            "medianNetReturn": -0.022975564930132253,
+            "positiveDatasetCount": 3,
+            "positiveDatasetFraction": 0.3,
+            "totalTrades": 288,
+            "worstNetReturn": -0.04087809191348035
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.20624170817730503,
+            "meanNetReturn": -0.035283276756830725,
+            "medianNetReturn": -0.03762465294406775,
+            "positiveDatasetCount": 2,
+            "positiveDatasetFraction": 0.2,
+            "totalTrades": 300,
+            "worstNetReturn": -0.0944554375689779
+          }
+        },
+        {
+          "fold": 2,
+          "highCostStress": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.3261556316681766,
+            "meanNetReturn": -0.03034237017745305,
+            "medianNetReturn": -0.011183371617308202,
+            "positiveDatasetCount": 3,
+            "positiveDatasetFraction": 0.3,
+            "totalTrades": 267,
+            "worstNetReturn": -0.22558773130800847
+          },
+          "observedFailureSignals": [
+            "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+            "VALIDATION_MEDIAN_NON_POSITIVE",
+            "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT"
+          ],
+          "parameterStability": {
+            "maxMedianReturnDelta": 0.017220414367958015,
+            "passed": true
+          },
+          "selectedTrain": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.9041891205785936,
+            "meanNetReturn": -0.42206361414972504,
+            "medianNetReturn": -0.3276555322063079,
+            "positiveDatasetCount": 0,
+            "positiveDatasetFraction": 0.0,
+            "totalTrades": 3742,
+            "worstNetReturn": -0.8616455676954005
+          },
+          "test": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.31226802528355635,
+            "meanNetReturn": 0.0013464837892979364,
+            "medianNetReturn": 0.01587669967747407,
+            "positiveDatasetCount": 6,
+            "positiveDatasetFraction": 0.6,
+            "totalTrades": 267,
+            "worstNetReturn": -0.20200335053735974
+          },
+          "validation": {
+            "datasetCount": 10,
+            "maxDrawdown": 0.28169969120967664,
+            "meanNetReturn": -0.024183360636631512,
+            "medianNetReturn": -0.029486070230321737,
+            "positiveDatasetCount": 1,
+            "positiveDatasetFraction": 0.1,
+            "totalTrades": 326,
+            "worstNetReturn": -0.10294956452523818
+          }
+        }
+      ],
+      "highCostStressSummary": {
+        "evaluationCount": 30,
+        "maxDrawdown": 0.43181910678152013,
+        "meanNetReturn": -0.0673012304249851,
+        "meanTradesPerEvaluation": 28.033333333333335,
+        "positiveEvaluationCount": 4,
+        "positiveEvaluationFraction": 0.13333333333333333,
+        "totalTrades": 841
+      },
+      "holdoutMetricsUsed": false,
+      "observedFailureSignals": [
+        "HIGH_COST_TEST_BELOW_THRESHOLD",
+        "SELECTED_TRAIN_MEDIAN_NON_POSITIVE",
+        "TEST_CROSS_MARKET_INCONSISTENT",
+        "TEST_DRAWDOWN_ABOVE_PROMOTION_LIMIT",
+        "TEST_MEDIAN_NON_POSITIVE",
+        "VALIDATION_MEDIAN_NON_POSITIVE"
+      ],
+      "parameterSensitivity": {
+        "foldCount": 3,
+        "maxMedianReturnDelta": 0.03341825655412556,
+        "stableFoldCount": 3
+      },
+      "selectionCount": 9,
+      "semanticFingerprint": "2b67b4a94aa5de1a5f85d0a427c94ea90a6fa8991d9a0432a292afc648ad5c5e",
+      "specId": "4acc61095aa516bfb5757a5ff615e0fd2560ee07c30028ff4d2fd6b5b6032750",
+      "strategyId": "derived-support-resistance-risk-entry-01ef09c554af0da8"
+    }
+  ],
+  "engineCommit": "80f12966081e3851424f820dd3428249d5537eb9",
+  "finalHoldoutUsedForAttribution": false,
+  "finalHoldoutUsedForDesign": false,
+  "gateGapAudit": [
+    {
+      "code": "LAST_FOLD_ONLY_PREHOLDOUT_DECISION",
+      "evidence": "cost and cross-market preholdout checks read only the final development fold",
+      "requiredCorrection": "future gates aggregate every development fold before opening fresh evidence"
+    },
+    {
+      "code": "FAMILY_WIDE_SELECTION_COUNT_MISSING",
+      "evidence": "selection counts are recorded per strategy, not across the candidate family",
+      "requiredCorrection": "future gates bind family-wide candidate and parameter comparison counts"
+    },
+    {
+      "code": "PREHOLDOUT_REJECTED_CANDIDATES_CONSUMED_HOLDOUT",
+      "evidence": "the finalizer evaluated every candidate, including candidates already rejected before holdout",
+      "requiredCorrection": "fresh evidence may be opened only for pre-registered, preholdout-eligible frozen lineages"
+    },
+    {
+      "code": "NEGATIVE_TRAIN_WINNER_NOT_REJECTED",
+      "evidence": "train ranking selects the least-bad parameter set even when every train candidate is non-positive",
+      "requiredCorrection": "future gates require an absolute development threshold before ranking can advance"
+    }
+  ],
+  "labels": [
+    "DEVELOPMENT EVIDENCE ONLY",
+    "FINAL HOLDOUT EXCLUDED FROM ATTRIBUTION AND DESIGN",
+    "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
+  ],
+  "marketAnalysis": [
+    {
+      "costDegradationMean": 0.026715183688779325,
+      "datasetId": "1d86c29ebff7fcf617d5e8a40b31c8e7077660ab2ff97038a73dc976eebdc697",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.07590196741313238,
+        "meanNetReturn": -0.04806165428138084,
+        "meanTradesPerEvaluation": 23.166666666666668,
+        "positiveEvaluationCount": 0,
+        "positiveEvaluationFraction": 0.0,
+        "totalTrades": 278
+      },
+      "symbol": "BTC/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.04894426314887546,
+        "meanNetReturn": -0.021346470592601512,
+        "meanTradesPerEvaluation": 23.166666666666668,
+        "positiveEvaluationCount": 1,
+        "positiveEvaluationFraction": 0.08333333333333333,
+        "totalTrades": 278
+      },
+      "timeframe": "5m"
+    },
+    {
+      "costDegradationMean": 0.02628933763826084,
+      "datasetId": "30add152388b282efa5130ec35932dc985023d693ca9e7d35e634fbb9a7a6afc",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.07805563875015109,
+        "meanNetReturn": -0.044535888801336354,
+        "meanTradesPerEvaluation": 22.75,
+        "positiveEvaluationCount": 0,
+        "positiveEvaluationFraction": 0.0,
+        "totalTrades": 273
+      },
+      "symbol": "BNB/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.0454200139452923,
+        "meanNetReturn": -0.018246551163075515,
+        "meanTradesPerEvaluation": 22.75,
+        "positiveEvaluationCount": 2,
+        "positiveEvaluationFraction": 0.16666666666666666,
+        "totalTrades": 273
+      },
+      "timeframe": "5m"
+    },
+    {
+      "costDegradationMean": 0.02525453058148577,
+      "datasetId": "439ac89dce8e613dcfc3407107430aa55272a03db215f27a63064a7120e6af4a",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.43181910678152013,
+        "meanNetReturn": -0.031472298730585414,
+        "meanTradesPerEvaluation": 22.166666666666668,
+        "positiveEvaluationCount": 6,
+        "positiveEvaluationFraction": 0.5,
+        "totalTrades": 266
+      },
+      "symbol": "BTC/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.4074472668563196,
+        "meanNetReturn": -0.0062177681490996435,
+        "meanTradesPerEvaluation": 22.166666666666668,
+        "positiveEvaluationCount": 6,
+        "positiveEvaluationFraction": 0.5,
+        "totalTrades": 266
+      },
+      "timeframe": "4h"
+    },
+    {
+      "costDegradationMean": 0.024564832955565948,
+      "datasetId": "45b196cf3984fa491d1413ea4c1fb0043e3ae4deadf3bbefe9dd44084651e81f",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.10976121872291761,
+        "meanNetReturn": -0.03137817910843189,
+        "meanTradesPerEvaluation": 21.0,
+        "positiveEvaluationCount": 2,
+        "positiveEvaluationFraction": 0.16666666666666666,
+        "totalTrades": 252
+      },
+      "symbol": "ADA/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.08278452372768284,
+        "meanNetReturn": -0.00681334615286594,
+        "meanTradesPerEvaluation": 21.0,
+        "positiveEvaluationCount": 4,
+        "positiveEvaluationFraction": 0.3333333333333333,
+        "totalTrades": 252
+      },
+      "timeframe": "5m"
+    },
+    {
+      "costDegradationMean": 0.022269206247161888,
+      "datasetId": "6a0e9c5074d8a95d44407642dbb2740320e6e3324639083cfd62563f0cbd8547",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.08949946696178834,
+        "meanNetReturn": -0.03871820146219562,
+        "meanTradesPerEvaluation": 19.083333333333332,
+        "positiveEvaluationCount": 1,
+        "positiveEvaluationFraction": 0.08333333333333333,
+        "totalTrades": 229
+      },
+      "symbol": "SOL/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.07092375563047075,
+        "meanNetReturn": -0.016448995215033735,
+        "meanTradesPerEvaluation": 19.083333333333332,
+        "positiveEvaluationCount": 1,
+        "positiveEvaluationFraction": 0.08333333333333333,
+        "totalTrades": 229
+      },
+      "timeframe": "5m"
+    },
+    {
+      "costDegradationMean": 0.023100341082639586,
+      "datasetId": "8043f6dc1ae787ec88e64cfdebc8c8dfaf6004c44447691c2aaaa30d06d5f40c",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.08507795419094544,
+        "meanNetReturn": -0.035184536482586654,
+        "meanTradesPerEvaluation": 19.75,
+        "positiveEvaluationCount": 2,
+        "positiveEvaluationFraction": 0.16666666666666666,
+        "totalTrades": 237
+      },
+      "symbol": "XRP/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.058681496341008804,
+        "meanNetReturn": -0.012084195399947067,
+        "meanTradesPerEvaluation": 19.75,
+        "positiveEvaluationCount": 3,
+        "positiveEvaluationFraction": 0.25,
+        "totalTrades": 237
+      },
+      "timeframe": "5m"
+    },
+    {
+      "costDegradationMean": 0.022987520346068647,
+      "datasetId": "8c73769dc8f4366ab4ccd6c00de233c5bcffba8fd95ddfd0d25381feaee4d0c9",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.10279132648119715,
+        "meanNetReturn": -0.029603702141359756,
+        "meanTradesPerEvaluation": 19.5,
+        "positiveEvaluationCount": 1,
+        "positiveEvaluationFraction": 0.08333333333333333,
+        "totalTrades": 234
+      },
+      "symbol": "DOGE/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.07878957227016015,
+        "meanNetReturn": -0.0066161817952911095,
+        "meanTradesPerEvaluation": 19.5,
+        "positiveEvaluationCount": 5,
+        "positiveEvaluationFraction": 0.4166666666666667,
+        "totalTrades": 234
+      },
+      "timeframe": "5m"
+    },
+    {
+      "costDegradationMean": 0.020283575554001305,
+      "datasetId": "a3c3b70370f5844581c26da0a40166f460f11d8bd73b7a4e83bd8e0569114fc3",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.0805205623733466,
+        "meanNetReturn": -0.025975576302962045,
+        "meanTradesPerEvaluation": 17.166666666666668,
+        "positiveEvaluationCount": 2,
+        "positiveEvaluationFraction": 0.16666666666666666,
+        "totalTrades": 206
+      },
+      "symbol": "ETH/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.05923160640413361,
+        "meanNetReturn": -0.005692000748960739,
+        "meanTradesPerEvaluation": 17.166666666666668,
+        "positiveEvaluationCount": 5,
+        "positiveEvaluationFraction": 0.4166666666666667,
+        "totalTrades": 206
+      },
+      "timeframe": "5m"
+    },
+    {
+      "costDegradationMean": 0.019075177773224303,
+      "datasetId": "b385f8bc3b8f29944447e49d28b3a064efe1667ed884db4d9a65685a7089562f",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.42849422119338376,
+        "meanNetReturn": -0.12457602707409425,
+        "meanTradesPerEvaluation": 18.75,
+        "positiveEvaluationCount": 2,
+        "positiveEvaluationFraction": 0.16666666666666666,
+        "totalTrades": 225
+      },
+      "symbol": "ETH/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.41179553671706026,
+        "meanNetReturn": -0.10550084930086995,
+        "meanTradesPerEvaluation": 18.75,
+        "positiveEvaluationCount": 3,
+        "positiveEvaluationFraction": 0.25,
+        "totalTrades": 225
+      },
+      "timeframe": "4h"
+    },
+    {
+      "costDegradationMean": 0.0228652091997494,
+      "datasetId": "f75e05a039f82b3c94e8e22061a0fd56b34acaa896cc7115a9eeae69cf82cabb",
+      "highCostStress": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.11007845585882015,
+        "meanNetReturn": -0.028944820758861733,
+        "meanTradesPerEvaluation": 19.416666666666668,
+        "positiveEvaluationCount": 2,
+        "positiveEvaluationFraction": 0.16666666666666666,
+        "totalTrades": 233
+      },
+      "symbol": "DOT/USDT",
+      "test": {
+        "evaluationCount": 12,
+        "maxDrawdown": 0.08641338655241802,
+        "meanNetReturn": -0.006079611559112334,
+        "meanTradesPerEvaluation": 19.416666666666668,
+        "positiveEvaluationCount": 6,
+        "positiveEvaluationFraction": 0.5,
+        "totalTrades": 233
+      },
+      "timeframe": "5m"
+    }
+  ],
+  "marketOrTimeframeSelectionChanges": [],
+  "parameterChanges": [],
+  "reportId": "77918dcef9e2c30bd2ac30f71817a6ce10bc4d8df614875ab49562d2330424d1",
+  "reportingPolicy": "all candidates, markets, timeframes, and folds are reported; winner-only filtering is prohibited",
+  "researchEvidenceCutoff": "END_OF_STAGE_4A12_DEVELOPMENT_WINDOWS",
+  "researchHypotheses": [
+    "require absolute development viability before relative candidate ranking",
+    "aggregate cross-market, cost, drawdown, and stability evidence across all development folds",
+    "charge selection-bias controls across the full frozen candidate family",
+    "open fresh evidence only after lineage, semantics, parameters, and costs are frozen"
+  ],
+  "schemaVersion": "stage-4a13.failure-attribution.v1",
+  "strategyRuleChanges": [],
+  "timeframeAnalysis": [
+    {
+      "costDegradationMean": 0.022164854177355045,
+      "datasetCount": 2,
+      "highCostStress": {
+        "evaluationCount": 24,
+        "maxDrawdown": 0.43181910678152013,
+        "meanNetReturn": -0.07802416290233984,
+        "meanTradesPerEvaluation": 20.458333333333332,
+        "positiveEvaluationCount": 8,
+        "positiveEvaluationFraction": 0.3333333333333333,
+        "totalTrades": 491
+      },
+      "test": {
+        "evaluationCount": 24,
+        "maxDrawdown": 0.41179553671706026,
+        "meanNetReturn": -0.05585930872498479,
+        "meanTradesPerEvaluation": 20.458333333333332,
+        "positiveEvaluationCount": 9,
+        "positiveEvaluationFraction": 0.375,
+        "totalTrades": 491
+      },
+      "timeframe": "4h"
+    },
+    {
+      "costDegradationMean": 0.023634400839028374,
+      "datasetCount": 8,
+      "highCostStress": {
+        "evaluationCount": 96,
+        "maxDrawdown": 0.11007845585882015,
+        "meanNetReturn": -0.03530031991738936,
+        "meanTradesPerEvaluation": 20.229166666666668,
+        "positiveEvaluationCount": 10,
+        "positiveEvaluationFraction": 0.10416666666666667,
+        "totalTrades": 1942
+      },
+      "test": {
+        "evaluationCount": 96,
+        "maxDrawdown": 0.08641338655241802,
+        "meanNetReturn": -0.011665919078360988,
+        "meanTradesPerEvaluation": 20.229166666666668,
+        "positiveEvaluationCount": 27,
+        "positiveEvaluationFraction": 0.28125,
+        "totalTrades": 1942
+      },
+      "timeframe": "5m"
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "baselineCommit": "4b34e6a58e0b7bf93774bc8f3055fea60e28117d",
+  "contractId": "1c9219c4738e6e4cd2e507fb50d6032a6d256056941d497b93ef995485510b39",
+  "evidenceLedgerContract": {
+    "appendOnlyEvents": true,
+    "completionRetryAllowed": false,
+    "evaluationIdentity": "sha256(semanticFingerprint + evidenceFingerprint)",
+    "familyReservation": "all pre-frozen semantic families are reserved atomically before any evaluation",
+    "identityChangeResetsConsumption": false,
+    "reservationIsConsumption": true,
+    "schemaVersion": "stage-4a13.evidence-ledger.v1"
+  },
+  "freshEvidenceWindowAvailable": false,
+  "freshEvidenceWindowSchema": {
+    "noGapFilling": true,
+    "oneHourPolicy": "explicit-no-cross-gap",
+    "requiredFields": [
+      "windowId",
+      "datasetId",
+      "predecessorWindowId",
+      "symbol",
+      "timeframe",
+      "opensAt",
+      "closesAt",
+      "gapPolicy",
+      "segmentPolicy",
+      "sourceDataframeSha256",
+      "startRow",
+      "endRowExclusive",
+      "status"
+    ],
+    "schemaVersion": "stage-4a13.fresh-evidence-window.v1",
+    "usableStatus": "SEALED"
+  },
+  "freshPromotionProofAllowed": false,
+  "freshPromotionProofRequirements": [
+    "spec and parameters frozen before the evidence window opens",
+    "window is chronologically later than every inherited consumed holdout window",
+    "window was not used for development, attribution, ranking, market selection, or parameter selection",
+    "each semantic strategy family and evidence window pair is evaluated at most once",
+    "all events are persisted in the append-only evidence ledger",
+    "insufficient new evidence yields readiness only and no promotion proof"
+  ],
+  "liveApproved": false,
+  "nextGenerationFrozenSpecCount": 0,
+  "paperApproved": false,
+  "requiredLineageFields": [
+    "strategyId",
+    "specId",
+    "parentStrategyId",
+    "parentSpecId",
+    "researchEvidenceCutoff",
+    "designEvidenceWindowIds",
+    "consumedHoldoutWindowIds",
+    "designInputs",
+    "freezeCommit",
+    "freezeTimestamp",
+    "freshEvidenceWindowId",
+    "semanticFingerprint",
+    "lineageRootId",
+    "lineageId"
+  ],
+  "schemaVersion": "stage-4a13.governance-contract.v1",
+  "semanticFingerprintExcludes": [
+    "strategyId",
+    "specId",
+    "version",
+    "label",
+    "parentStrategyId",
+    "parentSpecId",
+    "lineage"
+  ],
+  "specFreezeOrder": [
+    "development-only research cutoff sealed",
+    "strategy semantics, parameters, costs, symbols, and timeframes frozen",
+    "lineage and consumed windows inherited",
+    "freeze commit and UTC timestamp recorded",
+    "fresh evidence window opens strictly after freeze timestamp"
+  ],
+  "terminalBoundary": "STAGE 4A13 IS THE FINAL STAGE 4A FUNCTIONAL STAGE",
+  "testnetApproved": false
+}
