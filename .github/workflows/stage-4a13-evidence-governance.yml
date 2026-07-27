@@ -1,0 +1,75 @@
+name: Stage 4A13 Evidence Governance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/stage-4a13-evidence-governance.yml'
+      - 'docs/releases/stage-4a13-*.json'
+      - 'docs/releases/stage-4a13-*.md'
+      - 'quant_engine/proof/evidence_governance.py'
+      - 'quant_engine/tests/test_evidence_governance.py'
+      - 'scripts/stage-4a13-evidence-governance.py'
+
+permissions:
+  contents: read
+
+jobs:
+  evidence-governance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      SUBJECT_DIR: artifacts/stage-4a13
+    steps:
+      - name: Checkout exact governance commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install -r quant_engine/requirements.txt
+          npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Verify source-free governance artifacts
+        run: |
+          mkdir -p "$SUBJECT_DIR"
+          python scripts/stage-4a13-evidence-governance.py \
+            --candidate-manifest docs/releases/stage-4a12-candidate-manifest.json \
+            --promotion-receipt docs/releases/stage-4a12-promotion-decision.json \
+            --failure-report docs/releases/stage-4a13-failure-attribution.json \
+            --evidence-seed docs/releases/stage-4a13-consumed-evidence-seed.json \
+            --governance-contract docs/releases/stage-4a13-evidence-governance-contract.json \
+            --receipt-commit "$SOURCE_COMMIT" \
+            --subject-output "$SUBJECT_DIR/governance-subject.json"
+          cp docs/releases/stage-4a13-failure-attribution.json "$SUBJECT_DIR/"
+          cp docs/releases/stage-4a13-consumed-evidence-seed.json "$SUBJECT_DIR/"
+          cp docs/releases/stage-4a13-evidence-governance-contract.json "$SUBJECT_DIR/"
+      - name: Upload source-free governance subjects
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-4a13-evidence-governance-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.SUBJECT_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed governance attestations
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.SUBJECT_DIR }}/*.json
