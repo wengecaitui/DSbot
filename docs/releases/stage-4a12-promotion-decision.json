@@ -1,0 +1,396 @@
+{
+  "schemaVersion": "stage-4a12.public-promotion-decision.v1",
+  "labels": [
+    "PUBLIC DIGEST RECEIPT ONLY",
+    "PRIVATE FULL ROBUSTNESS PROOF REQUIRED",
+    "PAPER READINESS REVIEW ONLY",
+    "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
+  ],
+  "engineCommit": "80f12966081e3851424f820dd3428249d5537eb9",
+  "candidateManifestId": "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa",
+  "developmentId": "c05a8d0947f84d92828d7fed5ff49687f1930d9beba249b8851198dd0476cd47",
+  "privateProofId": "0afdcd027566c1030e1a3f5a3459346cf0d393b2027453724457b20ed8f232c7",
+  "datasetMatrixId": "b5d904d609de2520b262dbdc17a801e927504b8c4d8cf31122d9929d9b5e9e07",
+  "datasetMatrix": [
+    {
+      "datasetId": "45b196cf3984fa491d1413ea4c1fb0043e3ae4deadf3bbefe9dd44084651e81f",
+      "symbol": "ADA/USDT",
+      "timeframe": "5m",
+      "sourceDataframeSha256": "13cbf9f9bedaf37eb2ed9b5f89ae8adc4ef2bebab04d18362663be33a74992d1",
+      "sourceSha256": "45b4d80fb4975156aca56be0a3b30f20f33c848b9b4c9f38bb3214b9cb190ead",
+      "workingDataframeSha256": "51f4eb72309173aad88c0781f76c6e1ac9331f27b7c7cef09f2de437f22ee79f",
+      "sourceRows": 52128,
+      "workingStartRow": 43128,
+      "workingEndRowExclusive": 52128,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "30add152388b282efa5130ec35932dc985023d693ca9e7d35e634fbb9a7a6afc",
+      "symbol": "BNB/USDT",
+      "timeframe": "5m",
+      "sourceDataframeSha256": "67221deb2d1d553293b014f847b6a46850c467a0521e5f36fc3a4b2def6a26e2",
+      "sourceSha256": "66f6fd83dd6285cd45c6df586182961a1a12a74b0a55c7135bacbd2f31b4c566",
+      "workingDataframeSha256": "bf80aa62912ea3d4df7a2682ffc343d4290e61c8e98e03aee79ad4bbd3787cba",
+      "sourceRows": 52128,
+      "workingStartRow": 43128,
+      "workingEndRowExclusive": 52128,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "1d86c29ebff7fcf617d5e8a40b31c8e7077660ab2ff97038a73dc976eebdc697",
+      "symbol": "BTC/USDT",
+      "timeframe": "5m",
+      "sourceDataframeSha256": "791ba4860a8d1847c4420170e62455ec4ae0fecb8291d762db99f947f599eae1",
+      "sourceSha256": "81e86b7d694e6da50cca37e0cd451e0e217ae54aee52b9ebb55a503f986ac3cf",
+      "workingDataframeSha256": "fe45384cc4020bf35663ce277ad8cf79b77d748d7e82771042a115c664814b0c",
+      "sourceRows": 52128,
+      "workingStartRow": 43128,
+      "workingEndRowExclusive": 52128,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "8c73769dc8f4366ab4ccd6c00de233c5bcffba8fd95ddfd0d25381feaee4d0c9",
+      "symbol": "DOGE/USDT",
+      "timeframe": "5m",
+      "sourceDataframeSha256": "f6c91cd4ddc5abc0d74a4556597eb6c4a2b6cc081f94343a546963a74de0921c",
+      "sourceSha256": "db34de07fd5f5eb900007a2d04eac0738c2de14f5d7de8812231454825209aca",
+      "workingDataframeSha256": "a3f85e6109f771ac317d37f55c292f3fe7ffa3c32cfeb6b76974ff53c3d966ea",
+      "sourceRows": 52128,
+      "workingStartRow": 43128,
+      "workingEndRowExclusive": 52128,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "f75e05a039f82b3c94e8e22061a0fd56b34acaa896cc7115a9eeae69cf82cabb",
+      "symbol": "DOT/USDT",
+      "timeframe": "5m",
+      "sourceDataframeSha256": "7d7475bde0b34e0da1b5bc641a35167992f28502a1b021c5b9a35031166b87d7",
+      "sourceSha256": "47a6bc94e7546341f448090ed2c7ca5fd37320f6e674ebf251d2423719df829e",
+      "workingDataframeSha256": "5efa05af9f07838dcac9218c8ddc898c6a48be7017b2420d8c2fdc29e5eae8df",
+      "sourceRows": 52128,
+      "workingStartRow": 43128,
+      "workingEndRowExclusive": 52128,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "a3c3b70370f5844581c26da0a40166f460f11d8bd73b7a4e83bd8e0569114fc3",
+      "symbol": "ETH/USDT",
+      "timeframe": "5m",
+      "sourceDataframeSha256": "f646b93c533410e0540ef8de677fdd82768ec3d1e58523607da72d419017237e",
+      "sourceSha256": "f67df5131724f5c3141dd03016b544404a71bb8c5e876192bab0ee3091a49ce6",
+      "workingDataframeSha256": "90b528770df0542beef7be5d75beefbf3af75414bf9d978ab65ace9425f8d29b",
+      "sourceRows": 52128,
+      "workingStartRow": 43128,
+      "workingEndRowExclusive": 52128,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "6a0e9c5074d8a95d44407642dbb2740320e6e3324639083cfd62563f0cbd8547",
+      "symbol": "SOL/USDT",
+      "timeframe": "5m",
+      "sourceDataframeSha256": "df2f803a8cb824e3ec7f0b2470be5d7413dd7c33afa5e250b058b3ee1225d29d",
+      "sourceSha256": "b259b7cd7066d9c20ec2cf8306ee5b7fc05893974df03f3be54fae8ccd210c36",
+      "workingDataframeSha256": "43819057278a3bd17fcae53d6f4509d5835090b052af05ebc7c709ac8c758533",
+      "sourceRows": 52128,
+      "workingStartRow": 43128,
+      "workingEndRowExclusive": 52128,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "8043f6dc1ae787ec88e64cfdebc8c8dfaf6004c44447691c2aaaa30d06d5f40c",
+      "symbol": "XRP/USDT",
+      "timeframe": "5m",
+      "sourceDataframeSha256": "16a8a494648d4dfb736347ab80807e306cc1fa50abafb5fe1f02c5c2fd9474c4",
+      "sourceSha256": "02f0513d79e4d33ae42c943e7b9a868c34cf9396906123a1edfd8948d5a8c93d",
+      "workingDataframeSha256": "d6bd5c02114c111e5fc8158f42e47b22e2fa05ae4d5186ae25021264292182a6",
+      "sourceRows": 52128,
+      "workingStartRow": 43128,
+      "workingEndRowExclusive": 52128,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "439ac89dce8e613dcfc3407107430aa55272a03db215f27a63064a7120e6af4a",
+      "symbol": "BTC/USDT",
+      "timeframe": "4h",
+      "sourceDataframeSha256": "2eea5c03be721e90b8d138d6cde3d953d02342f67446a45860be87b3127cce42",
+      "sourceSha256": "87936180c44725c53c377f11690d8f769463c9777953a668e8e9ac698e4c8e6e",
+      "workingDataframeSha256": "ab3eec22b7617bdfea5b3bb96102c9dbb280cb0ef18aedb0dd1af6b22678af9e",
+      "sourceRows": 12051,
+      "workingStartRow": 3051,
+      "workingEndRowExclusive": 12051,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    },
+    {
+      "datasetId": "b385f8bc3b8f29944447e49d28b3a064efe1667ed884db4d9a65685a7089562f",
+      "symbol": "ETH/USDT",
+      "timeframe": "4h",
+      "sourceDataframeSha256": "b9a2de2c7911878193cc00376a7b6aa1438678439b66157d53910121fd0f96c4",
+      "sourceSha256": "dd7138d7e5ffd97f81a6041fd2b773c59a365da12def067216a046ab4f4ea226",
+      "workingDataframeSha256": "f806a230b99ee6cc084bc82d508ac859635d32267e9a9dbead6b91c7a1d730db",
+      "sourceRows": 12051,
+      "workingStartRow": 3051,
+      "workingEndRowExclusive": 12051,
+      "workingRows": 9000,
+      "gapPolicy": "reject",
+      "gapCount": 0,
+      "segmentIndex": 0
+    }
+  ],
+  "counts": {
+    "candidateStrategiesGenerated": 4,
+    "backtestsCompleted": 4,
+    "robustnessPassed": 0,
+    "promotionEligible": 0,
+    "finalHoldoutEvaluations": 40
+  },
+  "holdoutRunId": "stage-4a12-80f12966081e3851424f820dd3428249d5537eb9",
+  "decisions": [
+    {
+      "strategyId": "derived-trend-stochastic-confirmation-ca529176d8c82a01",
+      "specId": "9c77fe6bb80c79481707e4820ad1493c28cec61c41e156073fe28e9e78eafec6",
+      "deploymentParameterId": "9651964c56e2f26bb6764f537e903ea00f8084690b79f1da9b6ccce0a45d5d1a",
+      "selectionCount": 9,
+      "validationAndTestUsedForFitting": false,
+      "lastFoldTest": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.0063739368419450495,
+        "medianNetReturn": -0.0015557780284875533,
+        "worstNetReturn": -0.06801567830311128,
+        "positiveDatasetCount": 5,
+        "positiveDatasetFraction": 0.5,
+        "totalTrades": 143,
+        "maxDrawdown": 0.1224288275563187
+      },
+      "lastFoldHighCostStress": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.02323416857283086,
+        "medianNetReturn": -0.018771894550795643,
+        "worstNetReturn": -0.0857390998470362,
+        "positiveDatasetCount": 2,
+        "positiveDatasetFraction": 0.2,
+        "totalTrades": 143,
+        "maxDrawdown": 0.1369483883120487
+      },
+      "parameterStability": {
+        "maxMedianReturnDelta": 0.0010662232546991834,
+        "passed": true
+      },
+      "finalHoldoutEvaluationCount": 10,
+      "finalHoldout": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.05448402455974749,
+        "medianNetReturn": -0.04682235742018109,
+        "worstNetReturn": -0.2078901194339644,
+        "positiveDatasetCount": 1,
+        "positiveDatasetFraction": 0.1,
+        "totalTrades": 470,
+        "maxDrawdown": 0.24625523918282008
+      },
+      "robustnessPassed": false,
+      "promotionEligible": false,
+      "promotionReasons": [
+        "TEST_CROSS_MARKET_INCONSISTENT",
+        "FINAL_HOLDOUT_NOT_POSITIVE",
+        "FINAL_HOLDOUT_CROSS_MARKET_INCONSISTENT"
+      ],
+      "paperReadinessReview": false,
+      "paperApproved": false,
+      "testnetApproved": false,
+      "liveApproved": false
+    },
+    {
+      "strategyId": "derived-stc-trend-filter-5682c752bef50a0c",
+      "specId": "139bf050c03982325ab4450a022744f342520b35e1e8971f44e861b11cf4d527",
+      "deploymentParameterId": "2538e5906137d0106b8c82c2071529556dbce23782ce3afa3b6a1e875545743a",
+      "selectionCount": 9,
+      "validationAndTestUsedForFitting": false,
+      "lastFoldTest": {
+        "datasetCount": 10,
+        "meanNetReturn": 0.011381529870696083,
+        "medianNetReturn": -0.016145351376780415,
+        "worstNetReturn": -0.034237470934567193,
+        "positiveDatasetCount": 2,
+        "positiveDatasetFraction": 0.2,
+        "totalTrades": 122,
+        "maxDrawdown": 0.08678004268096229
+      },
+      "lastFoldHighCostStress": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.0032053310591400597,
+        "medianNetReturn": -0.03136698599527188,
+        "worstNetReturn": -0.04690177650127192,
+        "positiveDatasetCount": 2,
+        "positiveDatasetFraction": 0.2,
+        "totalTrades": 122,
+        "maxDrawdown": 0.09224296094149576
+      },
+      "parameterStability": {
+        "maxMedianReturnDelta": 0.0019198507550433064,
+        "passed": true
+      },
+      "finalHoldoutEvaluationCount": 10,
+      "finalHoldout": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.020341927767289537,
+        "medianNetReturn": -0.022921604128420647,
+        "worstNetReturn": -0.06594473823493141,
+        "positiveDatasetCount": 3,
+        "positiveDatasetFraction": 0.3,
+        "totalTrades": 342,
+        "maxDrawdown": 0.3038893981721512
+      },
+      "robustnessPassed": false,
+      "promotionEligible": false,
+      "promotionReasons": [
+        "HIGH_COST_TEST_RETURN_BELOW_THRESHOLD",
+        "TEST_CROSS_MARKET_INCONSISTENT",
+        "FINAL_HOLDOUT_NOT_POSITIVE",
+        "FINAL_HOLDOUT_DRAWDOWN_EXCEEDED",
+        "FINAL_HOLDOUT_CROSS_MARKET_INCONSISTENT"
+      ],
+      "paperReadinessReview": false,
+      "paperApproved": false,
+      "testnetApproved": false,
+      "liveApproved": false
+    },
+    {
+      "strategyId": "derived-mean-reversion-trend-guard-262ffac08c1acf35",
+      "specId": "58156d6fd0c244449e58bb362c28732688615fa68a4771e4d26b2187ced1babe",
+      "deploymentParameterId": "5f8ea739cb3b4fd7b24e51c8a5577a85d437a3d2b4c01f6ce8f2ab1aed9398c9",
+      "selectionCount": 9,
+      "validationAndTestUsedForFitting": false,
+      "lastFoldTest": {
+        "datasetCount": 10,
+        "meanNetReturn": 0.021402283010871558,
+        "medianNetReturn": 0.025680212480077347,
+        "worstNetReturn": -0.038583277794075665,
+        "positiveDatasetCount": 8,
+        "positiveDatasetFraction": 0.8,
+        "totalTrades": 233,
+        "maxDrawdown": 0.2618096387065698
+      },
+      "lastFoldHighCostStress": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.006686644163358757,
+        "medianNetReturn": 0.0019555841550758513,
+        "worstNetReturn": -0.07257871330112031,
+        "positiveDatasetCount": 5,
+        "positiveDatasetFraction": 0.5,
+        "totalTrades": 233,
+        "maxDrawdown": 0.2723634174048144
+      },
+      "parameterStability": {
+        "maxMedianReturnDelta": 0.026828017623477196,
+        "passed": true
+      },
+      "finalHoldoutEvaluationCount": 10,
+      "finalHoldout": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.09223727279816038,
+        "medianNetReturn": -0.06936592352459842,
+        "worstNetReturn": -0.3441096052801258,
+        "positiveDatasetCount": 1,
+        "positiveDatasetFraction": 0.1,
+        "totalTrades": 753,
+        "maxDrawdown": 0.5046624464501329
+      },
+      "robustnessPassed": false,
+      "promotionEligible": false,
+      "promotionReasons": [
+        "FINAL_HOLDOUT_NOT_POSITIVE",
+        "FINAL_HOLDOUT_DRAWDOWN_EXCEEDED",
+        "FINAL_HOLDOUT_CROSS_MARKET_INCONSISTENT"
+      ],
+      "paperReadinessReview": false,
+      "paperApproved": false,
+      "testnetApproved": false,
+      "liveApproved": false
+    },
+    {
+      "strategyId": "derived-support-resistance-risk-entry-01ef09c554af0da8",
+      "specId": "4acc61095aa516bfb5757a5ff615e0fd2560ee07c30028ff4d2fd6b5b6032750",
+      "deploymentParameterId": "5cdc29bf95cb604b1156f1c4092190c77b81be76662cc8d75534f577727a170c",
+      "selectionCount": 9,
+      "validationAndTestUsedForFitting": false,
+      "lastFoldTest": {
+        "datasetCount": 10,
+        "meanNetReturn": 0.0013464837892979364,
+        "medianNetReturn": 0.01587669967747407,
+        "worstNetReturn": -0.20200335053735974,
+        "positiveDatasetCount": 6,
+        "positiveDatasetFraction": 0.6,
+        "totalTrades": 267,
+        "maxDrawdown": 0.31226802528355635
+      },
+      "lastFoldHighCostStress": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.03034237017745305,
+        "medianNetReturn": -0.011183371617308202,
+        "worstNetReturn": -0.22558773130800847,
+        "positiveDatasetCount": 3,
+        "positiveDatasetFraction": 0.3,
+        "totalTrades": 267,
+        "maxDrawdown": 0.3261556316681766
+      },
+      "parameterStability": {
+        "maxMedianReturnDelta": 0.017220414367958015,
+        "passed": true
+      },
+      "finalHoldoutEvaluationCount": 10,
+      "finalHoldout": {
+        "datasetCount": 10,
+        "meanNetReturn": -0.12722895337533974,
+        "medianNetReturn": -0.07494533789489632,
+        "worstNetReturn": -0.4152271439542322,
+        "positiveDatasetCount": 0,
+        "positiveDatasetFraction": 0.0,
+        "totalTrades": 848,
+        "maxDrawdown": 0.4826021954973853
+      },
+      "robustnessPassed": false,
+      "promotionEligible": false,
+      "promotionReasons": [
+        "FINAL_HOLDOUT_NOT_POSITIVE",
+        "FINAL_HOLDOUT_DRAWDOWN_EXCEEDED",
+        "FINAL_HOLDOUT_CROSS_MARKET_INCONSISTENT"
+      ],
+      "paperReadinessReview": false,
+      "paperApproved": false,
+      "testnetApproved": false,
+      "liveApproved": false
+    }
+  ],
+  "approvals": {
+    "paperApproved": false,
+    "testnetApproved": false,
+    "liveApproved": false
+  },
+  "receiptId": "4f8f23a24bd117d21b41872bbcd1788fdf1898d02b42c8a29cab79755a1d149f"
+}

@@ -1,0 +1,695 @@
+{
+  "schemaVersion": "stage-4a12.candidate-manifest.v1",
+  "labels": [
+    "NEW DERIVED STRATEGY SPEC",
+    "BOUNDED EXPLICIT CANDIDATE SET",
+    "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
+  ],
+  "sourceCommit": "80f12966081e3851424f820dd3428249d5537eb9",
+  "sourceAssetProofId": "d7d118af86ba4bad2d92ff20b8f88940c9d94b0df1d8ad3244d20992d1fa954b",
+  "sourceAssetCounts": {
+    "pineAssetsVerified": 14,
+    "directStrategies": 1,
+    "needsLifecycle": 4,
+    "pureIndicators": 9,
+    "realWalkForwardReady": 0
+  },
+  "blockedLifecycleAssetsRemainBlocked": true,
+  "tradeIqHoldoutExcludedFromCandidateSelection": true,
+  "candidateCount": 4,
+  "specs": [
+    {
+      "label": "NEW DERIVED STRATEGY SPEC",
+      "strategyId": "derived-trend-stochastic-confirmation-ca529176d8c82a01",
+      "version": "1.0.0",
+      "components": [
+        {
+          "assetId": "TrendImpulse",
+          "parameterMap": {
+            "period": "trend_period",
+            "mult": "trend_mult"
+          }
+        },
+        {
+          "assetId": "StochasticOverlay",
+          "parameterMap": {
+            "k": "stoch_k",
+            "d": "stoch_d"
+          }
+        }
+      ],
+      "entryRules": [
+        {
+          "side": "long",
+          "all": [
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BULL"
+            },
+            {
+              "component": "StochasticOverlay",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BUY"
+            }
+          ]
+        },
+        {
+          "side": "short",
+          "all": [
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BEAR"
+            },
+            {
+              "component": "StochasticOverlay",
+              "field": "signal",
+              "operator": "eq",
+              "value": "SELL"
+            }
+          ]
+        }
+      ],
+      "exitRules": [
+        {
+          "position": "long",
+          "any": [
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BEAR"
+            }
+          ]
+        },
+        {
+          "position": "short",
+          "any": [
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BULL"
+            }
+          ]
+        }
+      ],
+      "positionLifecycle": {
+        "flatEntry": "evaluate every eligible closed bar",
+        "longSupported": true,
+        "shortSupported": true,
+        "exit": "explicit exit rule, protective stop, take-profit, or window end",
+        "reversal": "opposite entry signal closes then reverses at the same next open"
+      },
+      "riskRules": {
+        "stopLoss": "ATR multiple fixed when the entry order is created",
+        "takeProfit": "entry stop distance multiplied by rewardRisk",
+        "stopFirstWhenBothTouched": true,
+        "maxHoldingBarsParameter": "max_holding_bars"
+      },
+      "timeframe": [
+        "5m",
+        "4h"
+      ],
+      "symbols": [
+        "ADA/USDT",
+        "BNB/USDT",
+        "BTC/USDT",
+        "DOGE/USDT",
+        "DOT/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT"
+      ],
+      "parameters": {
+        "selectionPolicy": "explicit-enumeration-only",
+        "candidateSets": [
+          {
+            "trend_period": 21,
+            "trend_mult": 2.0,
+            "stoch_k": 14,
+            "stoch_d": 3,
+            "atr_period": 14,
+            "stop_atr": 1.5,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          },
+          {
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "stoch_k": 14,
+            "stoch_d": 3,
+            "atr_period": 14,
+            "stop_atr": 2.0,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          },
+          {
+            "trend_period": 55,
+            "trend_mult": 2.0,
+            "stoch_k": 14,
+            "stoch_d": 3,
+            "atr_period": 14,
+            "stop_atr": 2.5,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          }
+        ]
+      },
+      "warmupBars": 80,
+      "executionTiming": "closed-bar-next-open",
+      "costModel": {
+        "feeBps": 4.0,
+        "slippageBps": 1.0,
+        "stressFeeBps": 8.0,
+        "stressSlippageBps": 3.0
+      },
+      "sourceAssetDigests": {
+        "TrendImpulse": {
+          "pineSha256": "6bdcbe7005dd775fea8bb261eee5e71e6a5a19e066f5161dce2da5e071d5fa26",
+          "pythonSymbolSha256": "6c471b5a74c7769752421f01922d89b8a231863620f5bd8f3952d5fe08591e99",
+          "registryEntrySha256": "d80bd213eeb70da6406ec8f70d10320e7c9105b4664fbee36b29833e6564fe44"
+        },
+        "StochasticOverlay": {
+          "pineSha256": "93b2eb1232380f95b33656ec1e20a889587b673a2c796a416d0db7775939316d",
+          "pythonSymbolSha256": "9b4b3d99b03ec41d8128281ebb3a1fdb3bfea7bd8e27b2791701d645c3ef3195",
+          "registryEntrySha256": "df1e469236d94292734a546d1b5860c0eda4c33437dc3434b227840d5489b343"
+        }
+      },
+      "specId": "9c77fe6bb80c79481707e4820ad1493c28cec61c41e156073fe28e9e78eafec6"
+    },
+    {
+      "label": "NEW DERIVED STRATEGY SPEC",
+      "strategyId": "derived-stc-trend-filter-5682c752bef50a0c",
+      "version": "1.0.0",
+      "components": [
+        {
+          "assetId": "STC",
+          "parameterMap": {
+            "fast": "stc_fast",
+            "slow": "stc_slow",
+            "cycle": "stc_cycle",
+            "d1": "stc_d1",
+            "d2": "stc_d2"
+          }
+        },
+        {
+          "assetId": "TrendImpulse",
+          "parameterMap": {
+            "period": "trend_period",
+            "mult": "trend_mult"
+          }
+        }
+      ],
+      "entryRules": [
+        {
+          "side": "long",
+          "all": [
+            {
+              "component": "STC",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BUY"
+            },
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BULL"
+            }
+          ]
+        },
+        {
+          "side": "short",
+          "all": [
+            {
+              "component": "STC",
+              "field": "signal",
+              "operator": "eq",
+              "value": "SELL"
+            },
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BEAR"
+            }
+          ]
+        }
+      ],
+      "exitRules": [
+        {
+          "position": "long",
+          "any": [
+            {
+              "component": "STC",
+              "field": "trend",
+              "operator": "eq",
+              "value": "BEAR"
+            }
+          ]
+        },
+        {
+          "position": "short",
+          "any": [
+            {
+              "component": "STC",
+              "field": "trend",
+              "operator": "eq",
+              "value": "BULL"
+            }
+          ]
+        }
+      ],
+      "positionLifecycle": {
+        "flatEntry": "evaluate every eligible closed bar",
+        "longSupported": true,
+        "shortSupported": true,
+        "exit": "explicit exit rule, protective stop, take-profit, or window end",
+        "reversal": "opposite entry signal closes then reverses at the same next open"
+      },
+      "riskRules": {
+        "stopLoss": "ATR multiple fixed when the entry order is created",
+        "takeProfit": "entry stop distance multiplied by rewardRisk",
+        "stopFirstWhenBothTouched": true,
+        "maxHoldingBarsParameter": "max_holding_bars"
+      },
+      "timeframe": [
+        "5m",
+        "4h"
+      ],
+      "symbols": [
+        "ADA/USDT",
+        "BNB/USDT",
+        "BTC/USDT",
+        "DOGE/USDT",
+        "DOT/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT"
+      ],
+      "parameters": {
+        "selectionPolicy": "explicit-enumeration-only",
+        "candidateSets": [
+          {
+            "stc_fast": 18,
+            "stc_slow": 40,
+            "stc_cycle": 10,
+            "stc_d1": 3,
+            "stc_d2": 3,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 1.5,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          },
+          {
+            "stc_fast": 23,
+            "stc_slow": 50,
+            "stc_cycle": 10,
+            "stc_d1": 3,
+            "stc_d2": 3,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 2.0,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          },
+          {
+            "stc_fast": 28,
+            "stc_slow": 60,
+            "stc_cycle": 12,
+            "stc_d1": 3,
+            "stc_d2": 3,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 2.5,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          }
+        ]
+      },
+      "warmupBars": 85,
+      "executionTiming": "closed-bar-next-open",
+      "costModel": {
+        "feeBps": 4.0,
+        "slippageBps": 1.0,
+        "stressFeeBps": 8.0,
+        "stressSlippageBps": 3.0
+      },
+      "sourceAssetDigests": {
+        "STC": {
+          "pineSha256": "170e62a78d9b32836a85e1390f0741f14849e8a08957042a771a347966da9670",
+          "pythonSymbolSha256": "56275985b5eba1d25b6a2a0fdb336ddbecdb28210433fa4ab368eac5b8137428",
+          "registryEntrySha256": "d43d6a5f991a1febcef04be206daf446c7c904e66b9e0f93bae550ff82d039d6"
+        },
+        "TrendImpulse": {
+          "pineSha256": "6bdcbe7005dd775fea8bb261eee5e71e6a5a19e066f5161dce2da5e071d5fa26",
+          "pythonSymbolSha256": "6c471b5a74c7769752421f01922d89b8a231863620f5bd8f3952d5fe08591e99",
+          "registryEntrySha256": "d80bd213eeb70da6406ec8f70d10320e7c9105b4664fbee36b29833e6564fe44"
+        }
+      },
+      "specId": "139bf050c03982325ab4450a022744f342520b35e1e8971f44e861b11cf4d527"
+    },
+    {
+      "label": "NEW DERIVED STRATEGY SPEC",
+      "strategyId": "derived-mean-reversion-trend-guard-262ffac08c1acf35",
+      "version": "1.0.0",
+      "components": [
+        {
+          "assetId": "MeanReversion",
+          "parameterMap": {
+            "period": "mean_period",
+            "stdMult": "mean_std"
+          }
+        },
+        {
+          "assetId": "TrendImpulse",
+          "parameterMap": {
+            "period": "trend_period",
+            "mult": "trend_mult"
+          }
+        }
+      ],
+      "entryRules": [
+        {
+          "side": "long",
+          "all": [
+            {
+              "component": "MeanReversion",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BUY"
+            },
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BULL"
+            }
+          ]
+        },
+        {
+          "side": "short",
+          "all": [
+            {
+              "component": "MeanReversion",
+              "field": "signal",
+              "operator": "eq",
+              "value": "SELL"
+            },
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BEAR"
+            }
+          ]
+        }
+      ],
+      "exitRules": [
+        {
+          "position": "long",
+          "any": [
+            {
+              "component": "MeanReversion",
+              "field": "probability",
+              "operator": "gte",
+              "value": 0.5
+            }
+          ]
+        },
+        {
+          "position": "short",
+          "any": [
+            {
+              "component": "MeanReversion",
+              "field": "probability",
+              "operator": "lte",
+              "value": 0.5
+            }
+          ]
+        }
+      ],
+      "positionLifecycle": {
+        "flatEntry": "evaluate every eligible closed bar",
+        "longSupported": true,
+        "shortSupported": true,
+        "exit": "explicit exit rule, protective stop, take-profit, or window end",
+        "reversal": "opposite entry signal closes then reverses at the same next open"
+      },
+      "riskRules": {
+        "stopLoss": "ATR multiple fixed when the entry order is created",
+        "takeProfit": "entry stop distance multiplied by rewardRisk",
+        "stopFirstWhenBothTouched": true,
+        "maxHoldingBarsParameter": "max_holding_bars"
+      },
+      "timeframe": [
+        "5m",
+        "4h"
+      ],
+      "symbols": [
+        "ADA/USDT",
+        "BNB/USDT",
+        "BTC/USDT",
+        "DOGE/USDT",
+        "DOT/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT"
+      ],
+      "parameters": {
+        "selectionPolicy": "explicit-enumeration-only",
+        "candidateSets": [
+          {
+            "mean_period": 14,
+            "mean_std": 2.0,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 1.5,
+            "reward_risk": 1.5,
+            "max_holding_bars": 72
+          },
+          {
+            "mean_period": 20,
+            "mean_std": 2.0,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 2.0,
+            "reward_risk": 1.5,
+            "max_holding_bars": 72
+          },
+          {
+            "mean_period": 28,
+            "mean_std": 2.0,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 2.5,
+            "reward_risk": 1.5,
+            "max_holding_bars": 72
+          }
+        ]
+      },
+      "warmupBars": 70,
+      "executionTiming": "closed-bar-next-open",
+      "costModel": {
+        "feeBps": 4.0,
+        "slippageBps": 1.0,
+        "stressFeeBps": 8.0,
+        "stressSlippageBps": 3.0
+      },
+      "sourceAssetDigests": {
+        "MeanReversion": {
+          "pineSha256": "941a6d2708c65428036a57a5b322631a70064a17907f6b03818ca8ce23fc249d",
+          "pythonSymbolSha256": "f102451b9089f27a0345865adb226133283c19f5fb6f3ca6d76302b0cf2c6efa",
+          "registryEntrySha256": "0f0906e5b94c318d57a994e9ad30e86d6e5c76a8bee5013797bbf47d322f9aec"
+        },
+        "TrendImpulse": {
+          "pineSha256": "6bdcbe7005dd775fea8bb261eee5e71e6a5a19e066f5161dce2da5e071d5fa26",
+          "pythonSymbolSha256": "6c471b5a74c7769752421f01922d89b8a231863620f5bd8f3952d5fe08591e99",
+          "registryEntrySha256": "d80bd213eeb70da6406ec8f70d10320e7c9105b4664fbee36b29833e6564fe44"
+        }
+      },
+      "specId": "58156d6fd0c244449e58bb362c28732688615fa68a4771e4d26b2187ced1babe"
+    },
+    {
+      "label": "NEW DERIVED STRATEGY SPEC",
+      "strategyId": "derived-support-resistance-risk-entry-01ef09c554af0da8",
+      "version": "1.0.0",
+      "components": [
+        {
+          "assetId": "SRRange",
+          "parameterMap": {
+            "swing_left": "swing_left",
+            "swing_right": "swing_right",
+            "atr_multiplier": "sr_atr"
+          }
+        },
+        {
+          "assetId": "TrendImpulse",
+          "parameterMap": {
+            "period": "trend_period",
+            "mult": "trend_mult"
+          }
+        }
+      ],
+      "entryRules": [
+        {
+          "side": "long",
+          "all": [
+            {
+              "component": "SRRange",
+              "field": "position",
+              "operator": "eq",
+              "value": "LONG"
+            },
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BULL"
+            }
+          ]
+        },
+        {
+          "side": "short",
+          "all": [
+            {
+              "component": "SRRange",
+              "field": "position",
+              "operator": "eq",
+              "value": "SHORT"
+            },
+            {
+              "component": "TrendImpulse",
+              "field": "signal",
+              "operator": "eq",
+              "value": "BEAR"
+            }
+          ]
+        }
+      ],
+      "exitRules": [
+        {
+          "position": "long",
+          "any": [
+            {
+              "component": "SRRange",
+              "field": "position",
+              "operator": "eq",
+              "value": "SHORT"
+            }
+          ]
+        },
+        {
+          "position": "short",
+          "any": [
+            {
+              "component": "SRRange",
+              "field": "position",
+              "operator": "eq",
+              "value": "LONG"
+            }
+          ]
+        }
+      ],
+      "positionLifecycle": {
+        "flatEntry": "evaluate every eligible closed bar",
+        "longSupported": true,
+        "shortSupported": true,
+        "exit": "explicit exit rule, protective stop, take-profit, or window end",
+        "reversal": "opposite entry signal closes then reverses at the same next open"
+      },
+      "riskRules": {
+        "stopLoss": "ATR multiple fixed when the entry order is created",
+        "takeProfit": "entry stop distance multiplied by rewardRisk",
+        "stopFirstWhenBothTouched": true,
+        "maxHoldingBarsParameter": "max_holding_bars"
+      },
+      "timeframe": [
+        "5m",
+        "4h"
+      ],
+      "symbols": [
+        "ADA/USDT",
+        "BNB/USDT",
+        "BTC/USDT",
+        "DOGE/USDT",
+        "DOT/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT"
+      ],
+      "parameters": {
+        "selectionPolicy": "explicit-enumeration-only",
+        "candidateSets": [
+          {
+            "swing_left": 2,
+            "swing_right": 2,
+            "sr_atr": 1.0,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 1.5,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          },
+          {
+            "swing_left": 3,
+            "swing_right": 3,
+            "sr_atr": 1.0,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 2.0,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          },
+          {
+            "swing_left": 4,
+            "swing_right": 4,
+            "sr_atr": 1.0,
+            "trend_period": 34,
+            "trend_mult": 2.0,
+            "atr_period": 14,
+            "stop_atr": 2.5,
+            "reward_risk": 2.0,
+            "max_holding_bars": 96
+          }
+        ]
+      },
+      "warmupBars": 80,
+      "executionTiming": "closed-bar-next-open",
+      "costModel": {
+        "feeBps": 4.0,
+        "slippageBps": 1.0,
+        "stressFeeBps": 8.0,
+        "stressSlippageBps": 3.0
+      },
+      "sourceAssetDigests": {
+        "SRRange": {
+          "pineSha256": "30377cdbeff5cdce17d6b84b88c261b69e05f721d32ca90e78b07a19cff858a2",
+          "pythonSymbolSha256": "aece646a720288bf4f7454f104f01e01eeea976a48c60936b15723495c69dc94",
+          "registryEntrySha256": "1bfe173cfb120ea025627244c9f3447c68c9360e2bdea796c00864c3b6c6dffa"
+        },
+        "TrendImpulse": {
+          "pineSha256": "6bdcbe7005dd775fea8bb261eee5e71e6a5a19e066f5161dce2da5e071d5fa26",
+          "pythonSymbolSha256": "6c471b5a74c7769752421f01922d89b8a231863620f5bd8f3952d5fe08591e99",
+          "registryEntrySha256": "d80bd213eeb70da6406ec8f70d10320e7c9105b4664fbee36b29833e6564fe44"
+        }
+      },
+      "specId": "4acc61095aa516bfb5757a5ff615e0fd2560ee07c30028ff4d2fd6b5b6032750"
+    }
+  ],
+  "manifestId": "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa"
+}
