@@ -1,0 +1,77 @@
+name: Stage 4B1 Activation Contract
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/stage-4b1-activation-contract.yml'
+      - 'src/validation/ActivationContract.ts'
+      - 'tests/validation/activation-contract.test.ts'
+      - 'scripts/stage-4b1-activation-contract.ts'
+      - 'docs/releases/stage-4b1-activation-contract.*'
+
+permissions:
+  contents: read
+
+jobs:
+  activation-contract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASELINE_COMMIT: 9f659d7a02a4c025b9cef86ad6fa855e00f99b15
+      SUBJECT_DIR: artifacts/stage-4b1-activation-contract
+    steps:
+      - name: Checkout exact activation-contract commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+          fetch-depth: 0
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install -r quant_engine/requirements.txt
+          npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Run focused activation-contract tests
+        run: node --test --import tsx --import ./tests/helpers/test-setup.ts tests/validation/activation-contract.test.ts
+      - name: Verify real blocked decision and build commit-bound subject
+        run: |
+          mkdir -p "$SUBJECT_DIR"
+          node --import tsx scripts/stage-4b1-activation-contract.ts \
+            --baseline-commit "$BASELINE_COMMIT" \
+            --candidate-manifest docs/releases/stage-4a12-candidate-manifest.json \
+            --promotion-decision docs/releases/stage-4a12-promotion-decision.json \
+            --consumed-evidence-seed docs/releases/stage-4a13-consumed-evidence-seed.json \
+            --governance-contract docs/releases/stage-4a13-evidence-governance-contract.json \
+            --closure-audit docs/releases/stage-4a-closure-audit.json \
+            --artifact docs/releases/stage-4b1-activation-contract.json \
+            --receipt-commit "$SOURCE_COMMIT" \
+            --subject-output "$SUBJECT_DIR/stage-4b1-activation-contract-subject.json"
+          cp docs/releases/stage-4b1-activation-contract.json "$SUBJECT_DIR/"
+      - name: Upload activation-contract subjects
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-4b1-activation-contract-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.SUBJECT_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed activation-contract attestations
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.SUBJECT_DIR }}/*.json
