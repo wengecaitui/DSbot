@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, Mapping, Protocol
@@ -20,6 +21,7 @@ class Action(str, Enum):
 class Decision:
     action: Action
     stop_distance: float | None = None
+    take_profit_distance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,8 @@ class StrategyContext:
     position: int
     entry_price: float | None
     stop_price: float | None
+    take_profit_price: float | None = None
+    bars_held: int = 0
 
 
 class StrategyAdapter(Protocol):
@@ -62,24 +66,30 @@ def simulate_window(
         raise ValueError("SIMULATION_WINDOW_INVALID")
     if end_exclusive - start < 2:
         raise ValueError("SIMULATION_WINDOW_TOO_SHORT")
+    if not math.isfinite(fee_bps) or not math.isfinite(slippage_bps) or min(fee_bps, slippage_bps) < 0:
+        raise ValueError("SIMULATION_COST_INVALID")
 
     position = 0
     entry_index: int | None = None
     entry_price: float | None = None
     stop_price: float | None = None
+    take_profit_price: float | None = None
     trades: list[Trade] = []
     decision_calls = 0
     first_entry: int | None = None
     cost = (fee_bps + slippage_bps) / 10_000
+    realized_equity = 1.0
+    equity_points = [1.0]
 
     def close_position(exit_index: int, raw_price: float, reason: str) -> None:
-        nonlocal position, entry_index, entry_price, stop_price
+        nonlocal position, entry_index, entry_price, stop_price, take_profit_price, realized_equity
         if position == 0 or entry_index is None or entry_price is None:
             return
         exit_price = raw_price * (1 - cost if position == 1 else 1 + cost)
         result = (exit_price / entry_price - 1) if position == 1 else (entry_price / exit_price - 1)
         trades.append(Trade("long" if position == 1 else "short", entry_index, exit_index, entry_price, exit_price, result, reason))
-        position, entry_index, entry_price, stop_price = 0, None, None, None
+        realized_equity *= 1 + result
+        position, entry_index, entry_price, stop_price, take_profit_price = 0, None, None, None, None
 
     pending = Decision(Action.HOLD)
     for bar_index in range(start, end_exclusive):
@@ -101,6 +111,9 @@ def simulate_window(
             stop_price = None if pending.stop_distance is None else (
                 execution_open - pending.stop_distance if target == 1 else execution_open + pending.stop_distance
             )
+            take_profit_price = None if pending.take_profit_distance is None else (
+                execution_open + pending.take_profit_distance if target == 1 else execution_open - pending.take_profit_distance
+            )
             if first_entry is None:
                 first_entry = bar_index
 
@@ -108,12 +121,26 @@ def simulate_window(
             close_position(bar_index, min(execution_open, stop_price), "stop")
         elif position == -1 and stop_price is not None and float(bars.iloc[bar_index]["high"]) >= stop_price:
             close_position(bar_index, max(execution_open, stop_price), "stop")
+        elif position == 1 and take_profit_price is not None and float(bars.iloc[bar_index]["high"]) >= take_profit_price:
+            close_position(bar_index, max(execution_open, take_profit_price), "take-profit")
+        elif position == -1 and take_profit_price is not None and float(bars.iloc[bar_index]["low"]) <= take_profit_price:
+            close_position(bar_index, min(execution_open, take_profit_price), "take-profit")
+
+        mark_equity = realized_equity
+        if position != 0 and entry_price is not None:
+            mark_price = float(bars.iloc[bar_index]["close"]) * (1 - cost if position == 1 else 1 + cost)
+            open_return = (mark_price / entry_price - 1) if position == 1 else (entry_price / mark_price - 1)
+            mark_equity *= 1 + open_return
+        equity_points.append(mark_equity)
 
         pending = Decision(Action.HOLD)
         if bar_index >= end_exclusive - 1 or bar_index + 1 < adapter.minimum_history:
             continue
-        history = bars.iloc[: bar_index + 1].copy(deep=True)
-        raw_decision = adapter.decide(history, parameters, StrategyContext(position, entry_price, stop_price))
+        history_limit = getattr(adapter, "history_limit", None)
+        history_start = 0 if history_limit is None else max(0, bar_index + 1 - int(history_limit))
+        history = bars.iloc[history_start: bar_index + 1].copy(deep=True)
+        bars_held = 0 if entry_index is None else bar_index - entry_index + 1
+        raw_decision = adapter.decide(history, parameters, StrategyContext(position, entry_price, stop_price, take_profit_price, bars_held))
         if isinstance(raw_decision, Action):
             raw_decision = Decision(raw_decision)
         if not isinstance(raw_decision, Decision) or not isinstance(raw_decision.action, Action):
@@ -122,6 +149,10 @@ def simulate_window(
             raw_decision.action not in (Action.ENTER_LONG, Action.ENTER_SHORT) or raw_decision.stop_distance <= 0
         ):
             raise ValueError("ADAPTER_STOP_DISTANCE_INVALID")
+        if raw_decision.take_profit_distance is not None and (
+            raw_decision.action not in (Action.ENTER_LONG, Action.ENTER_SHORT) or raw_decision.take_profit_distance <= 0
+        ):
+            raise ValueError("ADAPTER_TAKE_PROFIT_DISTANCE_INVALID")
         pending = raw_decision
         decision_calls += 1
 
@@ -129,6 +160,12 @@ def simulate_window(
     compounded = 1.0
     for trade in trades:
         compounded *= 1 + trade.net_return
+    peak = equity_points[0]
+    max_drawdown = 0.0
+    for equity in equity_points:
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak)
     return {
         "strategyId": adapter.strategy_id,
         "adapterVersion": adapter.version,
@@ -138,5 +175,7 @@ def simulate_window(
         "firstEntryIndex": first_entry,
         "tradeCount": len(trades),
         "netReturn": compounded - 1,
+        "maxDrawdown": max_drawdown,
+        "winRate": 0.0 if not trades else sum(trade.net_return > 0 for trade in trades) / len(trades),
         "trades": [asdict(trade) for trade in trades],
     }
