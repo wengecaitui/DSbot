@@ -850,8 +850,9 @@ export function verifyStage4B3Receipt(
   if (stage4B2.sourceCommit !== receipt.stage4B2SourceCommit) throw new Error('VERIFY_FAILED:4B2_SOURCE_COMMIT');
 
   // 6. Verify 4B2 receipt self-consistency (recompute receiptId from body)
+  // Must match 4B2's createStage4B2Receipt: canonicalSha256({ domain, ...body })
   const b2Body = (({ receiptId: _, ...r }) => r)(stage4B2);
-  const computed4B2Id = domainId('CloddsBot:Stage4B2Receipt:v1', b2Body);
+  const computed4B2Id = canonicalSha256({ domain: 'CloddsBot:Stage4B2Receipt:v1', ...b2Body });
   if (stage4B2.receiptId !== computed4B2Id) throw new Error('VERIFY_FAILED:4B2_SELF_CONSISTENT_FORGERY');
 
   // 7. Verify 4B2 content: 4B1 IDs, approvals, status
