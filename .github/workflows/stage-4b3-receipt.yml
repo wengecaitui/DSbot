@@ -1,0 +1,62 @@
+name: Stage 4B3 Safety Receipt
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/stage-4b3-receipt.yml'
+      - 'src/validation/RuntimeSafety.ts'
+      - 'scripts/generate-stage-4b3-receipt.mts'
+      - 'tests/validation/runtime-safety.test.ts'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  receipt:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      RECEIPT_PATH: artifacts/stage-4b3-receipt.json
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install Python dependencies
+        run: python -m pip install -r quant_engine/requirements.txt
+      - name: Install
+        run: npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Generate Stage 4B3 receipt
+        run: npx tsx scripts/generate-stage-4b3-receipt.mts --source-commit "$SOURCE_COMMIT" --output "$RECEIPT_PATH"
+      - name: Upload receipt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-4b3-receipt-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.RECEIPT_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed receipt provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.RECEIPT_PATH }}
