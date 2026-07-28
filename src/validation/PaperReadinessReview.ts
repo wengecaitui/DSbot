@@ -342,8 +342,10 @@ export interface Stage4B2Receipt {
   readonly schemaVersion: typeof STAGE_4B2_RECEIPT_SCHEMA;
   readonly sourceCommit: string;
   readonly stage4AClosureAuditId: string;
+  readonly stage4B1ArtifactId: string;
   readonly stage4B1ProofId: string;
   readonly stage4B1DecisionId: string;
+  readonly stage4B1ArtifactSourceSha256: string;
   readonly reviewEligible: false;
   readonly paperApproved: false;
   readonly testnetApproved: false;
@@ -355,52 +357,114 @@ export interface Stage4B2Receipt {
   readonly receiptId: string;
 }
 
+function isZeroId(id: string): boolean {
+  return /^0+$/.test(id);
+}
+
+function verify4B1ArtifactIds(artifact: Record<string, unknown>): {
+  artifactId: string; proofId: string; decisionId: string;
+} {
+  if (!artifact || typeof artifact !== 'object') throw new Error('RECEIPT_INVALID:4B1_ARTIFACT_NOT_OBJECT');
+  if (artifact.schemaVersion !== 'stage-4b1.activation-contract-artifact.v1')
+    throw new Error('RECEIPT_INVALID:4B1_ARTIFACT_SCHEMA');
+  if (!Array.isArray(artifact.labels) || !(artifact.labels as string[]).some(l => l.includes('BLOCKED')))
+    throw new Error('RECEIPT_INVALID:4B1_ARTIFACT_LABELS');
+  const artifactId = artifact.artifactId as string;
+  const proof = (artifact.eligibilityProof ?? {}) as Record<string, unknown>;
+  const decision = (artifact.activationDecision ?? {}) as Record<string, unknown>;
+  const proofId = proof.proofId as string;
+  const decisionId = decision.decisionId as string;
+  if (typeof artifactId !== 'string' || artifactId.length !== 64 || isZeroId(artifactId))
+    throw new Error('RECEIPT_INVALID:4B1_ARTIFACT_ID');
+  if (typeof proofId !== 'string' || proofId.length !== 64 || isZeroId(proofId))
+    throw new Error('RECEIPT_INVALID:4B1_PROOF_ID_ZERO');
+  if (typeof decisionId !== 'string' || decisionId.length !== 64 || isZeroId(decisionId))
+    throw new Error('RECEIPT_INVALID:4B1_DECISION_ID_ZERO');
+  if (decision.eligibilityProofId !== proofId)
+    throw new Error('RECEIPT_INVALID:4B1_PROOF_DECISION_MISMATCH');
+  if (proof.status !== 'BLOCKED_NO_PROMOTED_STRATEGY')
+    throw new Error('RECEIPT_INVALID:4B1_PROOF_STATUS');
+  if (decision.status !== 'ACTIVATION_BLOCKED')
+    throw new Error('RECEIPT_INVALID:4B1_DECISION_STATUS');
+  if (proof.paperApproved !== false || proof.liveApproved !== false)
+    throw new Error('RECEIPT_INVALID:4B1_APPROVAL');
+  if (decision.paperApproved !== false || decision.liveApproved !== false)
+    throw new Error('RECEIPT_INVALID:4B1_DECISION_APPROVAL');
+  return { artifactId, proofId, decisionId };
+}
+
 export function createStage4B2Receipt(opts: {
   sourceCommit: string;
   stage4AClosureAuditId: string;
-  stage4B1ProofId: string;
-  stage4B1DecisionId: string;
+  stage4B1Artifact: unknown;
+  stage4B1ArtifactSourceSha256: string;
   generatedAt: string;
 }): Stage4B2Receipt {
-  if (typeof opts.sourceCommit !== 'string' || opts.sourceCommit.length !== 40) throw new Error('RECEIPT_INVALID:SOURCE_COMMIT');
-  if (typeof opts.stage4AClosureAuditId !== 'string' || opts.stage4AClosureAuditId.length !== 64) throw new Error('RECEIPT_INVALID:STAGE_4A_CLOSURE');
-  if (typeof opts.stage4B1ProofId !== 'string' || opts.stage4B1ProofId.length !== 64) throw new Error('RECEIPT_INVALID:STAGE_4B1_PROOF');
-  if (typeof opts.stage4B1DecisionId !== 'string' || opts.stage4B1DecisionId.length !== 64) throw new Error('RECEIPT_INVALID:STAGE_4B1_DECISION');
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(opts.generatedAt)) throw new Error('RECEIPT_INVALID:TIMESTAMP');
+  if (typeof opts.sourceCommit !== 'string' || opts.sourceCommit.length !== 40)
+    throw new Error('RECEIPT_INVALID:SOURCE_COMMIT');
+  if (typeof opts.stage4AClosureAuditId !== 'string' || opts.stage4AClosureAuditId.length !== 64)
+    throw new Error('RECEIPT_INVALID:STAGE_4A_CLOSURE');
+  if (typeof opts.stage4B1ArtifactSourceSha256 !== 'string' || opts.stage4B1ArtifactSourceSha256.length !== 64)
+    throw new Error('RECEIPT_INVALID:4B1_ARTIFACT_SHA256');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(opts.generatedAt))
+    throw new Error('RECEIPT_INVALID:TIMESTAMP');
+  const { artifactId, proofId, decisionId } = verify4B1ArtifactIds(
+    opts.stage4B1Artifact as Record<string, unknown>);
   const body: Omit<Stage4B2Receipt, 'receiptId'> = {
     schemaVersion: STAGE_4B2_RECEIPT_SCHEMA, sourceCommit: opts.sourceCommit,
-    stage4AClosureAuditId: opts.stage4AClosureAuditId, stage4B1ProofId: opts.stage4B1ProofId,
-    stage4B1DecisionId: opts.stage4B1DecisionId, reviewEligible: false, paperApproved: false,
-    testnetApproved: false, liveApproved: false, paperRuntimeChanges: false, liveExecutionChanges: false,
-    status: PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY, generatedAt: opts.generatedAt,
+    stage4AClosureAuditId: opts.stage4AClosureAuditId,
+    stage4B1ArtifactId: artifactId, stage4B1ProofId: proofId, stage4B1DecisionId: decisionId,
+    stage4B1ArtifactSourceSha256: opts.stage4B1ArtifactSourceSha256,
+    reviewEligible: false, paperApproved: false, testnetApproved: false, liveApproved: false,
+    paperRuntimeChanges: false, liveExecutionChanges: false,
+    status: PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY,
+    generatedAt: opts.generatedAt,
   };
-  return Object.freeze({ ...body, receiptId: canonicalSha256({ domain: 'CloddsBot:Stage4B2Receipt:v1', ...body }) });
+  return Object.freeze({ ...body,
+    receiptId: canonicalSha256({ domain: 'CloddsBot:Stage4B2Receipt:v1', ...body }) });
 }
 
-export function verifyStage4B2Receipt(receipt: unknown, expected: {
+export function verifyStage4B2Receipt(receipt: unknown, opts: {
   sourceCommit: string;
   stage4AClosureAuditId: string;
-  stage4B1ProofId: string;
-  stage4B1DecisionId: string;
+  stage4B1Artifact: unknown;
+  stage4B1ArtifactSourceSha256: string;
 }): Stage4B2Receipt {
   const r = receipt as Record<string, unknown>;
   if (!r || typeof r !== 'object') throw new Error('RECEIPT_VERIFY:NOT_OBJECT');
   if (r.schemaVersion !== STAGE_4B2_RECEIPT_SCHEMA) throw new Error('RECEIPT_VERIFY:SCHEMA');
-  if (r.sourceCommit !== expected.sourceCommit) throw new Error('RECEIPT_VERIFY:SOURCE_COMMIT');
-  if (r.stage4AClosureAuditId !== expected.stage4AClosureAuditId) throw new Error('RECEIPT_VERIFY:STAGE_4A_CLOSURE');
-  if (r.stage4B1ProofId !== expected.stage4B1ProofId) throw new Error('RECEIPT_VERIFY:STAGE_4B1_PROOF');
-  if (r.stage4B1DecisionId !== expected.stage4B1DecisionId) throw new Error('RECEIPT_VERIFY:STAGE_4B1_DECISION');
+  if (r.sourceCommit !== opts.sourceCommit) throw new Error('RECEIPT_VERIFY:SOURCE_COMMIT');
+  if (r.stage4AClosureAuditId !== opts.stage4AClosureAuditId)
+    throw new Error('RECEIPT_VERIFY:STAGE_4A_CLOSURE');
+  // Reject self-consistent fake: receipt's artifact source sha256 must match
+  if (r.stage4B1ArtifactSourceSha256 !== opts.stage4B1ArtifactSourceSha256)
+    throw new Error('RECEIPT_VERIFY:ARTIFACT_SHA256');
+  // Independent re-verification of 4B1 artifact — never trust caller-supplied IDs
+  const { artifactId, proofId, decisionId } = verify4B1ArtifactIds(
+    opts.stage4B1Artifact as Record<string, unknown>);
+  if (isZeroId(r.stage4B1ArtifactId as string ?? ''))
+    throw new Error('RECEIPT_VERIFY:ARTIFACT_ID_ZERO');
+  if (isZeroId(r.stage4B1ProofId as string ?? ''))
+    throw new Error('RECEIPT_VERIFY:PROOF_ID_ZERO');
+  if (isZeroId(r.stage4B1DecisionId as string ?? ''))
+    throw new Error('RECEIPT_VERIFY:DECISION_ID_ZERO');
+  if (r.stage4B1ArtifactId !== artifactId) throw new Error('RECEIPT_VERIFY:ARTIFACT_ID');
+  if (r.stage4B1ProofId !== proofId) throw new Error('RECEIPT_VERIFY:PROOF_ID');
+  if (r.stage4B1DecisionId !== decisionId) throw new Error('RECEIPT_VERIFY:DECISION_ID');
   if (r.reviewEligible !== false) throw new Error('RECEIPT_VERIFY:REVIEW_ELIGIBLE');
   if (r.paperApproved !== false) throw new Error('RECEIPT_VERIFY:PAPER_APPROVED');
   if (r.testnetApproved !== false) throw new Error('RECEIPT_VERIFY:TESTNET_APPROVED');
   if (r.liveApproved !== false) throw new Error('RECEIPT_VERIFY:LIVE_APPROVED');
   if (r.paperRuntimeChanges !== false) throw new Error('RECEIPT_VERIFY:PAPER_RUNTIME');
   if (r.liveExecutionChanges !== false) throw new Error('RECEIPT_VERIFY:LIVE_EXECUTION');
-  if (r.status !== PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY) throw new Error('RECEIPT_VERIFY:STATUS');
-  if (typeof r.generatedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(r.generatedAt)) throw new Error('RECEIPT_VERIFY:TIMESTAMP');
+  if (r.status !== PAPER_READINESS_REASONS.NO_ACTIVATION_REVIEW_READY_STRATEGY)
+    throw new Error('RECEIPT_VERIFY:STATUS');
+  if (typeof r.generatedAt !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(r.generatedAt))
+    throw new Error('RECEIPT_VERIFY:TIMESTAMP');
   const body = { ...r } as Record<string, unknown>;
   delete body.receiptId;
-  const expectedReceiptId = canonicalSha256({ domain: 'CloddsBot:Stage4B2Receipt:v1', ...body });
-  if (r.receiptId !== expectedReceiptId) throw new Error('RECEIPT_VERIFY:RECEIPT_ID');
+  if (r.receiptId !== canonicalSha256({ domain: 'CloddsBot:Stage4B2Receipt:v1', ...body }))
+    throw new Error('RECEIPT_VERIFY:RECEIPT_ID');
   return receipt as Stage4B2Receipt;
 }
