@@ -459,6 +459,18 @@ export class PythonBridgeDaemon {
         }
     }
 
+    /**
+     * 异步优雅关闭 — 分级终止并等待子进程完全退出。
+     * 测试和关键路径使用，避免进程泄漏。
+     */
+    public async shutdownAsync(): Promise<void> {
+        const proc = this.pythonProcess;
+        this.panicMeltdown();
+        if (proc) {
+            await processTerminate(proc, this.terminateGraceMs);
+        }
+    }
+
     // ─── 测试辅助（不开新公共 API） ─────────────────────────────
     /* internal for testing */ __setTerminateGraceMs(ms: number): void {
         this.terminateGraceMs = ms;
