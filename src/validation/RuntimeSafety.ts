@@ -756,3 +756,86 @@ export function createBlockedSafetyAudit(timestamp: string): AppendOnlySafetyAud
   });
   return audit;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Stage 4B3 Deterministic Receipt — binds all safety state
+// ═══════════════════════════════════════════════════════════════════
+
+export const RECEIPT_4B3_SCHEMA = 'stage-4b3.safety-receipt.v1' as const;
+
+export interface Stage4B3ReceiptInput {
+  readonly sourceCommit: string;
+  readonly stage4B2ReceiptId: string;
+  readonly stage4B2SourceCommit: string;
+  readonly safetyDecisionId: string;
+  readonly auditRootId: string;
+  readonly auditTipId: string;
+  readonly killSwitchEnabled: boolean;
+  readonly killSwitchReason: string;
+  readonly idempotencyLedgerDigest: string;
+  readonly recoveryStatus: RecoveryStatus;
+  readonly runtimeStarted: false;
+  readonly paperApproved: false;
+  readonly testnetApproved: false;
+  readonly liveApproved: false;
+}
+
+export interface Stage4B3Receipt extends Stage4B3ReceiptInput {
+  readonly schemaVersion: typeof RECEIPT_4B3_SCHEMA;
+  readonly receiptId: string;
+  readonly generatedAt: string;
+}
+
+export function createStage4B3Receipt(input: Stage4B3ReceiptInput, generatedAt: string): Stage4B3Receipt {
+  if (input.runtimeStarted !== false) throw new Error('RECEIPT_INVALID:RUNTIME_STARTED_MUST_BE_FALSE');
+  if (input.paperApproved !== false || input.testnetApproved !== false || input.liveApproved !== false) {
+    throw new Error('RECEIPT_INVALID:APPROVAL_MUST_BE_FALSE');
+  }
+  if (typeof input.sourceCommit !== 'string' || input.sourceCommit.length !== 40) throw new Error('RECEIPT_INVALID:SOURCE_COMMIT');
+  if (typeof input.stage4B2ReceiptId !== 'string' || input.stage4B2ReceiptId.length !== 64) throw new Error('RECEIPT_INVALID:4B2_RECEIPT_ID');
+  if (typeof input.auditRootId !== 'string') throw new Error('RECEIPT_INVALID:AUDIT_ROOT_ID');
+  if (typeof input.auditTipId !== 'string') throw new Error('RECEIPT_INVALID:AUDIT_TIP_ID');
+
+  const body: Omit<Stage4B3Receipt, 'receiptId'> = {
+    schemaVersion: RECEIPT_4B3_SCHEMA,
+    generatedAt,
+    ...input,
+  };
+  const receiptId = domainId('CloddsBot:Stage4B3Receipt:v1', body);
+  return deepFreeze({ ...body, receiptId });
+}
+
+export function verifyStage4B3Receipt(
+  receipt: Stage4B3Receipt,
+  expected: Stage4B3ReceiptInput,
+  expectedReceiptId?: string,
+): void {
+  // 1. Schema
+  if (receipt.schemaVersion !== RECEIPT_4B3_SCHEMA) throw new Error('VERIFY_FAILED:SCHEMA');
+  // 2. Self-consistent receipt ID
+  const body = (({ receiptId: _, ...r }) => r)(receipt);
+  const computedId = domainId('CloddsBot:Stage4B3Receipt:v1', body);
+  if (receipt.receiptId !== computedId) throw new Error('VERIFY_FAILED:SELF_CONSISTENT_FORGERY');
+  if (expectedReceiptId && receipt.receiptId !== expectedReceiptId) throw new Error('VERIFY_FAILED:RECEIPT_ID');
+  // 3. Source commit
+  if (receipt.sourceCommit !== expected.sourceCommit) throw new Error('VERIFY_FAILED:SOURCE_COMMIT');
+  // 4. 4B2 receipt binding
+  if (receipt.stage4B2ReceiptId !== expected.stage4B2ReceiptId) throw new Error('VERIFY_FAILED:4B2_RECEIPT');
+  if (receipt.stage4B2SourceCommit !== expected.stage4B2SourceCommit) throw new Error('VERIFY_FAILED:4B2_SOURCE_COMMIT');
+  // 5. Safety decision
+  if (receipt.safetyDecisionId !== expected.safetyDecisionId) throw new Error('VERIFY_FAILED:DECISION');
+  // 6. Audit
+  if (receipt.auditRootId !== expected.auditRootId) throw new Error('VERIFY_FAILED:AUDIT_ROOT');
+  if (receipt.auditTipId !== expected.auditTipId) throw new Error('VERIFY_FAILED:AUDIT_TIP');
+  // 7. Kill switch
+  if (receipt.killSwitchEnabled !== expected.killSwitchEnabled) throw new Error('VERIFY_FAILED:KILL_SWITCH');
+  // 8. Idempotency digest
+  if (receipt.idempotencyLedgerDigest !== expected.idempotencyLedgerDigest) throw new Error('VERIFY_FAILED:IDEMPOTENCY');
+  // 9. Recovery
+  if (receipt.recoveryStatus !== expected.recoveryStatus) throw new Error('VERIFY_FAILED:RECOVERY');
+  // 10. Approval flags — must all be false
+  if (receipt.runtimeStarted !== false) throw new Error('VERIFY_FAILED:RUNTIME_STARTED');
+  if (receipt.paperApproved !== false) throw new Error('VERIFY_FAILED:PAPER');
+  if (receipt.testnetApproved !== false) throw new Error('VERIFY_FAILED:TESTNET');
+  if (receipt.liveApproved !== false) throw new Error('VERIFY_FAILED:LIVE');
+}
