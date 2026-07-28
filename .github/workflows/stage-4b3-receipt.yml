@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   receipt:
@@ -55,6 +56,7 @@ jobs:
           name: stage-4b2-receipt-81b0980f4fee168075a52c6ebcb12eb50f382217
           path: artifacts/
           branch: feature/orangeai-split
+          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate Stage 4B3 receipt
         run: npx tsx scripts/generate-stage-4b3-receipt.mts --source-commit "$SOURCE_COMMIT" --output "$RECEIPT_PATH" --4b2-receipt artifacts/stage-4b2-receipt.json
       - name: Upload receipt artifact
