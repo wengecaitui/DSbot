@@ -8,11 +8,6 @@ import {
   canonicalJson,
   canonicalSha256,
 } from './ActivationContract';
-import {
-  createStage4B2Receipt,
-  verifyStage4B2Receipt,
-  type Stage4B2Receipt,
-} from './PaperReadinessReview';
 
 // ═══════════════════════════════════════════════════════════════════
 // Constants
@@ -754,7 +749,6 @@ export function createBlockedSafetyAudit(timestamp: string): AppendOnlySafetyAud
       reason: SAFETY_REASONS.NO_PROMOTED_STRATEGY,
       receiptId: STAGE_4B2_VERIFIED_RECEIPT.receiptId,
       paperApproved: false,
-      testnetApproved: false,
       liveApproved: false,
     },
   });
@@ -763,19 +757,21 @@ export function createBlockedSafetyAudit(timestamp: string): AppendOnlySafetyAud
 
 // ═══════════════════════════════════════════════════════════════════
 // Stage 4B3 Deterministic Receipt — binds all safety state
-// Trust-root closure: generator reads real 4B2 receipt, verifier
-// accepts raw 4B1 artifact to independently re-derive trust chain.
+// R3: verifier accepts raw authoritative 4B2 receipt JSON bytes.
+// Does NOT regenerate the 4B2 receipt — that is immutable history.
 // ═══════════════════════════════════════════════════════════════════
 
 export const RECEIPT_4B3_SCHEMA = 'stage-4b3.safety-receipt.v1' as const;
 
-const STAGE_4A_CLOSURE_AUDIT_ID = 'af9dc5cbb832b32b0c403631b2805bcb93996d215c044a47a06e4b3347db40cc';
+const STAGE_4B2_AUTHORITATIVE_RECEIPT_ID = '64b15a8acef9b1ba6f16ff87f81d27fcf28fbf6b94424d059521a20702165785';
+const STAGE_4B2_AUTHORITATIVE_RAW_SHA256 = '5fefa5c1ddb025c94300e8b7dcb3b6d9dd5ba2e36a6d70e2ec10554d1d6a2453';
+const STAGE_4B2_SCHEMA = 'stage-4b2.paper-readiness-receipt.v1';
 
 export interface Stage4B3ReceiptInput {
   readonly sourceCommit: string;
   readonly stage4B2ReceiptId: string;
   readonly stage4B2SourceCommit: string;
-  readonly stage4B2ArtifactSha256: string;
+  readonly stage4B2RawArtifactSha256: string;
   readonly stage4B1ArtifactId: string;
   readonly stage4B1ProofId: string;
   readonly stage4B1DecisionId: string;
@@ -805,9 +801,9 @@ export function createStage4B3Receipt(input: Stage4B3ReceiptInput, generatedAt: 
   }
   if (typeof input.sourceCommit !== 'string' || input.sourceCommit.length !== 40) throw new Error('RECEIPT_INVALID:SOURCE_COMMIT');
   if (typeof input.stage4B2ReceiptId !== 'string' || input.stage4B2ReceiptId.length !== 64) throw new Error('RECEIPT_INVALID:4B2_RECEIPT_ID');
+  if (typeof input.stage4B2RawArtifactSha256 !== 'string' || input.stage4B2RawArtifactSha256.length !== 64) throw new Error('RECEIPT_INVALID:4B2_RAW_ARTIFACT_SHA256');
   if (typeof input.auditRootId !== 'string') throw new Error('RECEIPT_INVALID:AUDIT_ROOT_ID');
   if (typeof input.auditTipId !== 'string') throw new Error('RECEIPT_INVALID:AUDIT_TIP_ID');
-  if (typeof input.stage4B2ArtifactSha256 !== 'string' || input.stage4B2ArtifactSha256.length !== 64) throw new Error('RECEIPT_INVALID:4B2_ARTIFACT_SHA256');
 
   const body: Omit<Stage4B3Receipt, 'receiptId'> = {
     schemaVersion: RECEIPT_4B3_SCHEMA,
@@ -819,14 +815,14 @@ export function createStage4B3Receipt(input: Stage4B3ReceiptInput, generatedAt: 
 }
 
 /**
- * Independent trust-chain re-verification.
- * Accepts raw 4B1 artifact to re-derive 4B2 receipt — does NOT trust caller's expected values.
+ * Independent re-verification using the authoritative 4B2 receipt raw JSON.
+ * Does NOT regenerate the 4B2 receipt — verifies the immutable history artifact.
  */
 export function verifyStage4B3Receipt(
   receipt: Stage4B3Receipt,
-  stage4B1Artifact: unknown,
-  stage4B1ArtifactSourceSha256: string,
-): Stage4B2Receipt {
+  raw4B2Json: string,
+  expected4B2RawSha256: string,
+): Record<string, unknown> {
   // 1. Schema
   if (receipt.schemaVersion !== RECEIPT_4B3_SCHEMA) throw new Error('VERIFY_FAILED:SCHEMA');
 
@@ -835,54 +831,48 @@ export function verifyStage4B3Receipt(
   const computedId = domainId('CloddsBot:Stage4B3Receipt:v1', body);
   if (receipt.receiptId !== computedId) throw new Error('VERIFY_FAILED:SELF_CONSISTENT_FORGERY');
 
-  // 3. Independently re-derive 4B2 receipt from raw 4B1 artifact
-  // This is the trust root — we do NOT trust what the 4B3 receipt claims
-  const stage4B2Receipt = createStage4B2Receipt({
-    sourceCommit: receipt.stage4B2SourceCommit,
-    stage4AClosureAuditId: STAGE_4A_CLOSURE_AUDIT_ID,
-    stage4B1Artifact,
-    stage4B1ArtifactSourceSha256,
-    generatedAt: '2026-07-28T00:00:00.000Z',
-  });
-  verifyStage4B2Receipt(stage4B2Receipt, {
-    sourceCommit: receipt.stage4B2SourceCommit,
-    stage4AClosureAuditId: STAGE_4A_CLOSURE_AUDIT_ID,
-    stage4B1Artifact,
-    stage4B1ArtifactSourceSha256,
-  });
-
-  // 4. Verify 4B3 receipt bindings against independently re-derived 4B2 receipt
-  if (receipt.stage4B2ReceiptId !== stage4B2Receipt.receiptId) {
-    throw new Error('VERIFY_FAILED:4B2_RECEIPT_ID_TRUST_ROOT_MISMATCH');
+  // 3. Verify raw 4B2 receipt SHA-256 matches authoritative value
+  const actualRawSha256 = sha256(raw4B2Json);
+  if (actualRawSha256 !== expected4B2RawSha256) {
+    throw new Error('VERIFY_FAILED:4B2_RAW_SHA256_MISMATCH');
   }
-  if (receipt.stage4B2SourceCommit !== stage4B2Receipt.sourceCommit) {
-    throw new Error('VERIFY_FAILED:4B2_SOURCE_COMMIT_TRUST_ROOT_MISMATCH');
-  }
-  if (receipt.stage4B1ArtifactId !== stage4B2Receipt.stage4B1ArtifactId) {
-    throw new Error('VERIFY_FAILED:4B1_ARTIFACT_ID_MISMATCH');
-  }
-  if (receipt.stage4B1ProofId !== stage4B2Receipt.stage4B1ProofId) {
-    throw new Error('VERIFY_FAILED:4B1_PROOF_ID_MISMATCH');
-  }
-  if (receipt.stage4B1DecisionId !== stage4B2Receipt.stage4B1DecisionId) {
-    throw new Error('VERIFY_FAILED:4B1_DECISION_ID_MISMATCH');
+  if (actualRawSha256 !== STAGE_4B2_AUTHORITATIVE_RAW_SHA256) {
+    throw new Error('VERIFY_FAILED:4B2_AUTHORITATIVE_RAW_SHA256_MISMATCH');
   }
 
-  // 5. Source commit (4B3) match
-  // (verified by self-consistent receipt ID — changing sourceCommit changes receiptId)
+  // 4. Parse 4B2 receipt from raw JSON
+  let stage4B2: Record<string, unknown>;
+  try { stage4B2 = JSON.parse(raw4B2Json); } catch { throw new Error('VERIFY_FAILED:4B2_PARSE_ERROR'); }
 
-  // 6. Approval flags
+  // 5. Verify 4B2 receipt schema
+  if (stage4B2.schemaVersion !== STAGE_4B2_SCHEMA) throw new Error('VERIFY_FAILED:4B2_SCHEMA');
+  if (stage4B2.receiptId !== STAGE_4B2_AUTHORITATIVE_RECEIPT_ID) throw new Error('VERIFY_FAILED:4B2_RECEIPT_ID');
+  if (stage4B2.sourceCommit !== receipt.stage4B2SourceCommit) throw new Error('VERIFY_FAILED:4B2_SOURCE_COMMIT');
+
+  // 6. Verify 4B2 receipt self-consistency (recompute receiptId from body)
+  const b2Body = (({ receiptId: _, ...r }) => r)(stage4B2);
+  const computed4B2Id = domainId('CloddsBot:Stage4B2Receipt:v1', b2Body);
+  if (stage4B2.receiptId !== computed4B2Id) throw new Error('VERIFY_FAILED:4B2_SELF_CONSISTENT_FORGERY');
+
+  // 7. Verify 4B2 content: 4B1 IDs, approvals, status
+  if (stage4B2.stage4B1ArtifactId !== receipt.stage4B1ArtifactId) throw new Error('VERIFY_FAILED:4B1_ARTIFACT_ID');
+  if (stage4B2.stage4B1ProofId !== receipt.stage4B1ProofId) throw new Error('VERIFY_FAILED:4B1_PROOF_ID');
+  if (stage4B2.stage4B1DecisionId !== receipt.stage4B1DecisionId) throw new Error('VERIFY_FAILED:4B1_DECISION_ID');
+  if (stage4B2.reviewEligible !== false) throw new Error('VERIFY_FAILED:4B2_REVIEW_ELIGIBLE');
+  if (stage4B2.paperApproved !== false) throw new Error('VERIFY_FAILED:4B2_PAPER_APPROVED');
+  if (stage4B2.testnetApproved !== false) throw new Error('VERIFY_FAILED:4B2_TESTNET_APPROVED');
+  if (stage4B2.liveApproved !== false) throw new Error('VERIFY_FAILED:4B2_LIVE_APPROVED');
+  if (stage4B2.status !== 'BLOCKED_NO_ACTIVATION_REVIEW_READY_STRATEGY') throw new Error('VERIFY_FAILED:4B2_STATUS');
+
+  // 8. Verify 4B3 receipt binds to the authoritative 4B2 receipt
+  if (receipt.stage4B2ReceiptId !== STAGE_4B2_AUTHORITATIVE_RECEIPT_ID) throw new Error('VERIFY_FAILED:4B2_BINDING');
+  if (receipt.stage4B2RawArtifactSha256 !== STAGE_4B2_AUTHORITATIVE_RAW_SHA256) throw new Error('VERIFY_FAILED:4B2_RAW_BINDING');
+
+  // 9. Approval flags
   if (receipt.runtimeStarted !== false) throw new Error('VERIFY_FAILED:RUNTIME_STARTED');
   if (receipt.paperApproved !== false) throw new Error('VERIFY_FAILED:PAPER');
   if (receipt.testnetApproved !== false) throw new Error('VERIFY_FAILED:TESTNET');
   if (receipt.liveApproved !== false) throw new Error('VERIFY_FAILED:LIVE');
 
-  // 7. 4B2 artifact SHA-256 binding
-  const stage4B2ArtifactJson = JSON.stringify(stage4B2Receipt);
-  const computed4B2Sha256 = sha256(stage4B2ArtifactJson);
-  if (receipt.stage4B2ArtifactSha256 !== computed4B2Sha256) {
-    throw new Error('VERIFY_FAILED:4B2_ARTIFACT_SHA256_MISMATCH');
-  }
-
-  return stage4B2Receipt;
+  return stage4B2;
 }
