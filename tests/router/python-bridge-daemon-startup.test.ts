@@ -119,9 +119,7 @@ async function raceTimeout<T>(p: Promise<T>, ms: number = 2000): Promise<T | 'TI
 }
 
 async function terminateBridge(bridge: PythonBridgeDaemon): Promise<void> {
-  bridge.shutdown();
-  // 等待更短时间以便测试正常退出
-  await new Promise(r => setTimeout(r, 100));
+  await bridge.shutdownAsync();
 }
 
 // 拿到当前 Python 路径
