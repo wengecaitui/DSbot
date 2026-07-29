@@ -41,11 +41,18 @@ async function makeBinding(accountId: string, exchange: ExchangeId, cash: number
   }
   const ac: PaperAccountConfig = { accountId, exchange, initialCashUsd: cash };
   const ks = new KillSwitch(exchange, { totalCapitalUsd: cash, maxPositionPct: 1, maxSinglePositionPct: 1, allowConcentration: true });
+  let nextDomainTime = FUTURE - 60_000;
+  let capturedDomainTime = nextDomainTime;
+  const clock = { now: () => {
+    capturedDomainTime = nextDomainTime++;
+    return capturedDomainTime;
+  } };
   const fp = new FastPipeline({
     exchange,
-    router: { exchange, getBiasReport: () => ({ exchange, updatedAt: Date.now(), assets: [{ symbol, direction, confidence: 85, suggestedPositionPct: 0.1 }], whitelist: [symbol] }), getConfig: () => ({ maxBiasReportAgeHours: 24 }), killSwitch: ks },
+    router: { exchange, getBiasReport: () => ({ exchange, updatedAt: capturedDomainTime, assets: [{ symbol, direction, confidence: 85, suggestedPositionPct: 0.1 }], whitelist: [symbol] }), getConfig: () => ({ maxBiasReportAgeHours: 24 }), killSwitch: ks },
     indicatorService: { calculateAll: async () => [momentumResult()] },
     marketData: { exchange, snapshotStore: store, candleStore: candle, interval: '1m', minimumSeries: 100, seriesLimit: 200 },
+    clock,
   });
   const svc = await PaperExecutionService.open(ac, new PaperLedgerStore(ac, { baseDir: d }));
   const coord = new PaperFastPathCoordinator(fp, svc, exchange);
