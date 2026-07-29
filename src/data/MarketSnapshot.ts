@@ -7,10 +7,10 @@ import type { WsTicker, WsKline } from './types';
 import type { ExchangeId } from './MarketIdentity';
 
 // ── Clock abstraction ───────────────────────────────────────────────────────
+// Stage 4B4.1: canonical Clock lives in runtime/Clock. Re-export for
+// source compatibility — all existing importers continue to work.
 
-export interface Clock {
-  now(): number;
-}
+export type { Clock } from '../runtime/Clock';
 
 // ── Wrappers ────────────────────────────────────────────────────────────────
 

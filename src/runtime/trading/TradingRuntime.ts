@@ -236,6 +236,7 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
     exchange,
     router,
     indicatorService: options.indicatorService,
+    clock,
     marketData: {
       // Stage 3B4C2: bind this pipeline to the runtime's exchange — no fallback.
       exchange,
