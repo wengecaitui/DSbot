@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "stage-4b1.attested-activation-contract.v1",
+  "labels": [
+    "OFFLINE ACTIVATION CONTRACT ONLY",
+    "BLOCKED: NO PROMOTED STRATEGY",
+    "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
+  ],
+  "receiptCommit": "eee580cb7a25f67cb65aecd9a0a82f71b4921121",
+  "artifactId": "f320f0e51ef6c0900a189dd7455d0c3ee77726bb4c6d1820d422d725629bf52e",
+  "baselineCommit": "9f659d7a02a4c025b9cef86ad6fa855e00f99b15",
+  "eligibilityStatus": "BLOCKED_NO_PROMOTED_STRATEGY",
+  "auditTipId": "b6a086d7bc153e767d77b3a69106feaa778105380646dc8cd6a27d3a2a5ef844",
+  "activationRequestPresent": false,
+  "stage4A14SourceAccepted": false,
+  "paperApproved": false,
+  "testnetApproved": false,
+  "liveApproved": false,
+  "liveExecutionChanges": false,
+  "subjectId": "6f86823399b0d7076d50d9cb6b563e46646a8d928e4e58b537505282783e99e7"
+}

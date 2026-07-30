@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "stage-4b2.paper-readiness-receipt.v1",
+  "sourceCommit": "81b0980f4fee168075a52c6ebcb12eb50f382217",
+  "stage4AClosureAuditId": "af9dc5cbb832b32b0c403631b2805bcb93996d215c044a47a06e4b3347db40cc",
+  "stage4B1ArtifactId": "f320f0e51ef6c0900a189dd7455d0c3ee77726bb4c6d1820d422d725629bf52e",
+  "stage4B1ProofId": "7d35edaa205593ad07ccb8b254a67acad09511118939817e649166028535f1fb",
+  "stage4B1DecisionId": "80268cc673363290bea5f65aec0e7811041ecd6c608e06d6944aecfe5c2c39aa",
+  "stage4B1ArtifactSourceSha256": "4d474f9d357fa6fb7d584576a891c5916f4f7ca4166d82027dba8fb29947d4aa",
+  "reviewEligible": false,
+  "paperApproved": false,
+  "testnetApproved": false,
+  "liveApproved": false,
+  "paperRuntimeChanges": false,
+  "liveExecutionChanges": false,
+  "status": "BLOCKED_NO_ACTIVATION_REVIEW_READY_STRATEGY",
+  "generatedAt": "2026-07-28T01:37:40.000Z",
+  "receiptId": "64b15a8acef9b1ba6f16ff87f81d27fcf28fbf6b94424d059521a20702165785"
+}
