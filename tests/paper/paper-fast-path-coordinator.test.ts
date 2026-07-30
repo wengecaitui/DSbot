@@ -28,14 +28,15 @@ function momentumResult() {
   return { name: 'CompositeMomentum' as const, composite_score: 85, regime_state: 'STRONG_BULLISH' as const, in_cooldown: false, dimension_scores: { hull_big_trend: { value: 1, weight: 1 }, stc_momentum: { value: 1, weight: 1 }, volume_micro: { value: 1, weight: 1 } }, lag_bars: 0, elapsedMs: 0 };
 }
 
-const FUTURE = Date.now() + 120_000;
+function freshFuture(): number { return Date.now() + 120_000; }
 
 function buildFp(overrides?: { staleAfterMs?: number }) {
+  const future = freshFuture();
   const store = createMarketSnapshotStore({ staleAfterMs: overrides?.staleAfterMs ?? 60_000 });
   const candle = createCandleSeriesStore({ capacityPerSeries: 500 });
-  store.updateTicker({ ticker: mkTicker(EXCH, SYM, 50000, FUTURE), receivedAt: FUTURE });
+  store.updateTicker({ ticker: mkTicker(EXCH, SYM, 50000, future), receivedAt: future });
   for (let i = 0; i < 200; i++) {
-    const k = mkKline(EXCH, SYM, 49000 + i * 10, FUTURE - (200 - i) * 60_000);
+    const k = mkKline(EXCH, SYM, 49000 + i * 10, future - (200 - i) * 60_000);
     store.updateClosedKline({ kline: k, receivedAt: k.ts });
     candle.appendClosedKline({ kline: k, receivedAt: k.ts });
   }
@@ -136,10 +137,11 @@ test('6. stale snapshot: defense, no quote, no paper, fills=0', async () => {
 
 test('7. missing ticker: no quote, no paper, fills=0', async () => {
   const d = await fs.mkdtemp(path.join(os.tmpdir(), 's15r2-')); try {
+    const future = freshFuture();
     const store2 = createMarketSnapshotStore({ staleAfterMs: 60_000 });
     const candle2 = createCandleSeriesStore({ capacityPerSeries: 500 });
     for (let i = 0; i < 200; i++) {
-      const k = mkKline(EXCH, SYM, 49000 + i * 10, FUTURE - (200 - i) * 60_000);
+      const k = mkKline(EXCH, SYM, 49000 + i * 10, future - (200 - i) * 60_000);
       store2.updateClosedKline({ kline: k, receivedAt: k.ts });
       candle2.appendClosedKline({ kline: k, receivedAt: k.ts });
     }
@@ -160,8 +162,9 @@ test('7. missing ticker: no quote, no paper, fills=0', async () => {
 
 test('8. missing kline: skip, no paper, fills=0', async () => {
   const d = await fs.mkdtemp(path.join(os.tmpdir(), 's15r2-')); try {
+    const future = freshFuture();
     const store3 = createMarketSnapshotStore({ staleAfterMs: 60_000 });
-    store3.updateTicker({ ticker: mkTicker(EXCH, SYM, 50000, FUTURE), receivedAt: FUTURE });
+    store3.updateTicker({ ticker: mkTicker(EXCH, SYM, 50000, future), receivedAt: future });
     const ks3 = new KillSwitch(EXCH, { totalCapitalUsd: 100_000, maxPositionPct: 1, maxSinglePositionPct: 1, allowConcentration: true });
     const fp3 = new FastPipeline({
       exchange: EXCH,
