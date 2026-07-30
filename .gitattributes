@@ -1,0 +1,2 @@
+tests/fixtures/stage-5-evaluation/*.json text eol=lf
+tests/fixtures/stage-5-dataset/*.json text eol=lf

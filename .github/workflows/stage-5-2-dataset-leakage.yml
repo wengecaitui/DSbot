@@ -1,0 +1,77 @@
+name: Stage 5.2 Dataset and Leakage Control
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.gitattributes'
+      - '.github/workflows/stage-5-2-dataset-leakage.yml'
+      - 'quant_engine/proof/stage5_dataset.py'
+      - 'quant_engine/tests/test_stage5_dataset*.py'
+      - 'scripts/run-stage-5-dataset-audit.py'
+      - 'tests/fixtures/stage-5-dataset/**'
+      - 'tests/fixtures/stage-5-evaluation/**'
+      - 'docs/releases/stage-5-2-dataset-leakage.md'
+
+permissions:
+  contents: read
+
+jobs:
+  dataset-leakage-control:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      MANIFEST_PATH: tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install Python dependencies
+        run: python -m pip install -r quant_engine/requirements.txt
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Download authoritative Stage 5.1 constitution
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts/evidence
+          gh run download 30534333283 -n stage-5-evaluation-spec-913646777a64aa801c7dc263701802249164bf97 -D artifacts/evidence
+      - name: Verify audited manifest without market-data access
+        shell: bash
+        run: |
+          DATASET_SOURCE_COMMIT="$(python -c 'import json; print(json.load(open("tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json", encoding="utf-8"))["sourceCommit"])')"
+          python scripts/run-stage-5-dataset-audit.py \
+            --source-commit "$DATASET_SOURCE_COMMIT" \
+            --evaluation-spec artifacts/evidence/stage-5-evaluation-spec.json \
+            --verify-manifest "$MANIFEST_PATH"
+      - name: Upload dataset receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-5-dataset-manifest-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.MANIFEST_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed dataset attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.MANIFEST_PATH }}
