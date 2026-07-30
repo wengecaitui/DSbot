@@ -1,0 +1,63 @@
+name: Stage 4B4 Shadow Runtime Proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/stage-4b4-shadow-proof.yml'
+      - 'src/shadow/**'
+      - 'scripts/generate-stage-4b4-shadow-proof.mts'
+      - 'tests/shadow/**'
+      - 'docs/releases/stage-4b4-3-shadow-proof.md'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  shadow-proof:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      PROOF_PATH: artifacts/stage-4b4-shadow-proof.json
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install Python dependencies
+        run: python -m pip install -r quant_engine/requirements.txt
+      - name: Install
+        run: npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Generate and independently re-verify shadow proof
+        run: npx tsx scripts/generate-stage-4b4-shadow-proof.mts --source-commit "$SOURCE_COMMIT" --output "$PROOF_PATH"
+      - name: Upload proof subject
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-4b4-shadow-proof-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.PROOF_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed build provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.PROOF_PATH }}
