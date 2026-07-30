@@ -269,7 +269,9 @@ test('12. retry after startup failure', async () => {
   // Reuse bridge with new fixture — must create new bridge since old one is dead
   const b2 = new PythonBridgeDaemon({
     scriptPath: okScript,
-    startupTimeoutMs: 300,
+    // Successful interpreter startup can exceed 300ms on a loaded CI host.
+    // Keep negative timeout tests strict; use the suite's normal success budget.
+    startupTimeoutMs: 1000,
   });
   await b2.init();
   await terminateBridge(b2);
