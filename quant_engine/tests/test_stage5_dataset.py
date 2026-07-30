@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from quant_engine.proof.stage5_dataset import (
@@ -35,8 +36,8 @@ def audit_stub(symbol: str, phase: str) -> dict:
         "canonicalSymbol": symbol.removesuffix("USDT") + "/USDT",
         "timeframe": "5m",
         "phase": phase,
-        "startInclusive": "unused",
-        "endExclusive": "unused",
+        "startInclusive": datetime.fromtimestamp(start / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+        "endExclusive": datetime.fromtimestamp(end / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
         "startMs": start,
         "endExclusiveMs": end,
         "rowCount": count,
@@ -49,8 +50,9 @@ def audit_stub(symbol: str, phase: str) -> dict:
         "rawRowsSha256": "1" * 64,
         "normalizedSha256": "2" * 64,
         "ohlcValid": True,
-        "datasetId": "3" * 64,
     }
+    from quant_engine.proof.stage5_evaluation import canonical_sha256
+    value["datasetId"] = canonical_sha256(value)
     return value
 
 
@@ -176,6 +178,19 @@ class DatasetManifestTests(unittest.TestCase):
         bad_count = copy.deepcopy(self.datasets); bad_count[0]["rowCount"] -= 1
         with self.assertRaises(ValueError):
             build_stage5_dataset_manifest(SOURCE, EVAL_RAW, bad_count)
+
+    def test_manifest_rejects_forged_dataset_identity_and_display_range(self) -> None:
+        forged_id = copy.deepcopy(self.datasets)
+        forged_id[0]["rawRowsSha256"] = "f" * 64
+        with self.assertRaises(ValueError):
+            build_stage5_dataset_manifest(SOURCE, EVAL_RAW, forged_id)
+        forged_range = copy.deepcopy(self.datasets)
+        forged_range[0]["startInclusive"] = "2099-01-01T00:00:00Z"
+        from quant_engine.proof.stage5_evaluation import canonical_sha256
+        unsigned = dict(forged_range[0]); unsigned.pop("datasetId")
+        forged_range[0]["datasetId"] = canonical_sha256(unsigned)
+        with self.assertRaises(ValueError):
+            build_stage5_dataset_manifest(SOURCE, EVAL_RAW, forged_range)
 
     def test_evaluation_raw_and_source_binding(self) -> None:
         with self.assertRaises(ValueError):

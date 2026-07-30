@@ -45,6 +45,16 @@ class Stage5DatasetCliTests(unittest.TestCase):
                 CLI._write_exclusive(path, b"two")
             self.assertEqual(path.read_bytes(), b"one")
 
+    def test_private_rows_resume_requires_canonical_bytes(self) -> None:
+        rows = [[1, "2"]]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rows.json"
+            path.write_bytes(canonical_json_bytes(rows) + b"\n")
+            self.assertEqual(CLI._read_canonical_rows(path), rows)
+            path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "NOT_CANONICAL"):
+                CLI._read_canonical_rows(path)
+
 
 if __name__ == "__main__":
     unittest.main()

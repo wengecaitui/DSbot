@@ -202,7 +202,10 @@ def _verify_audited_dataset(item: Mapping[str, Any]) -> None:
         raise ValueError("AUDITED_DATASET_SCOPE_INVALID")
     start, end, count = PHASES[str(phase)]
     exact = {
+        "canonicalSymbol": str(symbol).removesuffix("USDT") + "/USDT",
         "timeframe": "5m",
+        "startInclusive": _iso(start),
+        "endExclusive": _iso(end),
         "startMs": start,
         "endExclusiveMs": end,
         "rowCount": count,
@@ -219,6 +222,10 @@ def _verify_audited_dataset(item: Mapping[str, Any]) -> None:
     for key in ("rawRowsSha256", "normalizedSha256", "datasetId"):
         if not _SHA256.fullmatch(str(item.get(key, ""))):
             raise ValueError("AUDITED_DATASET_DIGEST_INVALID")
+    unsigned = dict(item)
+    dataset_id = unsigned.pop("datasetId")
+    if dataset_id != canonical_sha256(unsigned):
+        raise ValueError("AUDITED_DATASET_ID_INVALID")
 
 
 def build_stage5_dataset_manifest(

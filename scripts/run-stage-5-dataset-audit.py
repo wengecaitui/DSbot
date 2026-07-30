@@ -71,6 +71,17 @@ def _write_exclusive(path: Path, payload: bytes) -> None:
         handle.write(payload)
 
 
+def _read_canonical_rows(path: Path) -> list[list[Any]]:
+    raw = path.read_bytes()
+    try:
+        rows = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("PRIVATE_ROWS_INVALID") from error
+    if raw != canonical_json_bytes(rows) + b"\n" or not isinstance(rows, list):
+        raise ValueError("PRIVATE_ROWS_NOT_CANONICAL")
+    return rows
+
+
 def verify_existing(manifest_path: Path, source_commit: str, evaluation_raw: bytes) -> dict[str, Any]:
     raw = manifest_path.read_bytes()
     try:
@@ -94,9 +105,13 @@ def generate(
     for phase in ("TRAIN", "VALIDATION"):
         start_ms, end_ms, _ = PHASES[phase]
         for symbol in ALLOWED_SYMBOLS:
-            rows = fetch_public_binance_klines(symbol, start_ms, end_ms, _fetch_json)
+            private_path = private_dir / phase.lower() / f"{symbol}-5m.json"
+            if private_path.exists():
+                rows = _read_canonical_rows(private_path)
+            else:
+                rows = fetch_public_binance_klines(symbol, start_ms, end_ms, _fetch_json)
+                _write_exclusive(private_path, canonical_json_bytes(rows) + b"\n")
             audit = audit_ohlcv_rows(rows, symbol, phase, start_ms, end_ms)
-            _write_exclusive(private_dir / phase.lower() / f"{symbol}-5m.json", canonical_json_bytes(rows) + b"\n")
             audits.append(audit)
     manifest = build_stage5_dataset_manifest(source_commit, evaluation_raw, audits)
     verify_stage5_dataset_manifest(manifest, source_commit, evaluation_raw)
