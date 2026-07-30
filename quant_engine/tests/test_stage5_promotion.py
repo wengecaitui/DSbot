@@ -11,19 +11,26 @@ from quant_engine.proof.stage5_promotion import build_stage5_promotion_decision,
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = "d" * 40
-ENTRY = (ROOT / "tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json").read_bytes()
+
+
+def _checked_in_bytes(relative_path: str) -> bytes:
+    """Return the committed LF evidence bytes despite Windows checkout conversion."""
+    return (ROOT / relative_path).read_bytes().replace(b"\r\n", b"\n")
+
+
+ENTRY = _checked_in_bytes("tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json")
 EVALUATION = canonical_json_bytes(build_stage5_evaluation_spec("913646777a64aa801c7dc263701802249164bf97", ENTRY)) + b"\n"
 
 
 class Stage5PromotionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.dataset = (ROOT / "tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json").read_bytes()
-        candidate = (ROOT / "docs/releases/stage-4a12-candidate-manifest.json").read_bytes()
+        cls.dataset = _checked_in_bytes("tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json")
+        candidate = _checked_in_bytes("docs/releases/stage-4a12-candidate-manifest.json")
         registry = build_stage5_candidate_registry("2115bfa277d2ca2eb582a010e248f369096cb6fa", candidate, EVALUATION, cls.dataset)
         cls.registry = canonical_json_bytes(registry) + b"\n"
-        cls.results = (ROOT / "tests/fixtures/stage-5-research/stage-5-research-results.json").read_bytes()
-        cls.validation = (ROOT / "tests/fixtures/stage-5-research/stage-5-validation-decision.json").read_bytes()
+        cls.results = _checked_in_bytes("tests/fixtures/stage-5-research/stage-5-research-results.json")
+        cls.validation = _checked_in_bytes("tests/fixtures/stage-5-research/stage-5-validation-decision.json")
         cls.decision = build_stage5_promotion_decision(SOURCE, ENTRY, EVALUATION, cls.dataset, cls.registry, cls.results, cls.validation)
 
     def test_no_candidate_promoted_and_locked_test_never_runs(self):

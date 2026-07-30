@@ -720,7 +720,10 @@ async function loadSharp() {
   try {
     const mod = await import('sharp');
     // Handle both ESM and CJS module formats
-    const sharpMod = (mod as unknown as { default?: typeof import('sharp') }).default ?? (mod as unknown as typeof import('sharp'));
+    type SharpFactory = typeof import('sharp').default;
+    const sharpMod =
+      (mod as unknown as { default?: SharpFactory }).default ??
+      (mod as unknown as SharpFactory);
     return sharpMod;
   } catch (error) {
     throw new Error(
