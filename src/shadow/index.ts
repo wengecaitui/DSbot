@@ -56,3 +56,13 @@ export {
   ShadowRuntimeCoordinator,
   startCoordinator,
 } from './ShadowRuntimeCoordinator';
+export {
+  createShadowRuntimeProof,
+  verifyShadowRuntimeProof,
+  SHADOW_RUNTIME_PROOF_SCHEMA_VERSION,
+  STAGE_4B4_2_BASELINE,
+} from './ShadowRuntimeProof';
+export type {
+  ShadowRuntimeProof,
+  ShadowRuntimeProofContext,
+} from './ShadowRuntimeProof';
