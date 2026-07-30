@@ -179,6 +179,11 @@ def run_offline_replay(
     equity_curve: list[dict[str, Any]] = []
     exposure_bars = 0
     fill_cost_bps = costs["feeBpsPerFill"] + costs["halfSpreadBpsPerFill"] + costs["slippageBpsPerFill"]
+    dates = bars["date"].tolist()
+    opens = bars["open"].to_numpy(dtype=float, copy=True)
+    highs = bars["high"].to_numpy(dtype=float, copy=True)
+    lows = bars["low"].to_numpy(dtype=float, copy=True)
+    closes = bars["close"].to_numpy(dtype=float, copy=True)
 
     def funding_fraction(exit_index: int) -> float:
         held = 0 if entry_index is None else max(exit_index - entry_index, 0)
@@ -223,8 +228,7 @@ def run_offline_replay(
         entry_stop_distance, stop_price, take_profit_price, mfe, mae = None, None, None, 0.0, 0.0
 
     for bar_index in range(start, end_exclusive):
-        bar = bars.iloc[bar_index]
-        execution_open = float(bar["open"])
+        execution_open = float(opens[bar_index])
         target = position
         if pending.action is Action.ENTER_LONG:
             target = 1
@@ -246,26 +250,26 @@ def run_offline_replay(
 
         if position != 0 and entry_raw is not None:
             exposure_bars += 1
-            favorable = float(bar["high"]) / entry_raw - 1 if position == 1 else entry_raw / float(bar["low"]) - 1
-            adverse = float(bar["low"]) / entry_raw - 1 if position == 1 else entry_raw / float(bar["high"]) - 1
+            favorable = float(highs[bar_index]) / entry_raw - 1 if position == 1 else entry_raw / float(lows[bar_index]) - 1
+            adverse = float(lows[bar_index]) / entry_raw - 1 if position == 1 else entry_raw / float(highs[bar_index]) - 1
             mfe, mae = max(mfe, favorable), min(mae, adverse)
-        if position == 1 and stop_price is not None and float(bar["low"]) <= stop_price:
+        if position == 1 and stop_price is not None and float(lows[bar_index]) <= stop_price:
             close(bar_index, min(execution_open, stop_price), "stop")
-        elif position == -1 and stop_price is not None and float(bar["high"]) >= stop_price:
+        elif position == -1 and stop_price is not None and float(highs[bar_index]) >= stop_price:
             close(bar_index, max(execution_open, stop_price), "stop")
-        elif position == 1 and take_profit_price is not None and float(bar["high"]) >= take_profit_price:
+        elif position == 1 and take_profit_price is not None and float(highs[bar_index]) >= take_profit_price:
             close(bar_index, max(execution_open, take_profit_price), "take-profit")
-        elif position == -1 and take_profit_price is not None and float(bar["low"]) <= take_profit_price:
+        elif position == -1 and take_profit_price is not None and float(lows[bar_index]) <= take_profit_price:
             close(bar_index, min(execution_open, take_profit_price), "take-profit")
 
         mark = realized_equity
         if position != 0 and entry_exec is not None:
             per_fill = fill_cost_bps / 10_000
-            raw_close = float(bar["close"])
+            raw_close = float(closes[bar_index])
             marked_exit = raw_close * (1 - per_fill if position == 1 else 1 + per_fill)
             open_return = marked_exit / entry_exec - 1 if position == 1 else entry_exec / marked_exit - 1
             mark *= max(1 + open_return - funding_fraction(bar_index), 0.0)
-        equity_curve.append({"index": bar_index, "timestamp": pd.Timestamp(bar["date"]).isoformat(), "equity": _round(mark)})
+        equity_curve.append({"index": bar_index, "timestamp": pd.Timestamp(dates[bar_index]).isoformat(), "equity": _round(mark)})
 
         pending = Decision(Action.HOLD)
         if bar_index >= end_exclusive - 1:
@@ -308,7 +312,7 @@ def run_offline_replay(
         })
         decisions.append(decision_record)
 
-    close(end_exclusive - 1, float(bars.iloc[end_exclusive - 1]["close"]), "window-end")
+    close(end_exclusive - 1, float(closes[end_exclusive - 1]), "window-end")
     if equity_curve:
         equity_curve[-1]["equity"] = _round(realized_equity)
     peak, maximum_drawdown, drawdowns = 0.0, 0.0, []
