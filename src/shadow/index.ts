@@ -39,3 +39,8 @@ export {
   createShadowIntentBoundary,
 } from './ShadowIntentBoundary';
 export type { ObserveResult } from './ShadowIntentBoundary';
+export {
+  ShadowEventLedger,
+  LEDGER_ENTRY_SCHEMA_VERSION,
+} from './ShadowEventLedger';
+export type { ShadowLedgerEntry } from './ShadowEventLedger';
