@@ -5,11 +5,9 @@
  * NOT APPROVED FOR PAPER TESTNET OR LIVE.
  */
 import * as crypto from 'node:crypto';
-import { createRequire } from 'node:module';
+import fs = require('node:fs');
 import * as path from 'node:path';
 import type { Stats } from 'node:fs';
-const require = createRequire(import.meta.url);
-const fs = require('node:fs') as typeof import('node:fs');
 import { canonicalSerialize } from './CanonicalJson';
 import type { CanonicalShadowEvent } from './CanonicalShadowEvent';
 import { verifyCanonicalShadowEvent } from './CanonicalShadowEvent';
