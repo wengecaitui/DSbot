@@ -127,6 +127,9 @@ class Stage5ResearchTests(unittest.TestCase):
         decision = build_stage5_validation_decision(SOURCE, REGISTRY_RAW, EVALUATION_RAW, DATASET_RAW, value)
         self.assertEqual(before, canonical_json_bytes(value))
         verify_stage5_validation_decision(decision, SOURCE, REGISTRY_RAW, EVALUATION_RAW, DATASET_RAW, value)
+        round_trip = __import__("json").loads(canonical_json_bytes(value))
+        round_trip_decision = __import__("json").loads(canonical_json_bytes(decision))
+        verify_stage5_validation_decision(round_trip_decision, SOURCE, REGISTRY_RAW, EVALUATION_RAW, DATASET_RAW, round_trip)
         changed = copy.deepcopy(decision); changed["safety"]["paperApproved"] = True
         with self.assertRaises(ValueError):
             verify_stage5_validation_decision(changed, SOURCE, REGISTRY_RAW, EVALUATION_RAW, DATASET_RAW, value)

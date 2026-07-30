@@ -161,15 +161,23 @@ def main() -> None:
     parser.add_argument("--decision-output", type=Path, required=True)
     parser.add_argument("--verify-results", type=Path)
     parser.add_argument("--verify-decision", type=Path)
+    parser.add_argument("--results-input", type=Path)
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     registry_raw, registry = _read_json(args.registry)
     evaluation_raw, evaluation = _read_json(args.evaluation_spec)
     dataset_raw, dataset = _read_json(args.dataset_manifest)
-    if args.verify_results and args.verify_decision:
+    if args.verify_results and args.verify_decision and args.results_input is None:
         _, results = _read_json(args.verify_results)
         _, decision = _read_json(args.verify_decision)
         verify_stage5_validation_decision(decision, args.source_commit, registry_raw, evaluation_raw, dataset_raw, results)
+    elif args.results_input is not None:
+        if args.private_data_dir is not None or args.results_output is not None or args.verify_results is not None or args.verify_decision is not None:
+            parser.error("results-input mode only rebuilds the decision")
+        _, results = _read_json(args.results_input)
+        decision = build_stage5_validation_decision(args.source_commit, registry_raw, evaluation_raw, dataset_raw, results)
+        verify_stage5_validation_decision(decision, args.source_commit, registry_raw, evaluation_raw, dataset_raw, results)
+        _write_exclusive(args.decision_output, decision)
     else:
         if args.private_data_dir is None or args.results_output is None:
             parser.error("generation requires private data and results output")

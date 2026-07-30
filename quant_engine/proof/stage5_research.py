@@ -76,7 +76,7 @@ def summarize_assets(assets: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if not isinstance(item, Mapping) or item.get("symbol") not in _SYMBOLS or item["symbol"] in by_symbol:
             raise ValueError("RESEARCH_ASSET_INVALID")
         metrics = item.get("metrics")
-        if not isinstance(metrics, Mapping) or tuple(metrics) != _METRICS:
+        if not isinstance(metrics, Mapping) or set(metrics) != set(_METRICS):
             raise ValueError("RESEARCH_METRICS_INVALID")
         for name in _METRICS:
             _finite_number(metrics[name], f"RESEARCH_METRIC_{name}")
@@ -107,7 +107,7 @@ def aggregate_fold_metrics(fold_metrics: Sequence[Mapping[str, Any]]) -> dict[st
     if not isinstance(fold_metrics, Sequence) or isinstance(fold_metrics, (str, bytes)) or len(fold_metrics) != 3:
         raise ValueError("RESEARCH_FOLD_METRIC_CARDINALITY_INVALID")
     for metrics in fold_metrics:
-        if not isinstance(metrics, Mapping) or tuple(metrics) != _METRICS:
+        if not isinstance(metrics, Mapping) or set(metrics) != set(_METRICS):
             raise ValueError("RESEARCH_FOLD_METRICS_INVALID")
         for name in _METRICS:
             _finite_number(metrics[name], f"RESEARCH_FOLD_METRIC_{name}")
