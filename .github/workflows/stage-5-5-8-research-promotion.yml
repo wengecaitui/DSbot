@@ -1,0 +1,101 @@
+name: Stage 5.5-5.8 Research and Promotion Decision
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/stage-5-5-8-research-promotion.yml'
+      - 'quant_engine/proof/stage5_research.py'
+      - 'quant_engine/proof/stage5_promotion.py'
+      - 'quant_engine/tests/test_stage5_research.py'
+      - 'quant_engine/tests/test_stage5_promotion.py'
+      - 'scripts/run-stage-5-research.py'
+      - 'scripts/generate-stage-5-promotion-decision.py'
+      - 'tests/fixtures/stage-5-research/**'
+      - 'docs/releases/stage-5-5-8-research-promotion.md'
+
+permissions:
+  contents: read
+
+jobs:
+  research-promotion:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      EVIDENCE_DIR: artifacts/evidence
+      RESULT_DIR: tests/fixtures/stage-5-research
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install -r quant_engine/requirements.txt
+          npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Run focused research and promotion tests
+        run: python -m unittest quant_engine.tests.test_stage5_research quant_engine.tests.test_stage5_promotion quant_engine.tests.test_stage5_harness
+      - name: Download authoritative Stage 5.1 and Stage 5.3 artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$EVIDENCE_DIR/evaluation" "$EVIDENCE_DIR/registry"
+          gh run download 30534333283 -n stage-5-evaluation-spec-913646777a64aa801c7dc263701802249164bf97 -D "$EVIDENCE_DIR/evaluation"
+          gh run download 30541001265 -n stage-5-candidate-registry-2115bfa277d2ca2eb582a010e248f369096cb6fa -D "$EVIDENCE_DIR/registry"
+      - name: Independently verify validation decision
+        shell: bash
+        run: |
+          VALIDATION_SOURCE="$(python -c 'import json; print(json.load(open("tests/fixtures/stage-5-research/stage-5-validation-decision.json"))["sourceCommit"])')"
+          python scripts/run-stage-5-research.py \
+            --source-commit "$VALIDATION_SOURCE" \
+            --registry "$EVIDENCE_DIR/registry/stage-5-candidate-registry.json" \
+            --evaluation-spec "$EVIDENCE_DIR/evaluation/stage-5-evaluation-spec.json" \
+            --dataset-manifest tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json \
+            --verify-results "$RESULT_DIR/stage-5-research-results.json" \
+            --verify-decision "$RESULT_DIR/stage-5-validation-decision.json" \
+            --decision-output "$RESULT_DIR/stage-5-validation-decision.json"
+      - name: Independently verify promotion decision
+        shell: bash
+        run: |
+          PROMOTION_SOURCE="$(python -c 'import json; print(json.load(open("tests/fixtures/stage-5-research/stage-5-promotion-decision.json"))["sourceCommit"])')"
+          python scripts/generate-stage-5-promotion-decision.py \
+            --source-commit "$PROMOTION_SOURCE" \
+            --entry-gate tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json \
+            --evaluation-spec "$EVIDENCE_DIR/evaluation/stage-5-evaluation-spec.json" \
+            --dataset-manifest tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json \
+            --candidate-registry "$EVIDENCE_DIR/registry/stage-5-candidate-registry.json" \
+            --research-results "$RESULT_DIR/stage-5-research-results.json" \
+            --validation-decision "$RESULT_DIR/stage-5-validation-decision.json" \
+            --verify "$RESULT_DIR/stage-5-promotion-decision.json"
+      - name: Upload research and promotion evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-5-research-promotion-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            tests/fixtures/stage-5-research/stage-5-research-results.json
+            tests/fixtures/stage-5-research/stage-5-validation-decision.json
+            tests/fixtures/stage-5-research/stage-5-promotion-decision.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed evidence attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: 'tests/fixtures/stage-5-research/*.json'
