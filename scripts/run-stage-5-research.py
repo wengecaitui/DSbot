@@ -36,11 +36,11 @@ def _read_json(path: Path) -> tuple[bytes, dict[str, Any]]:
 
 def _read_rows(path: Path, expected_sha256: str) -> list[list[Any]]:
     raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != expected_sha256:
-        raise ValueError("RESEARCH_PRIVATE_ROWS_SHA256_MISMATCH")
     rows = json.loads(raw.decode("utf-8"))
     if not isinstance(rows, list) or raw != canonical_json_bytes(rows) + b"\n":
         raise ValueError("RESEARCH_PRIVATE_ROWS_NOT_CANONICAL")
+    if hashlib.sha256(canonical_json_bytes(rows)).hexdigest() != expected_sha256:
+        raise ValueError("RESEARCH_PRIVATE_ROWS_SHA256_MISMATCH")
     return rows
 
 
