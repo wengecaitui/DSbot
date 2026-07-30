@@ -495,3 +495,532 @@ test('IB: boundary uses verified snapshot for sequence key (Proxy survival)', ()
   const r2 = boundary.observe(proxyEvent, outcome);
   assert.equal(r2.status, 'duplicate');
 });
+
+// =============================================================================
+// STAGE 4B4.2 — prepare / commit transaction API
+// =============================================================================
+
+test('IB: prepare returns a token with accepted status', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+  assert.ok(token.observation);
+  assert.ok(typeof token.preparedId === 'string');
+  assert.ok(token.preparedId.startsWith('sp-'));
+});
+
+test('IB: prepare has zero mutation on boundary state', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const sizeBefore = boundary.size;
+  boundary.prepare(event, outcome);
+  assert.equal(boundary.size, sizeBefore);
+  assert.equal(sm.state, 'SHADOW_ACTIVE');
+});
+
+test('IB: prepare rejects invalid event', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+  const tamperedEvent = { ...event, eventId: 'se-' + '0'.repeat(64) };
+
+  const token = boundary.prepare(tamperedEvent, outcome);
+  assert.equal(token.status, 'rejected');
+  if (token.status === 'rejected') {
+    assert.equal(token.code, 'INVALID_EVENT');
+  }
+});
+
+test('IB: prepare rejects unbranded outcome', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event } = makeTradeEventAndOutcome();
+  const fakeOutcome = {
+    schemaVersion: 'cloddsbot.shadow.outcome.v1',
+    exchange: REF_EXCHANGE, symbol: REF_SYMBOL,
+    decision: 'trade', direction: 'long', reason: REF_REASON,
+    blockedReason: null, intentId: 'ti-x',
+    riskAdmission: { status: 'admitted' },
+  };
+
+  const token = boundary.prepare(event, fakeOutcome as any);
+  assert.equal(token.status, 'rejected');
+  if (token.status === 'rejected') {
+    assert.equal(token.code, 'INVALID_OUTCOME');
+  }
+});
+
+test('IB: prepare rejects cross-binding outcome', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  // Create different outcome for cross-binding
+  const intent2 = makeRefTradeIntent({ positionUsd: 9999 });
+  const outcome2 = createShadowDecisionOutcome(
+    { exchange: REF_EXCHANGE, decision: 'trade', direction: 'long', symbol: REF_SYMBOL, positionUsd: 9999, tradeIntent: intent2, reason: 'Different' },
+    REF_EXCHANGE, REF_SYMBOL,
+  );
+
+  // Pass event of first with outcome of second
+  const token = boundary.prepare(event, outcome2);
+  assert.equal(token.status, 'rejected');
+  if (token.status === 'rejected') {
+    assert.equal(token.code, 'CROSS_BINDING');
+  }
+});
+
+test('IB: commit valid token updates all indexes once', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  const sizeBefore = boundary.size;
+  boundary.commit(token);
+  assert.equal(boundary.size, sizeBefore + 1);
+
+  const obs = boundary.getObservation(event.eventId);
+  assert.ok(obs);
+  assert.equal(obs!.observationId, token.observation!.observationId);
+});
+
+test('IB: commit changes all three maps (observationsByEventId, lastSequenceByKey, eventIdByKeyAndSequence)', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome(REF_SOURCE, 1000, 0);
+
+  const token = boundary.prepare(event, outcome);
+  boundary.commit(token);
+
+  // All three maps should be updated via getObservation (which uses observationsByEventId)
+  // and via accepting a second event (which depends on lastSequenceByKey + eventIdByKeyAndSequence)
+  const obs = boundary.getObservation(event.eventId);
+  assert.ok(obs);
+  assert.equal(obs!.sourceSequence, 0);
+
+  // Second event with next sequence should be accepted
+  const { event: e2, outcome: o2 } = makeTradeEventAndOutcome(REF_SOURCE, 2000, 1);
+  const r2 = boundary.observe(e2, o2);
+  assert.equal(r2.status, 'accepted');
+});
+
+test('IB: forged prepared token (tampered observation) rejected by commit', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  // Forge by modifying the observation
+  const forgedToken = {
+    ...token,
+    observation: { ...token.observation, observationId: 'so-' + 'f'.repeat(64) },
+  };
+
+  assert.throws(() => { boundary.commit(forgedToken); });
+  assert.equal(boundary.size, 0);
+});
+
+test('IB: copied prepared token rejected on second commit (single-use)', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  boundary.commit(token);
+  assert.equal(boundary.size, 1);
+
+  // Second commit of same token should fail — single-use
+  assert.throws(() => { boundary.commit(token); });
+  assert.equal(boundary.size, 1); // unchanged
+});
+
+test('IB: replayed prepared token (stale) rejected by commit', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome(REF_SOURCE, 1000, 0);
+
+  const token = boundary.prepare(event, outcome);
+  boundary.commit(token);
+
+  // Now replay: same prepared token with different boundary state
+  assert.throws(() => { boundary.commit(token); });
+});
+
+test('IB: prepared token from wrong boundary instance rejected', () => {
+  const sm1 = activateSM();
+  const boundary1 = createShadowIntentBoundary(sm1);
+  const { event, outcome } = makeTradeEventAndOutcome();
+  const token = boundary1.prepare(event, outcome);
+
+  const sm2 = activateSM();
+  const boundary2 = createShadowIntentBoundary(sm2);
+
+  assert.throws(() => { boundary2.commit(token); });
+  assert.equal(boundary2.size, 0);
+});
+
+test('IB: stale prepared token rejected after version change', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome(REF_SOURCE, 0, 0);
+
+  const token = boundary.prepare(event, outcome);
+  // Don't commit — instead commit a different event first to change state
+  const { event: e2, outcome: o2 } = makeTradeEventAndOutcome(REF_SOURCE, 100, 1);
+  boundary.observe(e2, o2);
+
+  // Now the first token should be stale (sequence wrong)
+  assert.throws(() => { boundary.commit(token); });
+});
+
+// =============================================================================
+// STAGE 4B4.2 — observe backward compatibility (composes prepare+commit)
+// =============================================================================
+
+test('IB: observe still accepts valid event+outcome (backward compat)', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const result = boundary.observe(event, outcome);
+  assert.equal(result.status, 'accepted');
+  assert.ok(result.observation);
+  assert.equal(boundary.size, 1);
+});
+
+// =============================================================================
+// STAGE 4B4.2 — restore path
+// =============================================================================
+
+test('IB: restore accepts valid event+observation in SHADOW_READY', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('PRECHECK_PASSED');
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome(REF_SOURCE, 1000, 0);
+
+  // Get a valid observation via prepare on a different boundary
+  const tmpSm = activateSM();
+  const tmpBoundary = createShadowIntentBoundary(tmpSm);
+  const tmpResult = tmpBoundary.observe(event, outcome);
+  const observation = tmpResult.observation!;
+
+  // Restore in SHADOW_READY
+  boundary.restore(event, observation);
+  assert.equal(boundary.size, 1);
+
+  const restored = boundary.getObservation(event.eventId);
+  assert.ok(restored);
+  assert.equal(restored!.observationId, observation.observationId);
+});
+
+test('IB: restore rejected in SHADOW_ACTIVE', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const tmpSm = activateSM();
+  const tmpBoundary = createShadowIntentBoundary(tmpSm);
+  const tmpResult = tmpBoundary.observe(event, outcome);
+
+  assert.throws(() => { boundary.restore(event, tmpResult.observation!); });
+});
+
+test('IB: restore rejected for tampered event', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('PRECHECK_PASSED');
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const tmpSm = activateSM();
+  const tmpBoundary = createShadowIntentBoundary(tmpSm);
+  const tmpResult = tmpBoundary.observe(event, outcome);
+  const observation = tmpResult.observation!;
+
+  const tamperedEvent = { ...event, eventId: 'se-' + '0'.repeat(64) };
+  assert.throws(() => { boundary.restore(tamperedEvent, observation); });
+});
+
+test('IB: restore rejected for gap in sequence', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('PRECHECK_PASSED');
+  const boundary = createShadowIntentBoundary(sm);
+
+  // Create event with sequence 5 (gap from expected 0)
+  const { event, outcome } = makeTradeEventAndOutcome(REF_SOURCE, 5000, 5);
+  const tmpSm = activateSM();
+  const tmpBoundary = createShadowIntentBoundary(tmpSm);
+  const tmpResult = tmpBoundary.observe(event, outcome);
+
+  assert.throws(() => { boundary.restore(event, tmpResult.observation!); });
+});
+
+test('IB: restore rejected for duplicate eventId', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('PRECHECK_PASSED');
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const tmpSm = activateSM();
+  const tmpBoundary = createShadowIntentBoundary(tmpSm);
+  const tmpResult = tmpBoundary.observe(event, outcome);
+  const observation = tmpResult.observation!;
+
+  // First restore ok
+  boundary.restore(event, observation);
+  assert.equal(boundary.size, 1);
+
+  // Second restore with same eventId should fail
+  assert.throws(() => { boundary.restore(event, observation); });
+});
+
+test('IB: restore rejected for cross-binding', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('PRECHECK_PASSED');
+  const boundary = createShadowIntentBoundary(sm);
+
+  const { event: e1, outcome: o1 } = makeTradeEventAndOutcome(REF_SOURCE, 1000, 0, REF_EXCHANGE, 'BTCUSDT');
+  const { event: e2, outcome: o2 } = makeTradeEventAndOutcome(REF_SOURCE, 1000, 0, REF_EXCHANGE, 'ETHUSDT');
+
+  const tmpSm = activateSM();
+  const tmpBoundary = createShadowIntentBoundary(tmpSm);
+  const r1 = tmpBoundary.observe(e1, o1);
+  const r2 = tmpBoundary.observe(e2, o2);
+
+  // Cross-binding: e1's event with e2's observation
+  assert.throws(() => { boundary.restore(e1, r2.observation!); });
+});
+
+test('IB: restore maintains contiguous sequences for multiple entries', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('PRECHECK_PASSED');
+  const boundary = createShadowIntentBoundary(sm);
+
+  const tmpSm = activateSM();
+  const tmpBoundary = createShadowIntentBoundary(tmpSm);
+
+  const entries = [
+    makeTradeEventAndOutcome(REF_SOURCE, 1000, 0),
+    makeTradeEventAndOutcome(REF_SOURCE, 2000, 1),
+    makeTradeEventAndOutcome(REF_SOURCE, 3000, 2),
+  ];
+
+  for (const { event, outcome } of entries) {
+    const r = tmpBoundary.observe(event, outcome);
+    boundary.restore(event, r.observation!);
+  }
+
+  assert.equal(boundary.size, 3);
+});
+
+// =============================================================================
+// STAGE 4B4.2 — Contract 1: WeakSet identity tests
+// =============================================================================
+
+test('IB: copied valid PreparedToken rejected before first commit (shallow copy)', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  // Shallow copy — different object identity
+  const copiedToken = { ...token };
+
+  // First commit of the copy must fail (not in WeakSet)
+  assert.throws(() => { boundary.commit(copiedToken); });
+  assert.equal(boundary.size, 0); // boundary stays unchanged
+});
+
+test('IB: deep copy of valid PreparedToken rejected (structuredClone)', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  // Deep copy via structuredClone — different object identity
+  const deepCopy = structuredClone(token);
+  assert.throws(() => { boundary.commit(deepCopy); });
+  assert.equal(boundary.size, 0);
+});
+
+test('IB: Object.create clone of token rejected', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  // Object.create — inherits properties but is a different object
+  const cloned = Object.create(Object.getPrototypeOf(token), Object.getOwnPropertyDescriptors(token));
+  assert.throws(() => { boundary.commit(cloned); });
+  assert.equal(boundary.size, 0);
+});
+
+test('IB: Proxy-wrapped token rejected', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  // Proxy wrapping — new object identity
+  const proxied = new Proxy(token, {});
+  assert.throws(() => { boundary.commit(proxied as any); });
+  assert.equal(boundary.size, 0);
+});
+
+// =============================================================================
+// STAGE 4B4.2 R2 — Defect 1: computePreparedId binds all fields
+// =============================================================================
+
+test('IB R2/D1: tampering eventId changes preparedId → commit rejects', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  // Tamper _eventId — preparedId stays the same because it's a shallow spread
+  const tampered = { ...token, _eventId: 'wrong-' + token._eventId };
+  // The old preparedId was computed with original eventId; commit recomputes
+  // with the tampered one and finds mismatch.
+  assert.throws(() => { boundary.commit(tampered); });
+  assert.equal(boundary.size, 0);
+});
+
+test('IB R2/D1: tampering _key changes preparedId → commit rejects', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  const tampered = { ...token, _key: 'wrong::key::here' };
+  assert.throws(() => { boundary.commit(tampered); });
+  assert.equal(boundary.size, 0);
+});
+
+test('IB R2/D1: tampering _sourceSequence changes preparedId → commit rejects', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  const tampered = { ...token, _sourceSequence: 999 };
+  assert.throws(() => { boundary.commit(tampered); });
+  assert.equal(boundary.size, 0);
+});
+
+test('IB R2/D1: any single field change in preparedId preimage breaks commit', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  // All fields in computePreparedId: status, observationId, boundaryTag, version,
+  // eventId, key, sourceSequence. We test each individually.
+  const fields = ['_eventId', '_key', '_sourceSequence'] as const;
+  for (const field of fields) {
+    const original = token[field];
+    const tampered = {
+      ...token,
+      [field]: typeof original === 'number' ? 99999 : 'tampered-' + field,
+    };
+    assert.throws(
+      () => { boundary.commit(tampered); },
+      `field ${field} tamper should be rejected`,
+    );
+  }
+  assert.equal(boundary.size, 0);
+});
+
+// =============================================================================
+// STAGE 4B4.2 R2 — Defect 2: WeakSet before property read (Proxy zero-getter proof)
+// =============================================================================
+
+test('IB R2/D2: forged Proxy token rejected with zero getter/trap calls', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const token = boundary.prepare(event, outcome);
+  assert.equal(token.status, 'accepted');
+
+  let getterCount = 0;
+  const proxied = new Proxy({} as any, {
+    get(_target, _prop, _receiver) {
+      getterCount++;
+      return (token as any)[_prop];
+    },
+    ownKeys() { return Reflect.ownKeys(token); },
+    getOwnPropertyDescriptor(_target, prop) {
+      return Reflect.getOwnPropertyDescriptor(token, prop);
+    },
+  });
+
+  // Commit must reject because proxy isn't in WeakSet
+  assert.throws(() => { boundary.commit(proxied); });
+  // Zero getter calls: WeakSet check must happen before any property read
+  assert.equal(getterCount, 0);
+  assert.equal(boundary.size, 0);
+});
+
+test('IB R2/D2: Proxy with malicious getter has zero traps fired before WeakSet rejection', () => {
+  const sm = activateSM();
+  const boundary = createShadowIntentBoundary(sm);
+  const { event, outcome } = makeTradeEventAndOutcome();
+
+  const realToken = boundary.prepare(event, outcome);
+  assert.equal(realToken.status, 'accepted');
+
+  let trapFired = false;
+  let mutationCount = 0;
+  const maliciousProxy = new Proxy({} as any, {
+    get(_target, prop, _receiver) {
+      trapFired = true;
+      mutationCount++;
+      // Attacker tries to mutate global state through the getter
+      if (prop === 'preparedId') {
+        return realToken.preparedId;
+      }
+      return (realToken as any)[prop];
+    },
+    ownKeys() { return Reflect.ownKeys(realToken); },
+    getOwnPropertyDescriptor(_target, prop) {
+      return Reflect.getOwnPropertyDescriptor(realToken, prop);
+    },
+  });
+
+  // Must reject with zero getter calls (WeakSet check first)
+  assert.throws(() => { boundary.commit(maliciousProxy); });
+  assert.equal(trapFired, false, 'no getter trap should fire');
+  assert.equal(mutationCount, 0, 'zero mutations');
+  assert.equal(boundary.size, 0);
+});

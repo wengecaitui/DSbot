@@ -192,12 +192,12 @@ for (const e of ['PRECHECK_PASSED', 'PRECHECK_FAILED', 'ACTIVATE', 'PAUSE', 'RES
 }
 
 // PRECHECKED invalid events
-for (const e of ['BEGIN_PRECHECK', 'ACTIVATE', 'PAUSE', 'RESUME', 'RECOVERY_REQUIRED', 'FAIL']) {
+for (const e of ['BEGIN_PRECHECK', 'ACTIVATE', 'PAUSE', 'RESUME', 'FAIL']) {
   invalidTransitionsFor('PRECHECKED', e);
 }
 
 // SHADOW_READY invalid events
-for (const e of ['BEGIN_PRECHECK', 'PRECHECK_PASSED', 'PRECHECK_FAILED', 'PAUSE', 'RESUME', 'RECOVERY_REQUIRED']) {
+for (const e of ['BEGIN_PRECHECK', 'PRECHECK_PASSED', 'PRECHECK_FAILED', 'PAUSE', 'RESUME']) {
   invalidTransitionsFor('SHADOW_READY', e);
 }
 
@@ -217,6 +217,33 @@ for (const e of ['PRECHECK_PASSED', 'PRECHECK_FAILED', 'ACTIVATE', 'PAUSE', 'RES
 }
 
 // FAILED — already covered above
+
+// ─── 4B4.2 new transitions ──────────────────────────────────────────────────
+
+test('SM: PRECHECKED + RECOVERY_REQUIRED → RECOVERY_REQUIRED', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('RECOVERY_REQUIRED');
+  assert.equal(sm.state, 'RECOVERY_REQUIRED' as ShadowState);
+});
+
+test('SM: SHADOW_READY + RECOVERY_REQUIRED → RECOVERY_REQUIRED', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('PRECHECK_PASSED');
+  sm.transition('RECOVERY_REQUIRED');
+  assert.equal(sm.state, 'RECOVERY_REQUIRED' as ShadowState);
+});
+
+// RECOVERY_REQUIRED still restartable after new entry paths
+test('SM: RECOVERY_REQUIRED from PRECHECKED is restartable via BEGIN_PRECHECK', () => {
+  const sm = new ShadowRuntimeStateMachine();
+  sm.transition('BEGIN_PRECHECK');
+  sm.transition('RECOVERY_REQUIRED');
+  assert.equal(sm.state, 'RECOVERY_REQUIRED');
+  sm.transition('BEGIN_PRECHECK');
+  assert.equal(sm.state, 'PRECHECKED');
+});
 
 // ─── canTransition ───────────────────────────────────────────────────────────
 

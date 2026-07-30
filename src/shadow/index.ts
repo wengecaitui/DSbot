@@ -39,3 +39,20 @@ export {
   createShadowIntentBoundary,
 } from './ShadowIntentBoundary';
 export type { ObserveResult } from './ShadowIntentBoundary';
+export {
+  ShadowEventLedger,
+  LEDGER_ENTRY_SCHEMA_VERSION,
+} from './ShadowEventLedger';
+export type { ShadowLedgerEntry } from './ShadowEventLedger';
+export {
+  createShadowRuntimeSnapshot,
+  verifyShadowRuntimeSnapshot,
+  storeSnapshot,
+  loadSnapshot,
+  SNAPSHOT_SCHEMA_VERSION,
+} from './ShadowRuntimeSnapshot';
+export type { ShadowRuntimeSnapshot } from './ShadowRuntimeSnapshot';
+export {
+  ShadowRuntimeCoordinator,
+  startCoordinator,
+} from './ShadowRuntimeCoordinator';
