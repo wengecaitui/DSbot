@@ -34,6 +34,72 @@ class OfflineAdapter(Protocol):
     def decide(self, history: pd.DataFrame, parameters: Mapping[str, Any], context: StrategyContext) -> Action | Decision: ...
 
 
+class RegisteredOfflineAdapter(CompiledStrategyAdapter):
+    """Indexed equivalent of ``CompiledStrategyAdapter`` for bounded research.
+
+    Component outputs and ATR values are causal vector calculations.  The
+    indexed path avoids allocating a pandas history frame for every bar while
+    preserving the exact public ``decide`` semantics.
+    """
+
+    def __init__(self, spec: StrategySpec):
+        super().__init__(spec)
+        self._bars: pd.DataFrame | None = None
+        self._atr_cache: dict[tuple[str, str], float] = {}
+
+    def prime(self, bars: pd.DataFrame, parameters: Mapping[str, Any]) -> None:
+        super().prime(bars, parameters)
+        self._bars = bars.copy(deep=True)
+        parameter_key = canonical_sha256(parameters)
+        previous = bars["close"].shift(1)
+        true_range = pd.concat((
+            bars["high"] - bars["low"],
+            (bars["high"] - previous).abs(),
+            (bars["low"] - previous).abs(),
+        ), axis=1).max(axis=1)
+        atr = true_range.rolling(int(parameters["atr_period"]), min_periods=1).mean()
+        for index in range(len(bars)):
+            timestamp = pd.Timestamp(bars.iloc[index]["date"]).isoformat()
+            self._atr_cache[(parameter_key, timestamp)] = float(atr.iloc[index])
+
+    def decide_at(self, bar_index: int, parameters: Mapping[str, Any], context: StrategyContext) -> Action | Decision:
+        if self._bars is None or not (0 <= bar_index < len(self._bars)):
+            raise ValueError("OFFLINE_INDEXED_ADAPTER_NOT_PRIMED")
+        allowed = {canonical_json_bytes(item) for item in self.spec.parameters["candidateSets"]}
+        if canonical_json_bytes(dict(parameters)) not in allowed:
+            raise ValueError("STRATEGY_PARAMETERS_NOT_DECLARED")
+        timestamp = pd.Timestamp(self._bars.iloc[bar_index]["date"]).isoformat()
+        parameter_key = canonical_sha256(parameters)
+        outputs = self._output_cache.get((parameter_key, timestamp), {})
+        if not outputs:
+            return Action.HOLD
+        long_entry = self._entry("long", outputs)
+        short_entry = self._entry("short", outputs)
+        if long_entry and short_entry:
+            return Action.HOLD
+
+        def entry(action: Action) -> Decision:
+            stop = self._atr_cache[(parameter_key, timestamp)] * float(parameters["stop_atr"])
+            if not stop > 0:
+                return Decision(Action.HOLD)
+            return Decision(action, stop_distance=stop, take_profit_distance=stop * float(parameters["reward_risk"]))
+
+        maximum_holding = int(parameters["max_holding_bars"])
+        if context.position == 1:
+            if short_entry:
+                return entry(Action.ENTER_SHORT)
+            return Action.EXIT if self._exit("long", outputs) or context.bars_held >= maximum_holding else Action.HOLD
+        if context.position == -1:
+            if long_entry:
+                return entry(Action.ENTER_LONG)
+            return Action.EXIT if self._exit("short", outputs) or context.bars_held >= maximum_holding else Action.HOLD
+        if long_entry:
+            return entry(Action.ENTER_LONG)
+        if short_entry:
+            return entry(Action.ENTER_SHORT)
+        return Action.HOLD
+
+
 def bars_from_binance_rows(rows: Sequence[Sequence[Any]]) -> pd.DataFrame:
     values = []
     for row in rows:
@@ -204,11 +270,16 @@ def run_offline_replay(
         pending = Decision(Action.HOLD)
         if bar_index >= end_exclusive - 1:
             continue
-        history_limit = getattr(adapter, "history_limit", None)
-        history_start = 0 if history_limit is None else max(0, bar_index + 1 - int(history_limit))
-        history = bars.iloc[history_start:bar_index + 1].copy(deep=True)
         held = 0 if entry_index is None else bar_index - entry_index + 1
-        raw = adapter.decide(history, parameters, StrategyContext(position, entry_exec, stop_price, take_profit_price, held))
+        context = StrategyContext(position, entry_exec, stop_price, take_profit_price, held)
+        decide_at = getattr(adapter, "decide_at", None)
+        if callable(decide_at):
+            raw = decide_at(bar_index, parameters, context)
+        else:
+            history_limit = getattr(adapter, "history_limit", None)
+            history_start = 0 if history_limit is None else max(0, bar_index + 1 - int(history_limit))
+            history = bars.iloc[history_start:bar_index + 1].copy(deep=True)
+            raw = adapter.decide(history, parameters, context)
         pending = Decision(raw) if isinstance(raw, Action) else raw
         if not isinstance(pending, Decision) or not isinstance(pending.action, Action):
             raise ValueError("OFFLINE_DECISION_INVALID")
@@ -329,7 +400,7 @@ def evaluate_registered_candidate(
     if len(parameter_sets) != 1 or canonical_sha256(parameter_sets[0]["values"]) != parameter_id:
         raise ValueError("OFFLINE_PARAMETER_NOT_REGISTERED")
     spec = strategy_spec_from_registry(candidates[0])
-    adapter = CompiledStrategyAdapter(spec)
+    adapter = RegisteredOfflineAdapter(spec)
     causal_bars = bars.iloc[:end_exclusive].copy(deep=True)
     adapter.prime(causal_bars, parameter_sets[0]["values"])
     return run_offline_replay(adapter, causal_bars, parameter_sets[0]["values"], start, end_exclusive, cost_model)

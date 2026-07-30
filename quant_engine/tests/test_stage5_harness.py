@@ -9,7 +9,8 @@ import pandas as pd
 
 from quant_engine.proof.stage5_candidate import build_stage5_candidate_registry
 from quant_engine.proof.stage5_evaluation import build_stage5_evaluation_spec, canonical_json_bytes
-from quant_engine.proof.stage5_harness import METRICS, bars_from_binance_rows, run_offline_replay, strategy_spec_from_registry
+from quant_engine.proof.stage5_harness import METRICS, RegisteredOfflineAdapter, bars_from_binance_rows, run_offline_replay, strategy_spec_from_registry
+from quant_engine.proof.strategy_spec import CompiledStrategyAdapter
 from quant_engine.proof.strategy_adapter import Action, Decision
 
 
@@ -102,6 +103,20 @@ class Stage5HarnessTests(unittest.TestCase):
         candidate["spec"]["warmupBars"] += 1
         with self.assertRaisesRegex(ValueError, "OFFLINE_CANDIDATE_SPEC_ID_INVALID"):
             strategy_spec_from_registry(candidate)
+
+    def test_indexed_registered_adapter_matches_reference_decide_path(self) -> None:
+        registry = build_stage5_candidate_registry(SOURCE, CANDIDATE_RAW, EVALUATION_RAW, DATASET_RAW)
+        candidate = registry["candidates"][0]
+        parameters = candidate["parameterSets"][0]["values"]
+        spec = strategy_spec_from_registry(candidate)
+        frame = bars(180).drop(columns=["sequence"])
+        indexed = RegisteredOfflineAdapter(spec)
+        indexed.prime(frame, parameters)
+        reference = CompiledStrategyAdapter(spec)
+        reference.prime(frame, parameters)
+        fast = run_offline_replay(indexed, frame, parameters, 100, 170, COST)
+        slow = run_offline_replay(reference, frame, parameters, 100, 170, COST)
+        self.assertEqual(fast, slow)
 
     def test_binance_rows_validate_and_convert(self) -> None:
         rows = [[0, "10", "11", "9", "10.5", "100", 299999, "0", 1, "0", "0", "0"], [300000, "10.5", "12", "10", "11", "101", 599999, "0", 1, "0", "0", "0"]]
