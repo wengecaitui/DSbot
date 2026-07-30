@@ -58,7 +58,9 @@ class Stage5CandidateRegistryTests(unittest.TestCase):
                 build_stage5_candidate_registry(SOURCE, *changed)
 
     def test_source_and_lineage_identity_constants_are_exact(self) -> None:
-        self.assertEqual(hashlib.sha256(CANDIDATE_RAW).hexdigest(), self.registry["inputs"]["candidateManifest"]["rawSha256"])
+        artifact_raw = CANDIDATE_RAW.replace(b"\r\n", b"\n")
+        self.assertEqual(hashlib.sha256(artifact_raw).hexdigest(), self.registry["inputs"]["candidateManifest"]["artifactRawSha256"])
+        self.assertEqual(self.registry["inputs"]["candidateManifest"]["stage5EvaluationLegacyWindowsRawSha256"], "919146d3a73e22f9b3732aa735ff8fab967a2d4f9eb9bb57ce4a3a5d86734899")
         self.assertEqual(hashlib.sha256(EVALUATION_RAW).hexdigest(), self.registry["inputs"]["evaluationSpec"]["rawSha256"])
         self.assertEqual(hashlib.sha256(DATASET_RAW).hexdigest(), self.registry["inputs"]["datasetManifest"]["rawSha256"])
 

@@ -12,7 +12,8 @@ from quant_engine.proof.stage5_evaluation import canonical_json_bytes, canonical
 
 
 SCHEMA_VERSION = "stage-5.candidate-registry.v1"
-CANDIDATE_RAW_SHA256 = "919146d3a73e22f9b3732aa735ff8fab967a2d4f9eb9bb57ce4a3a5d86734899"
+CANDIDATE_ARTIFACT_RAW_SHA256 = "3d110db1052b19ef76b4aabd571f2c610a5c68b2485d362a9dd50df61787e298"
+CANDIDATE_WINDOWS_CHECKOUT_RAW_SHA256 = "919146d3a73e22f9b3732aa735ff8fab967a2d4f9eb9bb57ce4a3a5d86734899"
 CANDIDATE_MANIFEST_ID = "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa"
 CANDIDATE_SOURCE_COMMIT = "80f12966081e3851424f820dd3428249d5537eb9"
 EVALUATION_RAW_SHA256 = "62bf8ccf9fc18b2818c1d24d05426128092e5dd464760daed89986a947adbc1b"
@@ -37,6 +38,21 @@ def _parse_exact(raw: bytes, digest: str, label: str) -> dict[str, Any]:
     return value
 
 
+def _parse_candidate_artifact(raw: bytes) -> dict[str, Any]:
+    """Accept the attested LF bytes or their known Windows checkout form.
+
+    Stage 5.1 recorded the CRLF checkout digest.  The authoritative Stage 4A12
+    artifact is LF.  Both are exact-hashed here, then the LF artifact bytes are
+    used for the deterministic registry so platform checkout settings cannot
+    alter the receipt.
+    """
+    supplied_digest = hashlib.sha256(raw).hexdigest()
+    if supplied_digest not in {CANDIDATE_ARTIFACT_RAW_SHA256, CANDIDATE_WINDOWS_CHECKOUT_RAW_SHA256}:
+        raise ValueError("CANDIDATE_MANIFEST_RAW_SHA256_MISMATCH")
+    artifact_raw = raw.replace(b"\r\n", b"\n")
+    return _parse_exact(artifact_raw, CANDIDATE_ARTIFACT_RAW_SHA256, "CANDIDATE_MANIFEST")
+
+
 def _verify_self_id(value: Mapping[str, Any], key: str, expected: str, label: str) -> None:
     unsigned = dict(value)
     identity = unsigned.pop(key, None)
@@ -49,7 +65,7 @@ def _verify_inputs(
     evaluation_raw: bytes,
     dataset_raw: bytes,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    candidate = _parse_exact(candidate_raw, CANDIDATE_RAW_SHA256, "CANDIDATE_MANIFEST")
+    candidate = _parse_candidate_artifact(candidate_raw)
     evaluation = _parse_exact(evaluation_raw, EVALUATION_RAW_SHA256, "EVALUATION_SPEC")
     dataset = _parse_exact(dataset_raw, DATASET_RAW_SHA256, "DATASET_MANIFEST")
 
@@ -70,7 +86,7 @@ def _verify_inputs(
     }:
         raise ValueError("EVALUATION_SEARCH_BUDGET_INVALID")
     lineage = evaluation.get("evaluationLineage", {})
-    if lineage.get("stage4A12CandidateManifestRawSha256") != CANDIDATE_RAW_SHA256:
+    if lineage.get("stage4A12CandidateManifestRawSha256") != CANDIDATE_WINDOWS_CHECKOUT_RAW_SHA256:
         raise ValueError("CANDIDATE_LINEAGE_DIGEST_MISMATCH")
     if lineage.get("stage4A12CandidateManifestSourceCommit") != CANDIDATE_SOURCE_COMMIT:
         raise ValueError("CANDIDATE_LINEAGE_COMMIT_MISMATCH")
@@ -149,7 +165,13 @@ def build_stage5_candidate_registry(
         "status": "CANDIDATES_REGISTERED_LOCKED_TEST_SEALED",
         "sourceCommit": source_commit,
         "inputs": {
-            "candidateManifest": {"rawSha256": CANDIDATE_RAW_SHA256, "manifestId": CANDIDATE_MANIFEST_ID, "sourceCommit": CANDIDATE_SOURCE_COMMIT},
+            "candidateManifest": {
+                "artifactRawSha256": CANDIDATE_ARTIFACT_RAW_SHA256,
+                "stage5EvaluationLegacyWindowsRawSha256": CANDIDATE_WINDOWS_CHECKOUT_RAW_SHA256,
+                "manifestId": CANDIDATE_MANIFEST_ID,
+                "sourceCommit": CANDIDATE_SOURCE_COMMIT,
+                "artifactWorkflowRunId": 30235971008,
+            },
             "evaluationSpec": {"rawSha256": EVALUATION_RAW_SHA256, "evaluationSpecId": EVALUATION_SPEC_ID, "sourceCommit": evaluation["sourceCommit"]},
             "datasetManifest": {"rawSha256": DATASET_RAW_SHA256, "datasetManifestId": DATASET_MANIFEST_ID, "sourceCommit": dataset["sourceCommit"]},
         },

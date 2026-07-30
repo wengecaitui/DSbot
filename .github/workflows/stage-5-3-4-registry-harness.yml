@@ -51,23 +51,24 @@ jobs:
         run: npm run ci
       - name: Run focused offline contract tests
         run: python -m unittest quant_engine.tests.test_stage5_candidate quant_engine.tests.test_stage5_candidate_cli quant_engine.tests.test_stage5_harness
-      - name: Download authoritative Stage 5.1 constitution
+      - name: Download authoritative Stage 4A12 candidate and Stage 5.1 constitution
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p artifacts/evidence
+          gh run download 30235971008 -n stage-4a12-candidate-proof-4b34e6a58e0b7bf93774bc8f3055fea60e28117d -D artifacts/evidence/stage4a12
           gh run download 30534333283 -n stage-5-evaluation-spec-913646777a64aa801c7dc263701802249164bf97 -D artifacts/evidence
       - name: Generate and independently verify registry
         run: |
           python scripts/generate-stage-5-candidate-registry.py \
             --source-commit "$SOURCE_COMMIT" \
-            --candidate-manifest docs/releases/stage-4a12-candidate-manifest.json \
+            --candidate-manifest artifacts/evidence/stage4a12/recomputed-candidate-manifest.json \
             --evaluation-spec artifacts/evidence/stage-5-evaluation-spec.json \
             --dataset-manifest tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json \
             --output "$REGISTRY_PATH"
           python scripts/generate-stage-5-candidate-registry.py \
             --source-commit "$SOURCE_COMMIT" \
-            --candidate-manifest docs/releases/stage-4a12-candidate-manifest.json \
+            --candidate-manifest artifacts/evidence/stage4a12/recomputed-candidate-manifest.json \
             --evaluation-spec artifacts/evidence/stage-5-evaluation-spec.json \
             --dataset-manifest tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json \
             --verify "$REGISTRY_PATH"

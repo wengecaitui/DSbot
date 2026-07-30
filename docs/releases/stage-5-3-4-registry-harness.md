@@ -6,4 +6,6 @@ The offline harness evaluates completed-bar decisions at the next open. It model
 
 All generated records are labelled `OFFLINE_EVALUATION_RECORD`, `NOT_A_PAPER_FILL`, `NOT_AN_EXCHANGE_FILL`, and `NOT_A_REAL_ORDER`. The implementation imports no Paper, Testnet, Live, broker, or exchange adapter and authorizes no runtime.
 
-CI downloads the authoritative Stage 5.1 evaluation constitution, exact-hashes it with the checked-in Stage 4A12 candidate manifest and Stage 5.2 dataset receipt, generates the bounded registry for the exact source commit, independently recomputes it, uploads the raw bytes, and produces an OIDC-backed attestation.
+CI downloads the authoritative Stage 4A12 candidate artifact and Stage 5.1 evaluation constitution, exact-hashes them with the Stage 5.2 dataset receipt, generates the bounded registry for the exact source commit, independently recomputes it, uploads the raw bytes, and produces an OIDC-backed attestation.
+
+The registry also makes a pre-existing transport distinction explicit: Stage 5.1 recorded SHA-256 `919146d3...` for a Windows CRLF checkout, while the authoritative Stage 4A12 workflow artifact uses LF bytes with SHA-256 `3d110db1...`. The verifier exact-hashes only these two known encodings, canonicalizes to the attested LF artifact bytes, records both digests, and rejects every other byte stream. No candidate semantics or frozen research rule changes.
