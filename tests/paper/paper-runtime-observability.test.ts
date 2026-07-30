@@ -19,7 +19,7 @@ import type { PaperAccountConfig } from '../../src/types/paper-account';
 const EXCH_BG: ExchangeId = 'bitget';
 const EXCH_BN: ExchangeId = 'binance';
 const FUTURE = Date.now() + 120_000;
-let clockMs = FUTURE;
+let clockMs = FUTURE - 60_000;
 
 function deterministicClock() { return { now: () => clockMs }; }
 function advance(ms: number) { clockMs += ms; }
@@ -47,9 +47,10 @@ async function makeBinding(accountId: string, exchange: ExchangeId, cash: number
   const ac: PaperAccountConfig = { accountId, exchange, initialCashUsd: cash };
   const ks = new KillSwitch(exchange, { totalCapitalUsd: cash, maxPositionPct: 1, maxSinglePositionPct: 1, allowConcentration: true });
   const fp = new FastPipeline({
-    exchange, router: { exchange, getBiasReport: () => ({ exchange, updatedAt: FUTURE, assets: [{ symbol, direction, confidence: 85, suggestedPositionPct: 0.1 }], whitelist: [symbol] }), getConfig: () => ({ maxBiasReportAgeHours: 999 }), killSwitch: ks },
+    exchange, router: { exchange, getBiasReport: () => ({ exchange, updatedAt: clockMs, assets: [{ symbol, direction, confidence: 85, suggestedPositionPct: 0.1 }], whitelist: [symbol] }), getConfig: () => ({ maxBiasReportAgeHours: 999 }), killSwitch: ks },
     indicatorService: { calculateAll: async () => [momentumResult()] },
     marketData: { exchange, snapshotStore: store, candleStore: candle, interval: '1m', minimumSeries: 100, seriesLimit: 200 },
+    clock: deterministicClock(),
   });
   const svc = await PaperExecutionService.open(ac, new PaperLedgerStore(ac, { baseDir: d }));
   return { binding: { accountId, exchange, pipeline: fp, service: svc, coordinator: new PaperFastPathCoordinator(fp, svc, exchange) }, dir: d };
@@ -267,13 +268,13 @@ test('26. health after unregister still accessible', async () => {
   finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test('27. existing registry behavior unchanged', async (t) => {
+test('27. existing registry behavior unchanged', async () => {
   const { binding, dir } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
   try { const r = new PaperRuntimeRegistry(); r.register(binding); const first = await r.run('a1', SIG, P);
     assert.equal(r.snapshot('a1', EXCH_BG).processedFills, 1);
     assert.ok(first.pipelineResult.tradeIntent, 'first run must produce a trade intent');
     const firstCreatedAt = first.pipelineResult.tradeIntent.createdAt;
-    t.mock.method(Date, 'now', () => firstCreatedAt + 1);
+    advance(1);
     await r.run('a1', SIG, P);
     assert.equal(r.snapshot('a1', EXCH_BG).processedFills, 2); }
   finally { await fs.rm(dir, { recursive: true, force: true }); }

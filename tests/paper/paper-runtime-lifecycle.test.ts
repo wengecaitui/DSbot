@@ -45,7 +45,7 @@ async function makeBinding(aid: string, ex: ExchangeId, cash: number, sym: strin
   for (let i=0;i<200;i++){const k=mkKline(ex,sym,49000+i*10,FUTURE-(200-i)*60_000);s.updateClosedKline({kline:k,receivedAt:k.ts});c.appendClosedKline({kline:k,receivedAt:k.ts});}
   const ac: PaperAccountConfig={accountId:aid,exchange:ex,initialCashUsd:cash};
   const ks=new KillSwitch(ex,{totalCapitalUsd:cash,maxPositionPct:1,maxSinglePositionPct:1,allowConcentration:true});
-  const fp=new FastPipeline({exchange:ex,router:{exchange:ex,getBiasReport:()=>({exchange:ex,updatedAt:FUTURE,assets:[{symbol:sym,direction:dir,confidence:85,suggestedPositionPct:0.1}],whitelist:[sym]}),getConfig:()=>({maxBiasReportAgeHours:999}),killSwitch:ks},indicatorService:{calculateAll:async()=>[momentumResult()]},marketData:{exchange:ex,snapshotStore:s,candleStore:c,interval:'1m',minimumSeries:100,seriesLimit:200}});
+  const fp=new FastPipeline({exchange:ex,router:{exchange:ex,getBiasReport:()=>({exchange:ex,updatedAt:clockMs,assets:[{symbol:sym,direction:dir,confidence:85,suggestedPositionPct:0.1}],whitelist:[sym]}),getConfig:()=>({maxBiasReportAgeHours:999}),killSwitch:ks},indicatorService:{calculateAll:async()=>[momentumResult()]},marketData:{exchange:ex,snapshotStore:s,candleStore:c,interval:'1m',minimumSeries:100,seriesLimit:200},clock:dClock()});
   const svc=await PaperExecutionService.open(ac,new PaperLedgerStore(ac,{baseDir:d}));
   return { binding: { accountId: aid, exchange: ex, pipeline: fp, service: svc, coordinator: new PaperFastPathCoordinator(fp, svc, ex) }, dir: d };
 }

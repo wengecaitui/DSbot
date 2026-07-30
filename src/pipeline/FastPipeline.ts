@@ -15,13 +15,17 @@
  *
  * Stage 3B4C7: risk chain upgraded from `killSwitch.check(symbol, 0)` to
  *   DecisionEngine → PositionSizer → KillSwitch.check(realPositionUsd) → TradeIntent.
+ *
+ * Stage 4B4.1: deterministic time — Clock/ElapsedClock injection, zero Date.now,
+ *   domain time monotonicity guard, future bias report fail-closed, idempotent
+ *   createdAt + intentId for identical inputs at same domain time.
  */
 
 import { EventEmitter } from 'events';
 import type { ExchangeId } from '../data/MarketIdentity';
 import { assertExchangeId, isExchangeId } from '../data/MarketIdentity';
 import { IndicatorService } from './IndicatorService';
-import { ExecutionRouter } from '../router/ExecutionRouter';
+import type { FastDecisionContext } from './FastDecisionContext';
 import { MarketBiasReportFull } from '../types/market-bias';
 import { evaluate as decisionEngineEvaluate } from './DecisionEngine';
 import type { EngineInput } from './DecisionEngine';
@@ -33,6 +37,8 @@ import { computePositionUsd } from './PositionSizer';
 import type { TradeIntent } from '../types/trade-intent';
 import { createTradeIntent } from '../types/trade-intent';
 import { validateTradeCandidate } from './TradeIntentValidation';
+import type { DomainClock, ElapsedClock } from '../runtime/Clock';
+import { systemDomainClock, systemElapsedClock } from '../runtime/Clock';
 
 export interface FastPipelineMarketData {
   readonly exchange: ExchangeId;
@@ -46,11 +52,15 @@ export interface FastPipelineMarketData {
 
 export interface FastPipelineConfig {
   readonly exchange: ExchangeId;
-  router: ExecutionRouter;
+  router: FastDecisionContext;
   indicatorService: IndicatorService;
   model?: string;
   mockLatencyMs?: number;
   marketData?: FastPipelineMarketData;
+  /** Stage 4B4.1: injectable domain wall-clock. Defaults to systemDomainClock. */
+  clock?: DomainClock;
+  /** Stage 4B4.1: injectable monotonic elapsed clock. Defaults to systemElapsedClock. */
+  elapsedClock?: ElapsedClock;
 }
 
 export interface FastPipelineResult {
@@ -69,6 +79,12 @@ export interface FastPipelineResult {
 
 export class FastPipeline extends EventEmitter {
   private config: FastPipelineConfig;
+  /** Stage 4B4.1: resolved domain clock — always defined after construction. */
+  private clock: DomainClock;
+  /** Stage 4B4.1: resolved elapsed clock — always defined after construction. */
+  private elapsedClock: ElapsedClock;
+  /** Stage 4B4.1: last accepted domain timestamp for monotonicity guard. */
+  private lastAcceptedDomainTime: number = -1;
 
   constructor(config: FastPipelineConfig) {
     super();
@@ -119,10 +135,38 @@ export class FastPipeline extends EventEmitter {
       mockLatencyMs: config.mockLatencyMs ?? 50,
       ...config,
     };
+    // Stage 4B4.1: resolve clocks to non-optional private fields.
+    this.clock = config.clock ?? systemDomainClock;
+    this.elapsedClock = config.elapsedClock ?? systemElapsedClock;
   }
 
   /** Stage 4A1-R1: read-only exchange identity. */
   getExchange(): ExchangeId { return this.config.exchange; }
+
+  /** Stage 4B4.1: validate domain timestamp before any decision work. */
+  private assertValidDomainTime(domainNow: number): void {
+    if (!Number.isFinite(domainNow)) {
+      throw new Error(`FastPipeline: domain time must be finite, got ${domainNow}`);
+    }
+    if (domainNow < 0) {
+      throw new Error(`FastPipeline: domain time must be non-negative, got ${domainNow}`);
+    }
+    if (!Number.isSafeInteger(domainNow)) {
+      throw new Error(`FastPipeline: domain time must be a safe integer, got ${domainNow}`);
+    }
+  }
+
+  /** Stage 4B4.1: validate elapsed end tick is valid and >= start. */
+  private readElapsed(start: number): number {
+    const end = this.elapsedClock.now();
+    if (!Number.isFinite(end) || end < 0) {
+      throw new Error(`FastPipeline: elapsed clock returned invalid end tick: ${end}`);
+    }
+    if (end < start) {
+      throw new Error(`FastPipeline: elapsed clock went backward: end ${end} < start ${start}`);
+    }
+    return end - start;
+  }
 
   async execute(signal: {
     exchange: ExchangeId;
@@ -130,7 +174,28 @@ export class FastPipeline extends EventEmitter {
     symbol: string;
     signalData?: Record<string, unknown>;
   }): Promise<FastPipelineResult> {
-    const startTime = Date.now();
+    // Stage 4B4.1: read domain clock exactly once.
+    const domainTimestamp = this.clock.now();
+    this.assertValidDomainTime(domainTimestamp);
+
+    // Stage 4B4.1: monotonicity guard — decreasing domain time rejects.
+    // Equal timestamps are accepted (replay, burst, or wall clock stall).
+    if (this.lastAcceptedDomainTime >= 0 && domainTimestamp < this.lastAcceptedDomainTime) {
+      throw new Error(
+        `FastPipeline: domain time decreased from ${this.lastAcceptedDomainTime} to ${domainTimestamp}`,
+      );
+    }
+
+    // Stage 4B4.1: read elapsed start exactly once after valid domain capture.
+    // Validate immediately — do NOT accept domain state before start is valid.
+    const elapsedStart = this.elapsedClock.now();
+    if (!Number.isFinite(elapsedStart) || elapsedStart < 0) {
+      throw new Error(
+        `FastPipeline: elapsed start tick invalid: ${elapsedStart}`,
+      );
+    }
+
+    this.lastAcceptedDomainTime = domainTimestamp;
 
     if (signal.exchange !== this.config.exchange) {
       return {
@@ -138,7 +203,7 @@ export class FastPipeline extends EventEmitter {
         decision: 'skip',
         symbol: signal.symbol,
         reason: `exchange mismatch: signal has ${signal.exchange}, pipeline bound to ${this.config.exchange}`,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport: null,
       };
     }
@@ -151,7 +216,7 @@ export class FastPipeline extends EventEmitter {
         decision: 'skip',
         symbol: signal.symbol,
         reason: 'Invalid report.exchange — fail closed',
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport: null,
       };
     }
@@ -161,7 +226,7 @@ export class FastPipeline extends EventEmitter {
         decision: 'skip',
         symbol: signal.symbol,
         reason: `report.exchange mismatch: got ${(biasReport as { exchange: ExchangeId }).exchange}, expected ${this.config.exchange}`,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport: null,
       };
     }
@@ -171,12 +236,27 @@ export class FastPipeline extends EventEmitter {
         exchange: this.config.exchange,
         decision: 'skip',
         reason: 'No MarketBiasReport available — wait for SlowPath to complete',
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport: null,
       };
     }
 
-    const reportAgeMs = Date.now() - biasReport.updatedAt;
+    // Stage 4B4.1: future bias report — fail-closed defense.
+    // A report with updatedAt later than domain time means the report claims
+    // to come from the future (clock skew, test injection, or corrupted data).
+    if (biasReport.updatedAt > domainTimestamp) {
+      return {
+        exchange: this.config.exchange,
+        decision: 'defense',
+        symbol: signal.symbol,
+        reason: `MarketBiasReport updatedAt (${biasReport.updatedAt}) is in the future relative to domain time (${domainTimestamp}) — fail closed`,
+        elapsedMs: this.readElapsed(elapsedStart),
+        biasReport,
+      };
+    }
+
+    // Stage 4B4.1: use the captured domain timestamp for staleness, not Date.now.
+    const reportAgeMs = domainTimestamp - biasReport.updatedAt;
     const maxAgeMs = this.config.router.getConfig().maxBiasReportAgeHours * 60 * 60 * 1000;
     if (reportAgeMs > maxAgeMs) {
       return {
@@ -184,7 +264,7 @@ export class FastPipeline extends EventEmitter {
         decision: 'defense',
         symbol: signal.symbol,
         reason: `Stale MarketBiasReport: ${Math.round(reportAgeMs / 3600000)}h > ${this.config.router.getConfig().maxBiasReportAgeHours}h — KillSwitch activated`,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport,
       };
     }
@@ -195,7 +275,7 @@ export class FastPipeline extends EventEmitter {
         decision: 'skip',
         symbol: signal.symbol,
         reason: `${signal.symbol} not in MarketBiasReport whitelist`,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport,
       };
     }
@@ -211,7 +291,7 @@ export class FastPipeline extends EventEmitter {
           decision: 'defense',
           symbol: signal.symbol,
           reason: lockState.reason ?? 'KillSwitch locked',
-          elapsedMs: Date.now() - startTime,
+          elapsedMs: this.readElapsed(elapsedStart),
           biasReport,
         };
       }
@@ -236,7 +316,7 @@ export class FastPipeline extends EventEmitter {
           decision: 'skip',
           symbol: signal.symbol,
           reason: `[MD] no snapshot for ${symKey} — wait for market data`,
-          elapsedMs: Date.now() - startTime,
+          elapsedMs: this.readElapsed(elapsedStart),
           biasReport,
         };
       }
@@ -261,7 +341,7 @@ export class FastPipeline extends EventEmitter {
           decision: 'defense',
           symbol: signal.symbol,
           reason: `[MD] snapshot stale (${snapshot.ageMs}ms) for ${symKey}`,
-          elapsedMs: Date.now() - startTime,
+          elapsedMs: this.readElapsed(elapsedStart),
           biasReport,
         };
       }
@@ -273,7 +353,7 @@ export class FastPipeline extends EventEmitter {
           decision: 'skip',
           symbol: signal.symbol,
           reason: `[MD] snapshot missing ${interval} kline for ${symKey}`,
-          elapsedMs: Date.now() - startTime,
+          elapsedMs: this.readElapsed(elapsedStart),
           biasReport,
         };
       }
@@ -285,7 +365,7 @@ export class FastPipeline extends EventEmitter {
           decision: 'defense',
           symbol: signal.symbol,
           reason: `[MD] ${interval} kline stale (${klineAgeMs}ms > ${maxKlineAgeMs}ms) for ${symKey}`,
-          elapsedMs: Date.now() - startTime,
+          elapsedMs: this.readElapsed(elapsedStart),
           biasReport,
         };
       }
@@ -297,7 +377,7 @@ export class FastPipeline extends EventEmitter {
           decision: 'skip',
           symbol: signal.symbol,
           reason: `[MD] insufficient candle history for ${symKey} ${interval}: ${available}/${minimumSeries}`,
-          elapsedMs: Date.now() - startTime,
+          elapsedMs: this.readElapsed(elapsedStart),
           biasReport,
         };
       }
@@ -312,7 +392,7 @@ export class FastPipeline extends EventEmitter {
           decision: 'skip',
           symbol: signal.symbol,
           reason: `[MD] snapshot/candle desync for ${symKey} ${interval}: snapshotTs=${targetKline.kline.ts} candleTs=${lastTs ?? 'none'}`,
-          elapsedMs: Date.now() - startTime,
+          elapsedMs: this.readElapsed(elapsedStart),
           biasReport,
         };
       }
@@ -322,14 +402,14 @@ export class FastPipeline extends EventEmitter {
         series,
       });
 
-      return this.decide(signal, biasReport, indicatorResults, startTime, executionQuote);
+      return this.decide(signal, biasReport, indicatorResults, elapsedStart, domainTimestamp, executionQuote);
     }
 
     const indicatorResults = await this.config.indicatorService.calculateAll({
       asset: signal.symbol,
     });
 
-    return this.decide(signal, biasReport, indicatorResults, startTime, undefined);
+    return this.decide(signal, biasReport, indicatorResults, elapsedStart, domainTimestamp, undefined);
   }
 
   /**
@@ -338,12 +418,15 @@ export class FastPipeline extends EventEmitter {
    * Stage 3B4C7-R1: unified rejection helper, runtime direction validation,
    * bias.direction === deResult.direction gate, PositionSizer symbol+direction.
    * Stage 3B4C14: executionQuote attached to trade results only.
+   * Stage 4B4.1: uses elapsedStart (not domain time) for elapsedMs;
+   * domainTimestamp passed through for createdAt.
    */
   private decide(
     signal: { exchange: ExchangeId; source: string; symbol: string; signalData?: Record<string, unknown> },
     biasReport: MarketBiasReportFull,
     indicatorResults: import('../types/indicators').IndicatorResult[],
-    startTime: number,
+    elapsedStart: number,
+    domainTimestamp: number,
     executionQuote?: ExecutionQuote,
   ): FastPipelineResult {
     const bias = biasReport.assets.find(a => a.symbol === signal.symbol);
@@ -360,7 +443,7 @@ export class FastPipeline extends EventEmitter {
       symbol: signal.symbol,
       bias: bias?.direction ?? 'hold',
       decision: deResult.decision,
-      elapsedMs: Date.now() - startTime,
+      elapsedMs: this.readElapsed(elapsedStart),
     });
 
     // Not a trade decision — return immediately, no position, no TradeIntent.
@@ -371,7 +454,7 @@ export class FastPipeline extends EventEmitter {
         direction: deResult.direction,
         symbol: signal.symbol,
         reason: deResult.reason,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport,
       };
     }
@@ -406,7 +489,7 @@ export class FastPipeline extends EventEmitter {
         direction: 'hold',
         symbol: signal.symbol,
         reason: candidate.reason,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport,
       };
     }
@@ -425,7 +508,7 @@ export class FastPipeline extends EventEmitter {
         direction: 'hold',
         symbol: signal.symbol,
         reason,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport,
       };
     }
@@ -449,7 +532,7 @@ export class FastPipeline extends EventEmitter {
         direction: 'hold',
         symbol: signal.symbol,
         reason,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport,
       };
     }
@@ -467,7 +550,7 @@ export class FastPipeline extends EventEmitter {
           direction: 'hold',
           symbol: signal.symbol,
           reason,
-          elapsedMs: Date.now() - startTime,
+          elapsedMs: this.readElapsed(elapsedStart),
           biasReport,
         };
       }
@@ -484,6 +567,8 @@ export class FastPipeline extends EventEmitter {
         source: signal.source,
         reason: deResult.reason,
         biasUpdatedAt: biasReport.updatedAt,
+        // Stage 4B4.1: explicit domain timestamp for deterministic createdAt.
+        createdAt: domainTimestamp,
       });
     } catch (err) {
       const reason = `[INTENT] ${signal.symbol}: createTradeIntent error: ${err}`;
@@ -494,7 +579,7 @@ export class FastPipeline extends EventEmitter {
         direction: 'hold',
         symbol: signal.symbol,
         reason,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.readElapsed(elapsedStart),
         biasReport,
       };
     }
@@ -514,7 +599,7 @@ export class FastPipeline extends EventEmitter {
       tradeIntent,
       executionQuote,
       reason: deResult.reason,
-      elapsedMs: Date.now() - startTime,
+      elapsedMs: this.readElapsed(elapsedStart),
       biasReport,
     };
   }
