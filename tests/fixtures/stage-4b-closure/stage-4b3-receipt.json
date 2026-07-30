@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "stage-4b3.safety-receipt.v1",
+  "generatedAt": "2026-07-28T00:00:00.000Z",
+  "sourceCommit": "e6bc1852f55d71fd897a513bb533085596a1a480",
+  "stage4B2ReceiptId": "64b15a8acef9b1ba6f16ff87f81d27fcf28fbf6b94424d059521a20702165785",
+  "stage4B2SourceCommit": "81b0980f4fee168075a52c6ebcb12eb50f382217",
+  "stage4B2RawArtifactSha256": "5fefa5c1ddb025c94300e8b7dcb3b6d9dd5ba2e36a6d70e2ec10554d1d6a2453",
+  "stage4B1ArtifactId": "f320f0e51ef6c0900a189dd7455d0c3ee77726bb4c6d1820d422d725629bf52e",
+  "stage4B1ProofId": "7d35edaa205593ad07ccb8b254a67acad09511118939817e649166028535f1fb",
+  "stage4B1DecisionId": "80268cc673363290bea5f65aec0e7811041ecd6c608e06d6944aecfe5c2c39aa",
+  "safetyDecisionId": "d8888ca84e4d3f293a9916cadc55f04e32c6e7088aff7ad5fe2cc7d30f222c6f",
+  "auditRootId": "ca726f8b8a786adfeff023e336ccd0dc54dce00bfed2b36b33a7ceb12d9d7cee",
+  "auditTipId": "394e11dfefbcf1d0bd01abe93e3d8beba43a50cbf97d070fd54bc69c0fcd0f82",
+  "killSwitchEnabled": false,
+  "killSwitchReason": "",
+  "idempotencyLedgerDigest": "22714a665339cae52a4b4c3a69f5c920efc2dc764017be03f68c120c9a4710a6",
+  "recoveryStatus": "NONE",
+  "runtimeStarted": false,
+  "paperApproved": false,
+  "testnetApproved": false,
+  "liveApproved": false,
+  "receiptId": "18a7e928015ded178e5b48beaefff8cc29945e8e1d8329c4c03c58148a07ffa2"
+}
