@@ -142,7 +142,7 @@
     "pg": "^8.17.2",
     "pino": "^8.18.0",
     "pino-pretty": "^10.3.1",
-    "sharp": "^0.34.5",
+    "sharp": "0.35.3",
     "sql.js": "^1.14.0",
     "tiktoken": "^1.0.22",
     "tmi.js": "^1.8.5",
@@ -176,7 +176,8 @@
     "@cosmjs/proto-signing": "^0.38.1",
     "@cosmjs/stargate": "^0.38.1",
     "@cosmjs/tendermint-rpc": "^0.38.1",
-    "@cosmjs/cosmwasm-stargate": "^0.38.1"
+    "@cosmjs/cosmwasm-stargate": "^0.38.1",
+    "sharp": "0.35.3"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",

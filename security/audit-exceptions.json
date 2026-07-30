@@ -1,22 +1,4 @@
 {
   "$schema": "./audit-exceptions.schema.json",
-  "exceptions": [
-    {
-      "advisoryId": "GHSA-f88m-g3jw-g9cj",
-      "package": "sharp",
-      "relatedCves": ["CVE-2026-33327","CVE-2026-33328","CVE-2026-35590","CVE-2026-35591"],
-      "severity": "high",
-      "reason": "No patched sharp release available as of 2026-07-25. These are inherited libvips CVEs (image processing library). @huggingface/transformers depends on sharp for image preprocessing; this project does not invoke sharp image pipelines in the paper execution path.",
-      "owner": "security",
-      "createdAt": "2026-07-25",
-      "expiresAt": "2026-08-24",
-      "maximumLifetimeDays": 30,
-      "compensatingControls": [
-        "Paper-only execution: no image preprocessing in trading path",
-        "sharp dependency is inert unless @huggingface/transformers image pipeline is invoked",
-        "Monitor sharp releases weekly for 0.35.0+"
-      ],
-      "removalCondition": "sharp >=0.35.0 published and package-lock.json updated"
-    }
-  ]
+  "exceptions": []
 }
