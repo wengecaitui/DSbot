@@ -1,0 +1,73 @@
+name: Stage 5 Entry Gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [feature/orangeai-split]
+    paths:
+      - '.github/workflows/stage-5-entry-gate.yml'
+      - 'src/validation/Stage5EntryGate.ts'
+      - 'scripts/generate-stage-5-entry-gate.mts'
+      - 'tests/validation/stage-5-entry-gate.test.ts'
+      - 'tests/fixtures/stage-5-entry/**'
+      - 'docs/releases/stage-5-entry-gate.md'
+
+permissions:
+  contents: read
+
+jobs:
+  entry-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      GATE_PATH: artifacts/stage-5-entry-gate.json
+    steps:
+      - name: Checkout exact source commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_COMMIT }}
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: quant_engine/requirements.txt
+      - name: Install Python dependencies
+        run: python -m pip install -r quant_engine/requirements.txt
+      - name: Install
+        run: npm ci
+      - name: Re-run canonical validation
+        run: npm run ci
+      - name: Download authoritative Stage 4B closure
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts/evidence
+          gh run download 30528115935 -n stage-4b-closure-audit-c33d56d8e295dc064fa971cfa2128aaac41705da -D artifacts/evidence
+      - name: Generate and independently verify Stage 5 entry gate
+        run: >-
+          npx tsx scripts/generate-stage-5-entry-gate.mts
+          --source-commit "$SOURCE_COMMIT"
+          --stage-4b-closure artifacts/evidence/stage-4b-closure-audit.json
+          --output "$GATE_PATH"
+      - name: Upload Stage 5 entry subject
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage-5-entry-gate-${{ env.SOURCE_COMMIT }}
+          path: ${{ env.GATE_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Generate OIDC-backed entry attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ env.GATE_PATH }}
