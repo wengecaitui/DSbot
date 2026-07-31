@@ -674,5 +674,186 @@ class ExcursionIdentityTests(unittest.TestCase):
 
 # ========================================================
 
+# ======== PROVENANCE HARDENING TESTS ========
+
+_XC = _EXCURSION_COST_ZERO
+
+
+class ExcursionValidationTests(unittest.TestCase):
+    def _exc(self, **kw):
+        from quant_engine.proof.stage5r1_replay import _calculate_trade_excursion
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        return r.trades[0].excursion
+
+    def test_excursion_is_frozen(self):
+        e = self._exc()
+        with self.assertRaises(Exception):
+            e.mfe_price_delta = 999.0
+
+    def test_schema_valid(self):
+        self.assertEqual(self._exc().schema_version, "stage-5r1.trade-excursion.v1")
+
+    def test_holding_path_id_present(self):
+        self.assertTrue(len(self._exc().holding_path_id) == 64)
+
+    def test_symbol_present(self):
+        self.assertEqual(self._exc().symbol, "BTC/USDT")
+
+    def test_reject_negative_mfe(self):
+        from quant_engine.proof.stage5r1_replay import TradeExcursion
+        e = self._exc()
+        with self.assertRaises(ValueError):
+            TradeExcursion(schema_version=e.schema_version, window_policy=e.window_policy, tie_policy=e.tie_policy, symbol=e.symbol, timeframe_ms=e.timeframe_ms, dataset_id=e.dataset_id, holding_path_id=e.holding_path_id, accounting_id=e.accounting_id, side=e.side, entry_execution_time_ms=e.entry_execution_time_ms, exit_execution_time_ms=e.exit_execution_time_ms, full_holding_bar_count=e.full_holding_bar_count, entry_fill_price=e.entry_fill_price, quantity=e.quantity, entry_equity=e.entry_equity, favorable_extreme_price=e.favorable_extreme_price, favorable_extreme_bar_open_time_ms=e.favorable_extreme_bar_open_time_ms, adverse_extreme_price=e.adverse_extreme_price, adverse_extreme_bar_open_time_ms=e.adverse_extreme_bar_open_time_ms, mfe_price_delta=-1.0, mae_price_delta=e.mae_price_delta, mfe_amount_before_exit_costs=e.mfe_amount_before_exit_costs, mae_amount_before_exit_costs=e.mae_amount_before_exit_costs, mfe_return_on_entry_equity=e.mfe_return_on_entry_equity, mae_return_on_entry_equity=e.mae_return_on_entry_equity, mfe_fraction_of_entry_fill_price=e.mfe_fraction_of_entry_fill_price, mae_fraction_of_entry_fill_price=e.mae_fraction_of_entry_fill_price, excursion_id=e.excursion_id)
+
+
+class HoldingPathIdentityTests(unittest.TestCase):
+    def test_pre_entry_change_preserves_holding_path(self):
+        b1 = list(bars(150, 0))
+        b1[50] = bar(b1[50].open_time_ms, 999.0, 1000.0, 998.0, 999.5)  # pre-entry
+        b2 = list(bars(150, 0))
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b2[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b2[110].open_time_ms, action=ReplayAction.EXIT))
+        r1 = run_stage5r1_replay(bars=b1, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        r2 = run_stage5r1_replay(bars=b2, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        self.assertNotEqual(r1.dataset_id, r2.dataset_id)
+        self.assertEqual(r1.trades[0].excursion.holding_path_id, r2.trades[0].excursion.holding_path_id)
+        self.assertAlmostEqual(r1.trades[0].excursion.mfe_amount_before_exit_costs, r2.trades[0].excursion.mfe_amount_before_exit_costs)
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+    def test_exit_hlc_change_preserves_holding_path(self):
+        b1 = list(bars(150, 0))
+        exit_idx = 111
+        b1[exit_idx] = bar(b1[exit_idx].open_time_ms, b1[exit_idx].open, 999.0, 1.0, 500.0)
+        b2 = list(bars(150, 0))
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b2[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b2[110].open_time_ms, action=ReplayAction.EXIT))
+        r1 = run_stage5r1_replay(bars=b1, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        r2 = run_stage5r1_replay(bars=b2, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        self.assertNotEqual(r1.dataset_id, r2.dataset_id)
+        self.assertEqual(r1.trades[0].excursion.holding_path_id, r2.trades[0].excursion.holding_path_id)
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+    def test_internal_high_changes_holding_path(self):
+        b1 = list(bars(150, 0))
+        b1[105] = bar(b1[105].open_time_ms, b1[105].open, 999.0, b1[105].low, b1[105].close)
+        b2 = list(bars(150, 0))
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b2[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b2[110].open_time_ms, action=ReplayAction.EXIT))
+        r1 = run_stage5r1_replay(bars=b1, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        r2 = run_stage5r1_replay(bars=b2, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        self.assertNotEqual(r1.trades[0].excursion.holding_path_id, r2.trades[0].excursion.holding_path_id)
+        self.assertEqual(r1.trades[0].accounting.accounting_id, r2.trades[0].accounting.accounting_id)
+        self.assertNotEqual(r1.trades[0].excursion.excursion_id, r2.trades[0].excursion.excursion_id)
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+    def test_replay_id_binds_excursion_ids(self):
+        """Same dataset/instructions/config/capital/cost but different excursion → different replay."""
+        b1 = list(bars(150, 0))
+        b1[105] = bar(b1[105].open_time_ms, b1[105].open, 999.0, b1[105].low, b1[105].close)
+        b2 = list(bars(150, 0))
+        b2[105] = bar(b2[105].open_time_ms, b2[105].open, 888.0, b2[105].low, b2[105].close)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b1[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b1[110].open_time_ms, action=ReplayAction.EXIT))
+        r1 = run_stage5r1_replay(bars=b1, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        r2 = run_stage5r1_replay(bars=b2, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        # Everything same except bars → all IDs change
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+
+class AccountingLineageTests(unittest.TestCase):
+    def test_forged_raw_entry_rejected(self):
+        from dataclasses import replace
+        from quant_engine.proof.stage5r1_replay import _calculate_trade_excursion
+        b = validate_bar_sequence(bars(150, 0))
+        r = run_stage5r1_replay(bars=b, instructions=(ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG), ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT)), config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        forged = replace(r.trades[0].accounting, raw_entry_price=999.0)
+        with self.assertRaises(ValueError):
+            _calculate_trade_excursion(bars=b, entry_exec_index=100, exit_exec_index=111, accounting=forged, dataset_id=r.dataset_id, symbol="BTC/USDT", timeframe_ms=300000)
+
+    def test_forged_exit_price_rejected(self):
+        from dataclasses import replace
+        from quant_engine.proof.stage5r1_replay import _calculate_trade_excursion
+        b = validate_bar_sequence(bars(150, 0))
+        r = run_stage5r1_replay(bars=b, instructions=(ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG), ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT)), config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        forged = replace(r.trades[0].accounting, raw_exit_price=999.0)
+        with self.assertRaises(ValueError):
+            _calculate_trade_excursion(bars=b, entry_exec_index=100, exit_exec_index=111, accounting=forged, dataset_id=r.dataset_id, symbol="BTC/USDT", timeframe_ms=300000)
+
+
+class ExcursionShortArithmeticTests(unittest.TestCase):
+    def test_short_favorable_price(self):
+        b = list(bars(150, 0))
+        b[105] = bar(b[105].open_time_ms, b[105].open, b[105].high, 50.0, b[105].close)  # low=50 favorable for short
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_SHORT),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        self.assertAlmostEqual(r.trades[0].excursion.favorable_extreme_price, 50.0)
+
+    def test_short_adverse_price(self):
+        b = list(bars(150, 0))
+        b[105] = bar(b[105].open_time_ms, b[105].open, 999.0, b[105].low, b[105].close)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_SHORT),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        self.assertAlmostEqual(r.trades[0].excursion.adverse_extreme_price, 999.0)
+
+    def test_short_mfe_delta(self):
+        b = list(bars(150, 0))
+        entry_open = b[100].open
+        b[105] = bar(b[105].open_time_ms, b[105].open, b[105].high, 50.0, b[105].close)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_SHORT),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        self.assertAlmostEqual(r.trades[0].excursion.mfe_price_delta, entry_open - 50.0)
+
+    def test_short_mae_delta(self):
+        b = list(bars(150, 0))
+        entry_open = b[100].open
+        b[105] = bar(b[105].open_time_ms, b[105].open, 999.0, b[105].low, b[105].close)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_SHORT),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        self.assertAlmostEqual(r.trades[0].excursion.mae_price_delta, 999.0 - entry_open)
+
+    def test_short_mfe_amount(self):
+        b = list(bars(150, 0))
+        b[105] = bar(b[105].open_time_ms, b[105].open, b[105].high, 50.0, b[105].close)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_SHORT),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        expected = r.trades[0].accounting.quantity * r.trades[0].excursion.mfe_price_delta
+        self.assertAlmostEqual(r.trades[0].excursion.mfe_amount_before_exit_costs, expected)
+
+    def test_excursion_uses_entry_fill_price(self):
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_EXCURSION_COST)
+        self.assertEqual(r.trades[0].excursion.entry_fill_price, r.trades[0].accounting.entry_fill_price)
+
+    def test_entry_fill_differs_from_raw_with_costs(self):
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r_zero = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        r_cost = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_EXCURSION_COST)
+        self.assertNotEqual(r_zero.trades[0].excursion.entry_fill_price, r_cost.trades[0].excursion.entry_fill_price)
+
+
+class IndependentIdentityEvidenceTests(unittest.TestCase):
+    def test_replay_id_independent_reconstruction(self):
+        from quant_engine.proof.stage5_evaluation import canonical_sha256
+        from quant_engine.proof.stage5r1_replay import REPLAY_RESULT_SCHEMA
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_XC)
+        expected = {"schemaVersion": REPLAY_RESULT_SCHEMA, "datasetId": r.dataset_id, "instructionSetId": r.instruction_set_id, "replayConfigId": r.replay_config_id, "capitalModelId": r.capital_model_id, "costModelId": r.cost_model_id, "initialEquity": float(r.initial_equity), "finalEquity": float(r.final_equity), "tradeCount": r.trade_count, "accountingIds": [t.accounting.accounting_id for t in r.trades], "excursionIds": [t.excursion.excursion_id for t in r.trades]}
+        self.assertEqual(r.replay_id, canonical_sha256(expected))
+
+
 if __name__ == "__main__":
     unittest.main()
