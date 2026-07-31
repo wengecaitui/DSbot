@@ -114,31 +114,9 @@ def _canonical_sha256(value: Any) -> str:
     return _cs(value)
 
 
-def _normalize(value: Any) -> Any:
-    """Normalize continuous economic values to float for canonical identity.
-
-    Integers that represent continuous quantities (prices, equity, rates)
-    are normalized to float so that 1 and 1.0 produce the same identity.
-    Time fields and strings are left as-is.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return value
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_normalize(item) for item in value]
-    if isinstance(value, dict):
-        return {str(k): _normalize(v) for k, v in value.items()}
-    if hasattr(value, "value"):
-        return _normalize(value.value)
-    return value
-
-
 def _normalize_capital(c: CapitalModel) -> dict[str, Any]:
+    if type(c) is not CapitalModel:
+        raise ValueError(f"STAGE5R1_CAPITAL_MODEL_TYPE_INVALID: {type(c).__name__}")
     return {
         "schemaVersion": c.schema_version,
         "contractType": c.contract_type,
@@ -151,6 +129,8 @@ def _normalize_capital(c: CapitalModel) -> dict[str, Any]:
 
 
 def _normalize_cost(c: CostModel) -> dict[str, Any]:
+    if type(c) is not CostModel:
+        raise ValueError(f"STAGE5R1_COST_MODEL_TYPE_INVALID: {type(c).__name__}")
     return {
         "schemaVersion": c.schema_version,
         "feeBpsPerFill": float(c.fee_bps_per_fill),
@@ -256,6 +236,12 @@ def calculate_trade_accounting(
     bypassing the CapitalModel's max_position_fraction and leverage gates.
     """
 
+    # --- exact type checks (must be first) ---
+    if type(capital) is not CapitalModel:
+        raise ValueError(f"STAGE5R1_CAPITAL_MODEL_TYPE_INVALID: {type(capital).__name__}")
+    if type(cost) is not CostModel:
+        raise ValueError(f"STAGE5R1_COST_MODEL_TYPE_INVALID: {type(cost).__name__}")
+
     # --- side validation ---
     if not isinstance(side, PositionSide):
         raise ValueError(f"STAGE5R1_SIDE_INVALID: {side!r}")
@@ -342,7 +328,7 @@ def calculate_trade_accounting(
     co_id = cost_model_id(cost)
 
     # --- canonical identity ---
-    identity_payload = _normalize({
+    identity_payload = {
         "tradeAccountingSchemaVersion": _TRADE_ACCOUNTING_SCHEMA_VERSION,
         "capitalModelId": cm_id,
         "costModelId": co_id,
@@ -352,11 +338,11 @@ def calculate_trade_accounting(
         "rawExitPrice": float(raw_exit_price),
         "entryTimeMs": entry_time_ms,
         "exitTimeMs": exit_time_ms,
-    })
+    }
     accounting_id = _canonical_sha256(identity_payload)
 
     return TradeAccounting(
-        schema_version=capital.schema_version,
+        schema_version=_TRADE_ACCOUNTING_SCHEMA_VERSION,
         contract_type=capital.contract_type,
         trade_accounting_schema_version=_TRADE_ACCOUNTING_SCHEMA_VERSION,
         side=side,

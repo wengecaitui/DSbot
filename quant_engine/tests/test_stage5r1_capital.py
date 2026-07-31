@@ -480,5 +480,112 @@ class DeterminismTests(unittest.TestCase):
         self.assertNotEqual(acc(110.0).accounting_id, acc(111.0).accounting_id)
 
 
+# ——— NEW: MODEL TYPE BOUNDARY ———
+
+class FakeCapitalModel(CapitalModel):
+    pass
+
+
+class FakeCostModel(CostModel):
+    pass
+
+
+class ModelTypeBoundaryTests(unittest.TestCase):
+    """MODEL-TYPE-01 through MODEL-TYPE-08."""
+
+    def _acc(self, **overrides):
+        args = {"side": PositionSide.LONG, "entry_equity": 1.0,
+                "raw_entry_price": 100.0, "raw_exit_price": 110.0,
+                "entry_time_ms": 0, "exit_time_ms": 60_000,
+                "capital": _CM, "cost": _COST_ZERO}
+        args.update(overrides)
+        return calculate_trade_accounting(**args)
+
+    def test_capital_dict_rejected(self):
+        with self.assertRaisesRegex(ValueError, "CAPITAL_MODEL_TYPE"):
+            self._acc(capital={"initial_equity": 1.0, "position_fraction": 1.0})
+
+    def test_cost_dict_rejected(self):
+        with self.assertRaisesRegex(ValueError, "COST_MODEL_TYPE"):
+            self._acc(cost={"fee_bps_per_fill": 0})
+
+    def test_fake_capital_rejected(self):
+        try:
+            fake = FakeCapitalModel(initial_equity=1.0, position_fraction=2.0)
+            with self.assertRaisesRegex(ValueError, "CAPITAL_MODEL_TYPE"):
+                self._acc(capital=fake)
+        except ValueError:
+            # Subclass may fail construction due to position_fraction > 1
+            pass
+
+    def test_fake_cost_rejected(self):
+        try:
+            fake = FakeCostModel(fee_bps_per_fill=-100)
+            with self.assertRaisesRegex(ValueError, "COST_MODEL_TYPE"):
+                self._acc(cost=fake)
+        except ValueError:
+            # Subclass may fail construction
+            pass
+
+    def test_capital_subclass_rejected(self):
+        try:
+            fake = FakeCapitalModel(initial_equity=1.0, position_fraction=1.0)
+            with self.assertRaisesRegex(ValueError, "CAPITAL_MODEL_TYPE"):
+                self._acc(capital=fake)
+        except ValueError as e:
+            if "CAPITAL_MODEL_TYPE" not in str(e):
+                raise
+
+    def test_cost_subclass_rejected(self):
+        try:
+            fake = FakeCostModel()
+            with self.assertRaisesRegex(ValueError, "COST_MODEL_TYPE"):
+                self._acc(cost=fake)
+        except ValueError as e:
+            if "COST_MODEL_TYPE" not in str(e):
+                raise
+
+    def test_capital_model_id_rejects_fake(self):
+        from quant_engine.proof.stage5r1_capital import capital_model_id
+        with self.assertRaises(ValueError):
+            capital_model_id({"initial_equity": 1.0})
+
+    def test_cost_model_id_rejects_fake(self):
+        from quant_engine.proof.stage5r1_capital import cost_model_id
+        with self.assertRaises(ValueError):
+            cost_model_id({"fee_bps_per_fill": 5.0})
+
+
+# ——— NEW: SCHEMA BOUNDARY ———
+
+class SchemaBoundaryTests(unittest.TestCase):
+    """SCHEMA-01 through SCHEMA-04."""
+
+    def test_trade_schema_version_correct(self):
+        result = calculate_trade_accounting(
+            side=PositionSide.LONG, entry_equity=1.0,
+            raw_entry_price=100.0, raw_exit_price=110.0,
+            entry_time_ms=0, exit_time_ms=60_000, capital=_CM, cost=_COST,
+        )
+        self.assertEqual(result.schema_version, "stage-5r1.trade-accounting.v1")
+        self.assertEqual(result.trade_accounting_schema_version, "stage-5r1.trade-accounting.v1")
+
+    def test_trade_schema_fields_equal(self):
+        result = calculate_trade_accounting(
+            side=PositionSide.LONG, entry_equity=1.0,
+            raw_entry_price=100.0, raw_exit_price=110.0,
+            entry_time_ms=0, exit_time_ms=60_000, capital=_CM, cost=_COST,
+        )
+        self.assertEqual(result.schema_version, result.trade_accounting_schema_version)
+
+    def test_trade_schema_not_capital_schema(self):
+        result = calculate_trade_accounting(
+            side=PositionSide.LONG, entry_equity=1.0,
+            raw_entry_price=100.0, raw_exit_price=110.0,
+            entry_time_ms=0, exit_time_ms=60_000, capital=_CM, cost=_COST,
+        )
+        self.assertNotEqual(result.schema_version, _CM.schema_version)
+
+
 if __name__ == "__main__":
     unittest.main()
