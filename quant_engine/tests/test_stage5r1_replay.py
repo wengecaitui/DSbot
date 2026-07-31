@@ -585,5 +585,94 @@ class StrengthenedImmutabilityTests(unittest.TestCase):
         self.assertEqual(tuple(inst_list), inst_snap)
 
 
+# ======== STAGE 5R1.3-B EXCURSION TESTS (RED) ========
+
+_EXCURSION_COST_ZERO = CostModel(
+    fee_bps_per_fill=0, half_spread_bps_per_fill=0,
+    slippage_bps_per_fill=0, funding_bps_per_8h_adverse=0,
+)
+_EXCURSION_COST = CostModel(half_spread_bps_per_fill=1, slippage_bps_per_fill=2,
+                            fee_bps_per_fill=0, funding_bps_per_8h_adverse=0)
+
+
+class ExcursionSchemaTests(unittest.TestCase):
+    def test_trade_excursion_exists(self):
+        from quant_engine.proof.stage5r1_replay import TradeExcursion
+        self.assertIsNotNone(TradeExcursion)
+
+    def test_replay_trade_schema_v2(self):
+        from quant_engine.proof.stage5r1_replay import REPLAY_TRADE_SCHEMA
+        self.assertEqual(REPLAY_TRADE_SCHEMA, "stage-5r1.replay-trade.v2")
+
+    def test_replay_result_schema_v2(self):
+        from quant_engine.proof.stage5r1_replay import REPLAY_RESULT_SCHEMA
+        self.assertEqual(REPLAY_RESULT_SCHEMA, "stage-5r1.replay-result.v2")
+
+
+class ExcursionObservationWindowTests(unittest.TestCase):
+    def _long_trade(self, highs_override=None, lows_override=None, exit_open=None):
+        b = list(bars(150, 0))
+        if highs_override:
+            for i, h in highs_override:
+                b[i] = bar(b[i].open_time_ms, b[i].open, h, b[i].low, b[i].close)
+        if lows_override:
+            for i, l in lows_override:
+                b[i] = bar(b[i].open_time_ms, b[i].open, b[i].high, l, b[i].close)
+        if exit_open is not None:
+            ei = 111
+            b[ei] = bar(b[ei].open_time_ms, exit_open, b[ei].high, b[ei].low, b[ei].close)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        return run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"),
+                                   capital=_CM, cost=_EXCURSION_COST_ZERO)
+
+    def test_mfe_uses_entry_fill_not_raw(self):
+        r1 = run_stage5r1_replay(
+            bars=bars(150, 0),
+            instructions=(ReplayInstruction(signal_bar_open_time_ms=99*300000, action=ReplayAction.ENTER_LONG),
+                          ReplayInstruction(signal_bar_open_time_ms=110*300000, action=ReplayAction.EXIT)),
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_EXCURSION_COST_ZERO)
+        r2 = run_stage5r1_replay(
+            bars=bars(150, 0),
+            instructions=(ReplayInstruction(signal_bar_open_time_ms=99*300000, action=ReplayAction.ENTER_LONG),
+                          ReplayInstruction(signal_bar_open_time_ms=110*300000, action=ReplayAction.EXIT)),
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_EXCURSION_COST)
+        self.assertNotEqual(r1.trades[0].excursion.entry_fill_price, r2.trades[0].excursion.entry_fill_price)
+
+    def test_full_holding_bar_count(self):
+        r = self._long_trade()
+        self.assertEqual(r.trades[0].excursion.full_holding_bar_count, 11)
+
+    def test_excursion_accounting_id_match(self):
+        r = self._long_trade()
+        self.assertEqual(r.trades[0].excursion.accounting_id, r.trades[0].accounting.accounting_id)
+
+
+class ExcursionIdentityTests(unittest.TestCase):
+    def test_internal_high_preserves_accounting_changes_excursion_and_replay(self):
+        b = list(bars(150, 0))
+        b[105] = bar(b[105].open_time_ms, b[105].open, 999.0, b[105].low, b[105].close)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_EXCURSION_COST_ZERO)
+        b2 = list(bars(150, 0))
+        b2[105] = bar(b2[105].open_time_ms, b2[105].open, 888.0, b2[105].low, b2[105].close)
+        r2 = run_stage5r1_replay(bars=b2, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_EXCURSION_COST_ZERO)
+        self.assertEqual(r.trades[0].accounting.accounting_id, r2.trades[0].accounting.accounting_id)
+        self.assertNotEqual(r.trades[0].excursion.excursion_id, r2.trades[0].excursion.excursion_id)
+        self.assertNotEqual(r.replay_id, r2.replay_id)
+
+    def test_repeated_replay_identical(self):
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r1 = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_EXCURSION_COST_ZERO)
+        r2 = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_EXCURSION_COST_ZERO)
+        self.assertEqual(r1, r2)
+        self.assertEqual(r1.trades[0].excursion.excursion_id, r2.trades[0].excursion.excursion_id)
+
+
+# ========================================================
+
 if __name__ == "__main__":
     unittest.main()
