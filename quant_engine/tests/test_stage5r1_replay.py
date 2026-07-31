@@ -387,5 +387,129 @@ class DeterminismAndIdentityTests(unittest.TestCase):
         self.assertNotEqual(r1.replay_id, r2.replay_id)
 
 
+# --- NEW: CLOSED TYPE EXACT ---
+
+class ClosedTypeExactTests(unittest.TestCase):
+    def test_closed_int_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayBar(open_time_ms=0, open=100.0, high=101.0, low=99.0, close=100.5, volume=100.0, closed=1)
+
+    def test_closed_str_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayBar(open_time_ms=0, open=100.0, high=101.0, low=99.0, close=100.5, volume=100.0, closed="true")
+
+    def test_closed_list_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayBar(open_time_ms=0, open=100.0, high=101.0, low=99.0, close=100.5, volume=100.0, closed=[])
+
+
+# --- NEW: TIMEFRAME TYPE EXACT ---
+
+class TimeframeTypeExactTests(unittest.TestCase):
+    def test_timeframe_float_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayConfig(symbol="BTC/USDT", timeframe_ms=300000.0)
+
+    def test_timeframe_bool_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayConfig(symbol="BTC/USDT", timeframe_ms=True)
+
+    def test_timeframe_str_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayConfig(symbol="BTC/USDT", timeframe_ms="300000")
+
+
+# --- NEW: DATASET ID BINDS SYMBOL ---
+
+class DatasetSymbolBindingTests(unittest.TestCase):
+    def test_different_symbols_different_dataset_id(self):
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r1 = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        r2 = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="ETH/USDT"), capital=_CM, cost=_COST)
+        self.assertNotEqual(r1.dataset_id, r2.dataset_id)
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+
+# --- NEW: COMPLETE REPLAY EQUALITY ---
+
+class CompleteReplayEqualityTests(unittest.TestCase):
+    def test_full_result_equality(self):
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        r1 = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        r2 = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        self.assertEqual(r1, r2)
+
+
+# --- NEW: INPUT IMMUTABILITY ---
+
+class InputImmutabilityTests(unittest.TestCase):
+    def test_bars_not_mutated_on_success(self):
+        b_list = list(bars(150, 0))
+        snapshot = [type(b).__name__ for b in b_list]
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b_list[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b_list[110].open_time_ms, action=ReplayAction.EXIT))
+        run_stage5r1_replay(bars=b_list, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        self.assertEqual([type(b).__name__ for b in b_list], snapshot)
+
+    def test_instructions_not_mutated_on_success(self):
+        b = bars(150, 0)
+        inst_list = [ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                     ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT)]
+        snapshot = [(i.signal_bar_open_time_ms, i.action) for i in inst_list]
+        run_stage5r1_replay(bars=b, instructions=inst_list, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        self.assertEqual([(i.signal_bar_open_time_ms, i.action) for i in inst_list], snapshot)
+
+    def test_bars_not_mutated_on_rejection(self):
+        b_list = list(bars(150, 0))
+        snapshot = [type(b).__name__ for b in b_list]
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b_list[99].open_time_ms, action=ReplayAction.EXIT),)
+        try:
+            run_stage5r1_replay(bars=b_list, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        except ValueError:
+            pass
+        self.assertEqual([type(b).__name__ for b in b_list], snapshot)
+
+
+# --- NEW: INSTRUCTION VALIDATOR FAIL-CLOSED ---
+
+class InstructionValidatorFailClosedTests(unittest.TestCase):
+    def test_validator_rejects_gap_bars(self):
+        b_list = list(bars(150, 0))
+        b_list[50] = bar(b_list[50].open_time_ms + 1000, 100, 101, 99, 100.5)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b_list[99].open_time_ms, action=ReplayAction.ENTER_LONG),)
+        with self.assertRaises(ValueError):
+            validate_instruction_set(insts, b_list)
+
+    def test_validator_rejects_unsorted_bars(self):
+        b_list = list(bars(150, 0))
+        b_list[0], b_list[5] = b_list[5], b_list[0]
+        insts = (ReplayInstruction(signal_bar_open_time_ms=0, action=ReplayAction.ENTER_LONG),)
+        with self.assertRaises(ValueError):
+            validate_instruction_set(insts, b_list)
+
+    def test_validator_rejects_fake_bar(self):
+        fake = type("FB", (), {"open_time_ms": 0, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 100.0, "closed": True})()
+        b_list = [fake, bar(300000, 101, 102, 100, 101.5)]
+        insts = (ReplayInstruction(signal_bar_open_time_ms=0, action=ReplayAction.ENTER_LONG),)
+        with self.assertRaises(ValueError):
+            validate_instruction_set(insts, b_list)
+
+    def test_validator_rejects_invalid_warmup(self):
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[10].open_time_ms, action=ReplayAction.ENTER_LONG),)
+        with self.assertRaises(ValueError):
+            validate_instruction_set(insts, b, warmup_bars=0)
+
+    def test_validator_rejects_bool_warmup(self):
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[10].open_time_ms, action=ReplayAction.ENTER_LONG),)
+        with self.assertRaises(ValueError):
+            validate_instruction_set(insts, b, warmup_bars=True)  # type: ignore
+
+
 if __name__ == "__main__":
     unittest.main()

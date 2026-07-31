@@ -69,7 +69,7 @@ class ReplayBar:
         if float(self.volume) < 0:
             raise ValueError(f"REPLAY_BAR_VOLUME_NEGATIVE: {self.volume}")
 
-        if not self.closed:
+        if self.closed is not True:
             raise ValueError("REPLAY_BAR_NOT_CLOSED")
         if not (self.low <= self.open <= self.high):
             raise ValueError(f"REPLAY_BAR_OPEN_OUT_OF_RANGE: open={self.open} low={self.low} high={self.high}")
@@ -135,7 +135,16 @@ def validate_instruction_set(
     if not isinstance(instructions, Sequence) or isinstance(instructions, (str, bytes)):
         raise ValueError("REPLAY_INSTRUCTION_SET_NOT_SEQUENCE")
 
-    bar_times = {b.open_time_ms for b in bars}
+    # --- validate bars first ---
+    valid_bars = validate_bar_sequence(bars)
+
+    # --- validate warmup ---
+    if isinstance(warmup_bars, bool) or not isinstance(warmup_bars, int):
+        raise ValueError(f"REPLAY_WARMUP_NOT_INT: {warmup_bars!r}")
+    if warmup_bars <= 0:
+        raise ValueError(f"REPLAY_WARMUP_NOT_POSITIVE: {warmup_bars}")
+
+    bar_times = {b.open_time_ms for b in valid_bars}
 
     seen: set[int] = set()
     prev_time: int | None = None
@@ -151,7 +160,7 @@ def validate_instruction_set(
         prev_time = t
         if t not in bar_times:
             raise ValueError(f"REPLAY_INSTRUCTION_UNKNOWN_BAR: {t}")
-        if t == bars[-1].open_time_ms:
+        if t == valid_bars[-1].open_time_ms:
             raise ValueError(f"REPLAY_INSTRUCTION_ON_FINAL_BAR: {t}")
         # warmup check: signal must be on or after bar index warmup_bars - 1
         bar_times_sorted = sorted(bar_times)
@@ -180,7 +189,7 @@ class ReplayConfig:
             raise ValueError(f"REPLAY_CONFIG_SCHEMA_INVALID: {self.schema_version}")
         if not self.symbol or not isinstance(self.symbol, str):
             raise ValueError(f"REPLAY_CONFIG_SYMBOL_INVALID: {self.symbol!r}")
-        if self.timeframe_ms != FROZEN_TIMEFRAME_MS:
+        if type(self.timeframe_ms) is not int or self.timeframe_ms != FROZEN_TIMEFRAME_MS:
             raise ValueError(f"REPLAY_CONFIG_TIMEFRAME_INVALID: {self.timeframe_ms}")
         if isinstance(self.warmup_bars, bool) or not isinstance(self.warmup_bars, int):
             raise ValueError(f"REPLAY_CONFIG_WARMUP_NOT_INT: {self.warmup_bars!r}")
@@ -230,9 +239,11 @@ class ReplayResult:
 
 # --- Identity helpers ---
 
-def _dataset_id(bars: tuple[ReplayBar, ...]) -> str:
+def _dataset_id(bars: tuple[ReplayBar, ...], *, symbol: str, timeframe_ms: int) -> str:
     payload = {
         "schemaVersion": REPLAY_BAR_SCHEMA,
+        "symbol": symbol,
+        "timeframeMs": timeframe_ms,
         "bars": [
             {
                 "openTimeMs": b.open_time_ms,
@@ -358,7 +369,7 @@ def run_stage5r1_replay(
     if position_side is not None:
         raise ValueError("REPLAY_END_WITH_OPEN_POSITION")
 
-    ds_id = _dataset_id(valid_bars)
+    ds_id = _dataset_id(valid_bars, symbol=config.symbol, timeframe_ms=config.timeframe_ms)
     is_id = _instruction_set_id(valid_instructions)
     rc_id = _replay_config_id(config)
     cm_id = capital_model_id(capital)
