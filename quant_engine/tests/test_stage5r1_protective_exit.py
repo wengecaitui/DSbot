@@ -347,5 +347,182 @@ class EventResolutionValidationTests(unittest.TestCase):
             ProtectiveExitResolution(schema_version="stage-5r1.protective-exit-resolution.v1", status="NO_TRIGGER", plan_id=plan.plan_id, observation_path_id=r.observation_path_id, event=r.event, resolution_id="")
 
 
+# ======== TEST-GATE GAP CLOSURE ========
+
+class ResolverInputValidationExtendedTests(unittest.TestCase):
+    def _plan(self):
+        return ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+
+    def test_non_string_symbol_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=bars(20), entry_execution_index=1, last_observation_index=10,
+                plan=self._plan(), symbol=12345, timeframe_ms=300000)
+
+    def test_float_timeframe_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=bars(20), entry_execution_index=1, last_observation_index=10,
+                plan=self._plan(), symbol="BTC/USDT", timeframe_ms=300000.0)
+
+    def test_bool_timeframe_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=bars(20), entry_execution_index=1, last_observation_index=10,
+                plan=self._plan(), symbol="BTC/USDT", timeframe_ms=True)
+
+    def test_negative_last_observation_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=bars(20), entry_execution_index=1, last_observation_index=-1,
+                plan=self._plan(), symbol="BTC/USDT", timeframe_ms=300000)
+
+    def test_last_observation_out_of_range_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=bars(10), entry_execution_index=1, last_observation_index=10,
+                plan=self._plan(), symbol="BTC/USDT", timeframe_ms=300000)
+
+
+class EventValidationExtendedTests(unittest.TestCase):
+    def _valid_event_kw(self):
+        from quant_engine.proof.stage5r1_protective_exit import canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA
+        payload = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+            "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
+        eid = canonical_sha256(payload)
+        return {"schema_version": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG,
+            "reason": "STOP_LOSS", "trigger_kind": "INTRABAR_LEVEL", "trigger_bar_open_time_ms": 0,
+            "trigger_bar_index": 1, "trigger_level_price": 90.0, "raw_exit_price": 90.0,
+            "same_bar_collision": False, "plan_id": "a" * 64, "observation_path_id": "b" * 64, "event_id": eid}
+
+    def test_invalid_schema_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitEvent
+        kw = self._valid_event_kw(); kw["schema_version"] = "wrong-v1"
+        with self.assertRaises(ValueError):
+            ProtectiveExitEvent(**kw)
+
+    def test_invalid_reason_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA
+        kw = self._valid_event_kw()
+        # recompute id for wrong reason
+        p = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+            "reason": "INVALID", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
+        kw2 = dict(kw); kw2["reason"] = "INVALID"; kw2["event_id"] = canonical_sha256(p)
+        with self.assertRaises(ValueError):
+            ProtectiveExitEvent(**kw2)
+
+    def test_invalid_kind_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA
+        kw = self._valid_event_kw()
+        p = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+            "reason": "STOP_LOSS", "triggerKind": "INVALID_KIND", "triggerBarOpenTimeMs": 0,
+            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
+        kw2 = dict(kw); kw2["trigger_kind"] = "INVALID_KIND"; kw2["event_id"] = canonical_sha256(p)
+        with self.assertRaises(ValueError):
+            ProtectiveExitEvent(**kw2)
+
+    def test_malformed_event_id_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitEvent
+        kw = self._valid_event_kw(); kw["event_id"] = "not-a-sha"
+        with self.assertRaises(ValueError):
+            ProtectiveExitEvent(**kw)
+
+
+class ResolutionValidationExtendedTests(unittest.TestCase):
+    def _valid_resolution_kw(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, PROTECTIVE_EXIT_RESOLUTION_SCHEMA, canonical_sha256
+        pid = "a" * 64; oid = "b" * 64
+        d = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": pid, "observationPathId": oid,
+            "status": "NO_TRIGGER", "eventId": None}
+        rid = canonical_sha256(d)
+        return {"schema_version": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "status": "NO_TRIGGER",
+            "plan_id": pid, "observation_path_id": oid, "event": None, "resolution_id": rid}
+
+    def test_invalid_schema_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution
+        kw = self._valid_resolution_kw(); kw["schema_version"] = "wrong-v1"
+        with self.assertRaises(ValueError):
+            ProtectiveExitResolution(**kw)
+
+    def test_invalid_status_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, canonical_sha256, PROTECTIVE_EXIT_RESOLUTION_SCHEMA
+        kw = self._valid_resolution_kw()
+        p = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": kw["plan_id"],
+            "observationPathId": kw["observation_path_id"], "status": "INVALID_STATUS", "eventId": None}
+        kw2 = dict(kw); kw2["status"] = "INVALID_STATUS"; kw2["resolution_id"] = canonical_sha256(p)
+        with self.assertRaises(ValueError):
+            ProtectiveExitResolution(**kw2)
+
+    def test_malformed_resolution_id_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution
+        kw = self._valid_resolution_kw(); kw["resolution_id"] = "not-sha"
+        with self.assertRaises(ValueError):
+            ProtectiveExitResolution(**kw)
+
+    def test_no_trigger_with_event_and_correct_id_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA, PROTECTIVE_EXIT_RESOLUTION_SCHEMA
+        # build valid event
+        ep = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+            "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
+        eid = canonical_sha256(ep)
+        ev = ProtectiveExitEvent(schema_version=PROTECTIVE_EXIT_EVENT_SCHEMA, side=PositionSide.LONG,
+            reason="STOP_LOSS", trigger_kind="INTRABAR_LEVEL", trigger_bar_open_time_ms=0,
+            trigger_bar_index=1, trigger_level_price=90.0, raw_exit_price=90.0,
+            same_bar_collision=False, plan_id="a" * 64, observation_path_id="b" * 64, event_id=eid)
+        rp = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": "a" * 64,
+            "observationPathId": "b" * 64, "status": "NO_TRIGGER", "eventId": eid}
+        rid = canonical_sha256(rp)
+        with self.assertRaises(ValueError):
+            ProtectiveExitResolution(schema_version=PROTECTIVE_EXIT_RESOLUTION_SCHEMA, status="NO_TRIGGER",
+                plan_id="a" * 64, observation_path_id="b" * 64, event=ev, resolution_id=rid)
+
+    def test_triggered_no_event_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, canonical_sha256, PROTECTIVE_EXIT_RESOLUTION_SCHEMA
+        p = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": "a" * 64,
+            "observationPathId": "b" * 64, "status": "TRIGGERED", "eventId": None}
+        rid = canonical_sha256(p)
+        with self.assertRaises(ValueError):
+            ProtectiveExitResolution(schema_version=PROTECTIVE_EXIT_RESOLUTION_SCHEMA, status="TRIGGERED",
+                plan_id="a" * 64, observation_path_id="b" * 64, event=None, resolution_id=rid)
+
+    def test_plan_id_mismatch_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA, PROTECTIVE_EXIT_RESOLUTION_SCHEMA
+        ep = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+            "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
+        eid = canonical_sha256(ep)
+        ev = ProtectiveExitEvent(schema_version=PROTECTIVE_EXIT_EVENT_SCHEMA, side=PositionSide.LONG,
+            reason="STOP_LOSS", trigger_kind="INTRABAR_LEVEL", trigger_bar_open_time_ms=0,
+            trigger_bar_index=1, trigger_level_price=90.0, raw_exit_price=90.0,
+            same_bar_collision=False, plan_id="a" * 64, observation_path_id="b" * 64, event_id=eid)
+        rp = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": "z" * 64,
+            "observationPathId": "b" * 64, "status": "TRIGGERED", "eventId": eid}
+        rid = canonical_sha256(rp)
+        with self.assertRaises(ValueError):
+            ProtectiveExitResolution(schema_version=PROTECTIVE_EXIT_RESOLUTION_SCHEMA, status="TRIGGERED",
+                plan_id="z" * 64, observation_path_id="b" * 64, event=ev, resolution_id=rid)
+
+    def test_path_id_mismatch_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA, PROTECTIVE_EXIT_RESOLUTION_SCHEMA
+        ep = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+            "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
+        eid = canonical_sha256(ep)
+        ev = ProtectiveExitEvent(schema_version=PROTECTIVE_EXIT_EVENT_SCHEMA, side=PositionSide.LONG,
+            reason="STOP_LOSS", trigger_kind="INTRABAR_LEVEL", trigger_bar_open_time_ms=0,
+            trigger_bar_index=1, trigger_level_price=90.0, raw_exit_price=90.0,
+            same_bar_collision=False, plan_id="a" * 64, observation_path_id="b" * 64, event_id=eid)
+        rp = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": "a" * 64,
+            "observationPathId": "z" * 64, "status": "TRIGGERED", "eventId": eid}
+        rid = canonical_sha256(rp)
+        with self.assertRaises(ValueError):
+            ProtectiveExitResolution(schema_version=PROTECTIVE_EXIT_RESOLUTION_SCHEMA, status="TRIGGERED",
+                plan_id="a" * 64, observation_path_id="z" * 64, event=ev, resolution_id=rid)
+
+
 if __name__ == "__main__":
     unittest.main()
