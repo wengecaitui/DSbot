@@ -89,14 +89,14 @@ class CostModel:
 
 
 # ---------------------------------------------------------------------------
-# Trade accounting — pure function, LINEAR USDT semantics
+# Trade accounting
 # ---------------------------------------------------------------------------
 
 from enum import Enum
 from typing import Any
 
 
-_ACCOUNTING_SCHEMA = "stage-5r1.trade-accounting.v1"
+_TRADE_ACCOUNTING_SCHEMA_VERSION = "stage-5r1.trade-accounting.v1"
 
 
 class PositionSide(str, Enum):
@@ -114,8 +114,62 @@ def _canonical_sha256(value: Any) -> str:
     return _cs(value)
 
 
+def _normalize(value: Any) -> Any:
+    """Normalize continuous economic values to float for canonical identity.
+
+    Integers that represent continuous quantities (prices, equity, rates)
+    are normalized to float so that 1 and 1.0 produce the same identity.
+    Time fields and strings are left as-is.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_normalize(item) for item in value]
+    if isinstance(value, dict):
+        return {str(k): _normalize(v) for k, v in value.items()}
+    if hasattr(value, "value"):
+        return _normalize(value.value)
+    return value
+
+
+def _normalize_capital(c: CapitalModel) -> dict[str, Any]:
+    return {
+        "schemaVersion": c.schema_version,
+        "contractType": c.contract_type,
+        "initialEquity": float(c.initial_equity),
+        "positionFraction": float(c.position_fraction),
+        "maximumPositionFraction": float(c.maximum_position_fraction),
+        "allowLeverage": c.allow_leverage,
+        "bankruptcyPolicy": c.bankruptcy_policy,
+    }
+
+
+def _normalize_cost(c: CostModel) -> dict[str, Any]:
+    return {
+        "schemaVersion": c.schema_version,
+        "feeBpsPerFill": float(c.fee_bps_per_fill),
+        "halfSpreadBpsPerFill": float(c.half_spread_bps_per_fill),
+        "slippageBpsPerFill": float(c.slippage_bps_per_fill),
+        "fundingBpsPer8hAdverse": float(c.funding_bps_per_8h_adverse),
+        "fundingPeriodMs": c.funding_period_ms,
+    }
+
+
+def capital_model_id(capital: CapitalModel) -> str:
+    return _canonical_sha256(_normalize_capital(capital))
+
+
+def cost_model_id(cost: CostModel) -> str:
+    return _canonical_sha256(_normalize_cost(cost))
+
+
 def _validate_finite_positive(value: float, label: str) -> None:
-    """Reject NaN, Inf, bool, and non-positive numbers for prices."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"STAGE5R1_{label}_NON_NUMERIC: {value!r}")
     if not math.isfinite(float(value)):
@@ -125,7 +179,6 @@ def _validate_finite_positive(value: float, label: str) -> None:
 
 
 def _validate_timestamp(value: int, label: str) -> None:
-    """Reject float, bool, negative timestamps."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"STAGE5R1_{label}_NOT_INT: {value!r}")
     if value < 0:
@@ -138,6 +191,7 @@ class TradeAccounting:
 
     schema_version: str
     contract_type: str
+    trade_accounting_schema_version: str
     side: PositionSide
 
     entry_equity: float
@@ -151,13 +205,10 @@ class TradeAccounting:
     exit_fill_price: float
     exit_notional: float
 
-    # PnL decomposition
     raw_price_pnl_amount: float
     execution_pnl_amount: float
-    # Compat alias
-    gross_pnl_amount: float
+    gross_pnl_amount: float  # alias for execution_pnl_amount
 
-    # Cost decomposition
     spread_cost_amount: float
     slippage_cost_amount: float
     market_impact_cost_amount: float
@@ -179,6 +230,11 @@ class TradeAccounting:
 
     holding_time_ms: int
     completed_funding_periods: int
+
+    capital_model_id: str
+    cost_model_id: str
+    capital_initial_equity: float
+
     accounting_id: str
 
 
@@ -186,7 +242,6 @@ def calculate_trade_accounting(
     *,
     side: PositionSide,
     entry_equity: float,
-    position_fraction: float,
     raw_entry_price: float,
     raw_exit_price: float,
     entry_time_ms: int,
@@ -194,11 +249,26 @@ def calculate_trade_accounting(
     capital: CapitalModel,
     cost: CostModel,
 ) -> TradeAccounting:
-    """Compute full per-trade economic accounting for a LINEAR USDT position."""
+    """Compute full per-trade economic accounting for a LINEAR USDT position.
 
-    # --- input validation ---
-    if side not in (PositionSide.LONG, PositionSide.SHORT):
-        raise ValueError(f"STAGE5R1_SIDE_INVALID: {side}")
+    Position fraction is taken exclusively from ``capital.position_fraction``.
+    There is no independent position_fraction parameter — this prevents
+    bypassing the CapitalModel's max_position_fraction and leverage gates.
+    """
+
+    # --- side validation ---
+    if not isinstance(side, PositionSide):
+        raise ValueError(f"STAGE5R1_SIDE_INVALID: {side!r}")
+
+    # --- entry equity validation ---
+    if isinstance(entry_equity, bool) or not isinstance(entry_equity, (int, float)):
+        raise ValueError(f"STAGE5R1_ENTRY_EQUITY_NON_NUMERIC: {entry_equity!r}")
+    if not math.isfinite(float(entry_equity)):
+        raise ValueError(f"STAGE5R1_ENTRY_EQUITY_NON_FINITE: {entry_equity}")
+    if float(entry_equity) <= 0:
+        raise ValueError(f"STAGE5R1_ENTRY_EQUITY_NOT_POSITIVE: {entry_equity}")
+
+    # --- price and time validation ---
     _validate_finite_positive(raw_entry_price, "RAW_ENTRY_PRICE")
     _validate_finite_positive(raw_exit_price, "RAW_EXIT_PRICE")
     _validate_timestamp(entry_time_ms, "ENTRY_TIME_MS")
@@ -206,7 +276,10 @@ def calculate_trade_accounting(
     if exit_time_ms < entry_time_ms:
         raise ValueError(f"STAGE5R1_TRADE_TIME_ORDER_INVALID: exit={exit_time_ms} < entry={entry_time_ms}")
 
-    # --- fill prices (spread + slippage enter here) ---
+    # --- position fraction from capital model ---
+    position_fraction = capital.position_fraction
+
+    # --- fill prices ---
     spread_rate = cost.half_spread_bps_per_fill / 10_000
     slippage_rate = cost.slippage_bps_per_fill / 10_000
     impact_rate = spread_rate + slippage_rate
@@ -225,7 +298,7 @@ def calculate_trade_accounting(
     quantity = entry_notional / entry_fill_price
     exit_notional = quantity * exit_fill_price
 
-    # --- raw price PnL (no market impact at all) ---
+    # --- PnL ---
     if side is PositionSide.LONG:
         raw_price_pnl_amount = quantity * (raw_exit_price - raw_entry_price)
         execution_pnl_amount = quantity * (exit_fill_price - entry_fill_price)
@@ -233,13 +306,12 @@ def calculate_trade_accounting(
         raw_price_pnl_amount = quantity * (raw_entry_price - raw_exit_price)
         execution_pnl_amount = quantity * (entry_fill_price - exit_fill_price)
 
-    # --- spread and slippage amounts ---
-    # spreadCostAmount = quantity × (rawEntry + rawExit) × spreadRate  (symmetric impact model)
+    # --- spread/slippage amounts ---
     spread_cost_amount = quantity * (raw_entry_price + raw_exit_price) * spread_rate
     slippage_cost_amount = quantity * (raw_entry_price + raw_exit_price) * slippage_rate
     market_impact_cost_amount = spread_cost_amount + slippage_cost_amount
 
-    # --- fee amounts ---
+    # --- fee ---
     fee_rate = cost.fee_bps_per_fill / 10_000
     entry_fee_amount = entry_notional * fee_rate
     exit_fee_amount = exit_notional * fee_rate
@@ -251,39 +323,42 @@ def calculate_trade_accounting(
     funding_rate_per_period = cost.funding_bps_per_8h_adverse / 10_000
     funding_amount = entry_notional * funding_rate_per_period * completed_funding_periods
 
-    # --- cost totals ---
+    # --- totals ---
     explicit_cost_amount = fee_amount + funding_amount
     total_cost_amount = market_impact_cost_amount + explicit_cost_amount
-
-    # --- net PnL ---
     net_pnl_amount = execution_pnl_amount - explicit_cost_amount
 
     # --- returns ---
-    gross_return_on_entry_equity = 0.0 if entry_equity == 0 else execution_pnl_amount / entry_equity
-    net_return_on_entry_equity = 0.0 if entry_equity == 0 else net_pnl_amount / entry_equity
+    gross_return_on_entry_equity = execution_pnl_amount / entry_equity
+    net_return_on_entry_equity = net_pnl_amount / entry_equity
 
-    # --- equity and bankruptcy ---
+    # --- equity ---
     raw_closing_equity = entry_equity + net_pnl_amount
     bankrupt = raw_closing_equity <= 0.0
     closing_equity = max(raw_closing_equity, 0.0)
 
+    # --- model IDs ---
+    cm_id = capital_model_id(capital)
+    co_id = cost_model_id(cost)
+
     # --- canonical identity ---
-    identity_payload = {
-        "capitalModel": _capital_dict(capital),
-        "costModel": _cost_dict(cost),
+    identity_payload = _normalize({
+        "tradeAccountingSchemaVersion": _TRADE_ACCOUNTING_SCHEMA_VERSION,
+        "capitalModelId": cm_id,
+        "costModelId": co_id,
         "side": side.value,
-        "entryEquity": entry_equity,
-        "positionFraction": position_fraction,
-        "rawEntryPrice": raw_entry_price,
-        "rawExitPrice": raw_exit_price,
+        "entryEquity": float(entry_equity),
+        "rawEntryPrice": float(raw_entry_price),
+        "rawExitPrice": float(raw_exit_price),
         "entryTimeMs": entry_time_ms,
         "exitTimeMs": exit_time_ms,
-    }
+    })
     accounting_id = _canonical_sha256(identity_payload)
 
     return TradeAccounting(
-        schema_version=_ACCOUNTING_SCHEMA,
+        schema_version=capital.schema_version,
         contract_type=capital.contract_type,
+        trade_accounting_schema_version=_TRADE_ACCOUNTING_SCHEMA_VERSION,
         side=side,
         entry_equity=entry_equity,
         position_fraction=position_fraction,
@@ -314,28 +389,8 @@ def calculate_trade_accounting(
         bankrupt=bankrupt,
         holding_time_ms=holding_time_ms,
         completed_funding_periods=completed_funding_periods,
+        capital_model_id=cm_id,
+        cost_model_id=co_id,
+        capital_initial_equity=capital.initial_equity,
         accounting_id=accounting_id,
     )
-
-
-def _capital_dict(c: CapitalModel) -> dict[str, Any]:
-    return {
-        "schemaVersion": c.schema_version,
-        "contractType": c.contract_type,
-        "initialEquity": c.initial_equity,
-        "positionFraction": c.position_fraction,
-        "maximumPositionFraction": c.maximum_position_fraction,
-        "allowLeverage": c.allow_leverage,
-        "bankruptcyPolicy": c.bankruptcy_policy,
-    }
-
-
-def _cost_dict(c: CostModel) -> dict[str, Any]:
-    return {
-        "schemaVersion": c.schema_version,
-        "feeBpsPerFill": c.fee_bps_per_fill,
-        "halfSpreadBpsPerFill": c.half_spread_bps_per_fill,
-        "slippageBpsPerFill": c.slippage_bps_per_fill,
-        "fundingBpsPer8hAdverse": c.funding_bps_per_8h_adverse,
-        "fundingPeriodMs": c.funding_period_ms,
-    }

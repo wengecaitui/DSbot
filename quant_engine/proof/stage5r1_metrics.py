@@ -10,8 +10,27 @@ from quant_engine.proof.stage5r1_capital import TradeAccounting
 PROFIT_FACTOR_WIN_ONLY_SENTINEL = 1_000_000.0
 
 
+def _validate_lineage(trades: Sequence[TradeAccounting]) -> None:
+    """Fail-closed: all trades must share the same contract lineage."""
+    if not trades:
+        return
+    first = trades[0]
+    for i, t in enumerate(trades):
+        if t.trade_accounting_schema_version != first.trade_accounting_schema_version:
+            raise ValueError(f"STAGE5R1_METRICS_MIXED_TRADE_SCHEMA: trade {i}")
+        if t.contract_type != first.contract_type:
+            raise ValueError(f"STAGE5R1_METRICS_MIXED_CONTRACT_TYPE: trade {i}")
+        if t.capital_model_id != first.capital_model_id:
+            raise ValueError(f"STAGE5R1_METRICS_MIXED_CAPITAL_MODEL: trade {i}")
+        if t.cost_model_id != first.cost_model_id:
+            raise ValueError(f"STAGE5R1_METRICS_MIXED_COST_MODEL: trade {i}")
+        if t.capital_initial_equity != first.capital_initial_equity:
+            raise ValueError(f"STAGE5R1_METRICS_MIXED_INITIAL_EQUITY: trade {i}")
+
+
 def standard_profit_factor(trades: Sequence[TradeAccounting]) -> float:
     """Profit factor from actual net PnL amounts (equity-delta)."""
+    _validate_lineage(trades)
     if not trades:
         return 0.0
     wins = sum(t.net_pnl_amount for t in trades if t.net_pnl_amount > 0)
@@ -24,7 +43,8 @@ def standard_profit_factor(trades: Sequence[TradeAccounting]) -> float:
 
 
 def return_profit_factor(trades: Sequence[TradeAccounting]) -> float:
-    """Profit factor from trade-level net returns (backward-compat with old Stage 5)."""
+    """Profit factor from trade-level net returns (backward-compat)."""
+    _validate_lineage(trades)
     if not trades:
         return 0.0
     wins = sum(t.net_return_on_entry_equity for t in trades if t.net_return_on_entry_equity > 0)
@@ -37,11 +57,8 @@ def return_profit_factor(trades: Sequence[TradeAccounting]) -> float:
 
 
 def aggregate_cost_accounting(trades: Sequence[TradeAccounting]) -> dict[str, Any]:
-    """Aggregate cost accounting across trades.
-
-    Returns actual amounts, fractions using total_cost_amount, and
-    rate disclosure sums for backward comparison.
-    """
+    """Aggregate cost accounting across trades."""
+    _validate_lineage(trades)
     if not trades:
         return {
             "spread_cost_amount": 0.0, "slippage_cost_amount": 0.0,
@@ -62,9 +79,9 @@ def aggregate_cost_accounting(trades: Sequence[TradeAccounting]) -> dict[str, An
     explicit_cost_amount = sum(t.explicit_cost_amount for t in trades)
     total_cost_amount = sum(t.total_cost_amount for t in trades)
 
-    initial_equity = trades[0].entry_equity
-    cost_as_initial = total_cost_amount / initial_equity if initial_equity > 0 else 0.0
-    avg_equity = statistics.fmean(t.entry_equity for t in trades)
+    capital_initial = trades[0].capital_initial_equity
+    cost_as_initial = total_cost_amount / capital_initial if capital_initial > 0 else 0.0
+    avg_equity = statistics.fmean(float(t.entry_equity) for t in trades)
     cost_as_avg = total_cost_amount / avg_equity if avg_equity > 0 else 0.0
 
     fee_rate_disclosure_sum = sum(
