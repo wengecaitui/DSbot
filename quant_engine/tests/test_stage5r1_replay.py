@@ -511,5 +511,79 @@ class InstructionValidatorFailClosedTests(unittest.TestCase):
             validate_instruction_set(insts, b, warmup_bars=True)  # type: ignore
 
 
+# --- FINAL CLOSURE: closed=object ---
+
+class ClosedObjectRejectionTests(unittest.TestCase):
+    def test_closed_object_rejected(self):
+        with self.assertRaises(ValueError):
+            ReplayBar(open_time_ms=0, open=100.0, high=101.0, low=99.0, close=100.5, volume=100.0, closed=object())
+
+
+# --- FINAL CLOSURE: independent dataset payload ---
+
+class IndependentDatasetPayloadTests(unittest.TestCase):
+    def test_dataset_id_matches_independent_payload(self):
+        from quant_engine.proof.stage5_evaluation import canonical_sha256
+        from quant_engine.proof.stage5r1_replay import REPLAY_BAR_SCHEMA
+        b = bars(150, 0)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT))
+        result = run_stage5r1_replay(bars=b, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        expected = {
+            "schemaVersion": REPLAY_BAR_SCHEMA,
+            "symbol": "BTC/USDT",
+            "timeframeMs": 300000,
+            "bars": [
+                {
+                    "openTimeMs": b_bar.open_time_ms, "open": float(b_bar.open),
+                    "high": float(b_bar.high), "low": float(b_bar.low),
+                    "close": float(b_bar.close), "volume": float(b_bar.volume),
+                    "closed": True,
+                }
+                for b_bar in b
+            ],
+        }
+        self.assertEqual(result.dataset_id, canonical_sha256(expected))
+
+
+# --- FINAL CLOSURE: int/float canonical equivalence ---
+
+class IntFloatCanonicalEquivalenceTests(unittest.TestCase):
+    def test_int_float_bars_same_identity(self):
+        b_int = tuple(ReplayBar(open_time_ms=i * 300000, open=100 + i, high=101 + i, low=99 + i, close=100 + i, volume=10)
+                      for i in range(150))
+        b_float = tuple(ReplayBar(open_time_ms=i * 300000, open=100.0 + i, high=101.0 + i, low=99.0 + i, close=100.0 + i, volume=10.0)
+                        for i in range(150))
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b_int[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b_int[110].open_time_ms, action=ReplayAction.EXIT))
+        r_int = run_stage5r1_replay(bars=b_int, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        r_float = run_stage5r1_replay(bars=b_float, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        self.assertEqual(r_int.dataset_id, r_float.dataset_id)
+        self.assertEqual(r_int.instruction_set_id, r_float.instruction_set_id)
+        self.assertEqual(r_int.replay_config_id, r_float.replay_config_id)
+        self.assertEqual(r_int.replay_id, r_float.replay_id)
+        self.assertEqual(r_int, r_float)
+
+
+# --- FINAL CLOSURE: strengthened immutability ---
+
+class StrengthenedImmutabilityTests(unittest.TestCase):
+    def test_bars_unchanged_on_success(self):
+        b_list = list(bars(150, 0))
+        bars_snap = tuple(b_list)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b_list[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b_list[110].open_time_ms, action=ReplayAction.EXIT))
+        run_stage5r1_replay(bars=b_list, instructions=insts, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        self.assertEqual(tuple(b_list), bars_snap)
+
+    def test_instructions_unchanged_on_rejection(self):
+        b = bars(150, 0)
+        inst_list = [ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.EXIT)]
+        inst_snap = tuple(inst_list)
+        with self.assertRaisesRegex(ValueError, "REPLAY_EXIT_WHILE_FLAT"):
+            run_stage5r1_replay(bars=b, instructions=inst_list, config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_COST)
+        self.assertEqual(tuple(inst_list), inst_snap)
+
+
 if __name__ == "__main__":
     unittest.main()

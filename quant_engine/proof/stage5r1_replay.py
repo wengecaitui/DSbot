@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Sequence
+from typing import Sequence
 
 from quant_engine.proof.stage5r1_capital import (
     CapitalModel,
@@ -19,7 +19,7 @@ from quant_engine.proof.stage5r1_capital import (
     capital_model_id,
     cost_model_id,
 )
-from quant_engine.proof.stage5_evaluation import canonical_json_bytes, canonical_sha256
+from quant_engine.proof.stage5_evaluation import canonical_sha256
 
 # --- Schema versions ---
 
