@@ -199,5 +199,153 @@ class ImmutabilityTests(unittest.TestCase):
         self.assertEqual(tuple(b), snap)
 
 
+# ======== REPAIR: VALIDATION + COVERAGE TESTS ========
+
+class EarliestTriggerTests(unittest.TestCase):
+    def test_earliest_bar_wins(self):
+        b = list(bars(20))
+        b[5] = bar(b[5].open_time_ms, b[5].open, b[5].high, 88.0, b[5].close)  # stop at bar 5
+        b[6] = bar(b[6].open_time_ms, b[6].open, 130.0, 85.0, b[6].close)  # also triggers
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        r = resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        self.assertEqual(r.event.trigger_bar_index, 5)
+
+    def test_exact_stop_boundary(self):
+        b = list(bars(20))
+        b[5] = bar(b[5].open_time_ms, b[5].open, b[5].high, 90.0, b[5].close)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        r = resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        self.assertEqual(r.event.reason, "STOP_LOSS")
+
+    def test_exact_target_boundary(self):
+        b = list(bars(20))
+        b[5] = bar(b[5].open_time_ms, b[5].open, 120.0, b[5].low, b[5].close)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        r = resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        self.assertEqual(r.event.reason, "TAKE_PROFIT")
+
+
+class IdentityMutationTests(unittest.TestCase):
+    def test_plan_change_changes_resolution_id(self):
+        b = bars(20)
+        p1 = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        p2 = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=85.0, take_profit_price=120.0)
+        r1 = resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=p1, symbol="BTC/USDT", timeframe_ms=300000)
+        r2 = resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=p2, symbol="BTC/USDT", timeframe_ms=300000)
+        self.assertNotEqual(r1.resolution_id, r2.resolution_id)
+
+    def test_ohlc_change_changes_observation_path(self):
+        b1, b2 = list(bars(20)), list(bars(20))
+        b2[5] = bar(b2[5].open_time_ms, b2[5].open, 999.0, b2[5].low, b2[5].close)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        r1 = resolve_protective_exit(bars=b1, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        r2 = resolve_protective_exit(bars=b2, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        self.assertNotEqual(r1.observation_path_id, r2.observation_path_id)
+
+    def test_volume_preserves_observation_path(self):
+        b1, b2 = list(bars(20)), list(bars(20))
+        b2[5] = bar(b2[5].open_time_ms, b2[5].open, b2[5].high, b2[5].low, b2[5].close, v=999.0)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        r1 = resolve_protective_exit(bars=b1, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        r2 = resolve_protective_exit(bars=b2, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        self.assertEqual(r1.observation_path_id, r2.observation_path_id)
+
+    def test_post_observation_preserves_path(self):
+        b1 = list(bars(20))
+        b1[15] = bar(b1[15].open_time_ms, 999.0, 1000.0, 998.0, 999.5)  # after last_obs=10
+        b2 = bars(20)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        r1 = resolve_protective_exit(bars=b1, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        r2 = resolve_protective_exit(bars=b2, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        self.assertEqual(r1.observation_path_id, r2.observation_path_id)
+
+
+class InputValidationTests(unittest.TestCase):
+    def test_malformed_short_target_rejected(self):
+        with self.assertRaises(ValueError):
+            ProtectiveExitPlan(side=PositionSide.SHORT, entry_reference_price=100.0, stop_price=110.0, take_profit_price=105.0)
+
+    def test_negative_entry_idx_rejected(self):
+        b = bars(20)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=b, entry_execution_index=-1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+
+    def test_reversed_indices_rejected(self):
+        b = bars(20)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=b, entry_execution_index=10, last_observation_index=1, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+
+    def test_bool_idx_rejected(self):
+        b = bars(20)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=b, entry_execution_index=True, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+
+    def test_fake_plan_rejected(self):
+        b = bars(20)
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan={"fake": True}, symbol="BTC/USDT", timeframe_ms=300000)
+
+    def test_subclass_plan_rejected(self):
+        b = bars(20)
+        class FakePlan(ProtectiveExitPlan): pass
+        fp = FakePlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=fp, symbol="BTC/USDT", timeframe_ms=300000)
+
+    def test_empty_symbol_rejected(self):
+        b = bars(20)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="", timeframe_ms=300000)
+
+    def test_wrong_timeframe_rejected(self):
+        b = bars(20)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        with self.assertRaises(ValueError):
+            resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=600000)
+
+
+class EventResolutionValidationTests(unittest.TestCase):
+    def test_event_frozen(self):
+        b = list(bars(20))
+        b[5] = bar(b[5].open_time_ms, b[5].open, b[5].high, 88.0, b[5].close)
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        r = resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        with self.assertRaises(Exception):
+            r.event.trigger_bar_index = 99  # type: ignore
+
+    def test_forged_event_id_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA
+        correct = canonical_sha256({"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+            "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+            "sameBarCollision": False, "planId": "a"*64, "observationPathId": "b"*64})
+        # Construct with correct ID
+        v = ProtectiveExitEvent(schema_version=PROTECTIVE_EXIT_EVENT_SCHEMA, side=PositionSide.LONG, reason="STOP_LOSS",
+            trigger_kind="INTRABAR_LEVEL", trigger_bar_open_time_ms=0, trigger_bar_index=1,
+            trigger_level_price=90.0, raw_exit_price=90.0, same_bar_collision=False, plan_id="a"*64,
+            observation_path_id="b"*64, event_id=correct)
+        # Forged wrong ID
+        with self.assertRaises(ValueError):
+            ProtectiveExitEvent(schema_version=PROTECTIVE_EXIT_EVENT_SCHEMA, side=PositionSide.LONG, reason="STOP_LOSS",
+                trigger_kind="INTRABAR_LEVEL", trigger_bar_open_time_ms=0, trigger_bar_index=1,
+                trigger_level_price=90.0, raw_exit_price=90.0, same_bar_collision=False, plan_id="a"*64,
+                observation_path_id="b"*64, event_id="0"*64)
+
+    def test_no_trigger_with_event_rejected(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, ProtectiveExitEvent
+        plan = ProtectiveExitPlan(side=PositionSide.LONG, entry_reference_price=100.0, stop_price=90.0, take_profit_price=120.0)
+        ev = None
+        # construct a valid event to use
+        b = list(bars(20))
+        b[5] = bar(b[5].open_time_ms, b[5].open, b[5].high, 88.0, b[5].close)
+        r = resolve_protective_exit(bars=b, entry_execution_index=1, last_observation_index=10, plan=plan, symbol="BTC/USDT", timeframe_ms=300000)
+        with self.assertRaises(ValueError):
+            ProtectiveExitResolution(schema_version="stage-5r1.protective-exit-resolution.v1", status="NO_TRIGGER", plan_id=plan.plan_id, observation_path_id=r.observation_path_id, event=r.event, resolution_id="")
+
+
 if __name__ == "__main__":
     unittest.main()
