@@ -601,8 +601,9 @@ class NestedForgeryTests(unittest.TestCase):
         b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
         acct = r.trades[0].accounting
         object.__setattr__(acct, "net_pnl_amount", 999999.0)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as ctx:
             build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        self.assertIn("ACCT_NET_PNL_MISMATCH", str(ctx.exception))
 
     def test_no_trades_return_profit_factor_nonnull_rejected(self):
         """NO_TRADES with non-null return_profit_factor is rejected."""
@@ -701,16 +702,137 @@ class Level3GenuineTests(unittest.TestCase):
     def test_measured_rpf_negative_rejected(self):
         b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        object.__setattr__(report, "return_profit_factor", -1.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
         with self.assertRaises(ValueError) as ctx:
-            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "return_profit_factor": -1.0, "report_id": "0"*64})
-        self.assertIn("RPF", str(ctx.exception).upper())
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        e = str(ctx.exception)
+        self.assertIn("RPF", e.upper())
+        self.assertNotIn("REPORT_ID", e)
 
     def test_base_trade_forgery_rejected(self):
         b, insts, bindings, r = _two_trade_setup()
         bt = r.base.trades[0]
         object.__setattr__(bt, "trade_id", "0" * 64)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as ctx:
             build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        self.assertIn("RESULT_REVALIDATION_FAILED", str(ctx.exception))
+
+
+class FinalAdversarialTests(unittest.TestCase):
+    """Tests 60-68: additional nested guards and direct accounting validator."""
+
+    def _recompute_id(self, report):
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        return canonical_sha256(_report_payload(report))
+
+    def test_nested_cost_explicit_forgery_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        cm = report.cost_metrics
+        object.__setattr__(cm, "explicit_cost_amount", 999.0)
+        object.__setattr__(cm, "total_cost_amount", cm.market_impact_cost_amount + 999.0)
+        new_id = self._recompute_id(report)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        e = str(ctx.exception)
+        self.assertIn("COST_EXPLICIT_MISMATCH", e)
+        self.assertNotIn("REPORT_ID", e)
+
+    def test_zero_duration_exceeds_trade_count_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        c = report.counts
+        object.__setattr__(c, "zero_duration_count", 999)
+        new_id = self._recompute_id(report)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        e = str(ctx.exception)
+        self.assertIn("ZERO_DURATION", e)
+        self.assertNotIn("REPORT_ID", e)
+
+    def test_no_trades_nonzero_zero_duration_rejected(self):
+        b = bars(200)
+        r = run_stage5r1_protective_excursion(bars=b, instructions=(), protective_bindings=(), config=_cfg(), capital=_CM, cost=_ZC)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=())
+        c = report.counts
+        object.__setattr__(c, "zero_duration_count", 1)
+        new_id = self._recompute_id(report)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        e = str(ctx.exception)
+        self.assertIn("ZERO_DURATION", e)
+        self.assertNotIn("REPORT_ID", e)
+
+    def test_selection_forgery_rejected(self):
+        b, insts, bindings, r = _two_trade_setup()
+        sel = r.base.selections[0]
+        object.__setattr__(sel, "raw_exit_price", 999999.0)
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        self.assertIn("TRADE_REVALIDATION_FAILED", str(ctx.exception))
+
+    def test_accounting_net_return_forgery_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _validate_trade_accounting
+        acct = r.trades[0].accounting
+        exc = r.trades[0].excursion
+        object.__setattr__(acct, "net_return_on_entry_equity", 999.0)
+        with self.assertRaises(ValueError) as ctx:
+            _validate_trade_accounting(acct, entry_time_ms=exc.entry_execution_time_ms, exit_time_ms=exc.exit_execution_time_ms)
+        self.assertIn("ACCT_NET_RETURN_MISMATCH", str(ctx.exception))
+
+    def test_accounting_raw_closing_forgery_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _validate_trade_accounting
+        acct = r.trades[0].accounting
+        exc = r.trades[0].excursion
+        object.__setattr__(acct, "raw_closing_equity", 999999.0)
+        with self.assertRaises(ValueError) as ctx:
+            _validate_trade_accounting(acct, entry_time_ms=exc.entry_execution_time_ms, exit_time_ms=exc.exit_execution_time_ms)
+        self.assertIn("ACCT_RAW_CLOSING_MISMATCH", str(ctx.exception))
+
+    def test_accounting_id_forgery_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _validate_trade_accounting
+        acct = r.trades[0].accounting
+        exc = r.trades[0].excursion
+        object.__setattr__(acct, "accounting_id", "0" * 64)
+        with self.assertRaises(ValueError) as ctx:
+            _validate_trade_accounting(acct, entry_time_ms=exc.entry_execution_time_ms, exit_time_ms=exc.exit_execution_time_ms)
+        self.assertIn("ACCT_ID_MISMATCH", str(ctx.exception))
+
+    def test_accounting_schema_forgery_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _validate_trade_accounting
+        acct = r.trades[0].accounting
+        exc = r.trades[0].excursion
+        object.__setattr__(acct, "schema_version", "wrong")
+        with self.assertRaises(ValueError) as ctx:
+            _validate_trade_accounting(acct, entry_time_ms=exc.entry_execution_time_ms, exit_time_ms=exc.exit_execution_time_ms)
+        self.assertIn("ACCT_SCHEMA_INVALID", str(ctx.exception))
+
+    def test_accounting_subclass_type_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _validate_trade_accounting, TradeAccounting
+        acct = r.trades[0].accounting
+        exc = r.trades[0].excursion
+        class Fake(TradeAccounting): pass
+        fake = Fake(**{k: getattr(acct, k) for k in acct.__dict__})
+        with self.assertRaises(ValueError) as ctx:
+            _validate_trade_accounting(fake, entry_time_ms=exc.entry_execution_time_ms, exit_time_ms=exc.exit_execution_time_ms)
+        self.assertIn("ACCT_TYPE_INVALID", str(ctx.exception))
+
+    def test_accounting_net_pnl_forgery_rejected_exact(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _validate_trade_accounting
+        acct = r.trades[0].accounting
+        exc = r.trades[0].excursion
+        object.__setattr__(acct, "net_pnl_amount", 999999.0)
+        with self.assertRaises(ValueError) as ctx:
+            _validate_trade_accounting(acct, entry_time_ms=exc.entry_execution_time_ms, exit_time_ms=exc.exit_execution_time_ms)
+        self.assertIn("ACCT_NET_PNL_MISMATCH", str(ctx.exception))
 
 
 if __name__ == "__main__":
