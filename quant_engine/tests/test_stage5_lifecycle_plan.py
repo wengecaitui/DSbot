@@ -541,6 +541,83 @@ class FactoryTypeBoundaryTests(unittest.TestCase):
             create_stage5_lifecycle_instruction(True, Stage5LifecycleAction.ENTER_LONG, Stage5LifecycleOrigin.STRATEGY)
         self.assertIn("SIGNAL_TYPE", str(ctx.exception))
 
+    def test_factory_rejects_float_zero(self):
+        with self.assertRaises(ValueError) as ctx:
+            create_stage5_lifecycle_instruction(0.0, Stage5LifecycleAction.ENTER_LONG, Stage5LifecycleOrigin.STRATEGY)
+        self.assertIn("SIGNAL_TYPE", str(ctx.exception))
+
+    def test_factory_rejects_float_one_point_five(self):
+        with self.assertRaises(ValueError) as ctx:
+            create_stage5_lifecycle_instruction(1.5, Stage5LifecycleAction.ENTER_LONG, Stage5LifecycleOrigin.STRATEGY)
+        self.assertIn("SIGNAL_TYPE", str(ctx.exception))
+
+
+class FloatTimeframeTests(unittest.TestCase):
+    _SID = "a" * 64
+    _SPID = "b" * 64
+    _PID = "c" * 64
+    _DID = "d" * 64
+
+    def test_float_timeframe_rejected(self):
+        """Direct construction with 300000.0 timeframe rejects with TIMEFRAME_NOT_INT."""
+        from quant_engine.proof.stage5_lifecycle_plan import _plan_payload, PLAN_SCHEMA, PLAN_POLICY
+        p_no_id = {
+            "schemaVersion": PLAN_SCHEMA, "policy": PLAN_POLICY,
+            "strategyId": self._SID, "specId": self._SPID,
+            "parameterId": self._PID, "datasetId": self._DID,
+            "symbol": "BTC/USDT", "timeframeMs": 300000.0, "warmupBars": 30,
+            "scoredStartOpenTimeMs": 0, "scoredEndExclusiveOpenTimeMs": F * 10,
+            "terminalExecutionBarOpenTimeMs": F * 10, "instructionIds": [],
+            "instructionCount": 0, "reversalCount": 0, "terminalExitCount": 0,
+            "initialState": "FLAT", "finalState": "FLAT",
+        }
+        plan_id = canonical_sha256(p_no_id)
+        with self.assertRaises(ValueError) as ctx:
+            Stage5LifecyclePlan(
+                schema_version=PLAN_SCHEMA, policy=PLAN_POLICY,
+                strategy_id=self._SID, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", timeframe_ms=300000.0,
+                warmup_bars=30, scored_start_open_time_ms=0,
+                scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10,
+                instructions=(), instruction_count=0, reversal_count=0,
+                terminal_exit_count=0, initial_state="FLAT", final_state="FLAT",
+                plan_id=plan_id,
+            )
+        self.assertIn("TIMEFRAME_NOT_INT", str(ctx.exception))
+
+
+class HostileTruthinessTests(unittest.TestCase):
+    _SPID = "b" * 64
+    _PID = "c" * 64
+    _DID = "d" * 64
+
+    class _Hostile:
+        def __bool__(self):
+            raise RuntimeError("BOOM")
+
+    def test_hostile_strategy_id_raises_value_error(self):
+        sid = self._Hostile()
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id=sid, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_STRATEGY_NOT_STRING", str(ctx.exception))
+
+    def test_hostile_symbol_raises_value_error(self):
+        sym = self._Hostile()
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol=sym, warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_SYMBOL_NOT_STRING", str(ctx.exception))
+
 
 class TimeAlignmentTests(unittest.TestCase):
     _SID = "a" * 64

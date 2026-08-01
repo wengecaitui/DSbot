@@ -88,9 +88,9 @@ def create_stage5_lifecycle_instruction(
     origin: Stage5LifecycleOrigin,
 ) -> Stage5LifecycleInstruction:
     """Deterministic factory. Caller cannot supply the ID."""
-    if isinstance(signal_bar_open_time_ms, bool) or not isinstance(signal_bar_open_time_ms, (int, float)):
+    if type(signal_bar_open_time_ms) is not int:
         raise ValueError("FACTORY_SIGNAL_TYPE_INVALID")
-    if signal_bar_open_time_ms != signal_bar_open_time_ms or signal_bar_open_time_ms < 0:
+    if signal_bar_open_time_ms < 0:
         raise ValueError("FACTORY_SIGNAL_INVALID")
     if type(action) is not Stage5LifecycleAction:
         raise ValueError("FACTORY_ACTION_INVALID")
@@ -163,19 +163,25 @@ class Stage5LifecyclePlan:
             raise ValueError("PLAN_SCHEMA_INVALID")
         if self.policy != PLAN_POLICY:
             raise ValueError("PLAN_POLICY_INVALID")
+        if type(self.timeframe_ms) is not int:
+            raise ValueError("PLAN_TIMEFRAME_NOT_INT")
         if self.timeframe_ms != TIMEFRAME:
             raise ValueError("PLAN_TIMEFRAME_INVALID")
         if self.initial_state != "FLAT":
             raise ValueError("PLAN_INITIAL_NOT_FLAT")
         if self.final_state != "FLAT":
             raise ValueError("PLAN_FINAL_NOT_FLAT")
-        if not self.strategy_id or not isinstance(self.strategy_id, str):
+        if not isinstance(self.strategy_id, str):
+            raise ValueError("PLAN_STRATEGY_NOT_STRING")
+        if not self.strategy_id:
             raise ValueError("PLAN_STRATEGY_INVALID")
         _vsha(self.spec_id, "PLAN_SPEC_ID")
         _vsha(self.parameter_id, "PLAN_PARAM_ID")
         _vsha(self.dataset_id, "PLAN_DATASET_ID")
         _vsha(self.plan_id, "PLAN_PLAN_ID")
-        if not self.symbol or not isinstance(self.symbol, str):
+        if not isinstance(self.symbol, str):
+            raise ValueError("PLAN_SYMBOL_NOT_STRING")
+        if not self.symbol:
             raise ValueError("PLAN_SYMBOL_INVALID")
         _vint(self.warmup_bars, "PLAN_WARMUP")
         if self.warmup_bars <= 0:
@@ -278,6 +284,10 @@ def build_stage5_lifecycle_plan(
     warmup_bars, scored_start_open_time_ms, scored_end_exclusive_open_time_ms,
     terminal_execution_bar_open_time_ms, instructions,
 ) -> Stage5LifecyclePlan:
+    if not isinstance(strategy_id, str):
+        raise ValueError("BUILD_STRATEGY_NOT_STRING")
+    if not isinstance(symbol, str):
+        raise ValueError("BUILD_SYMBOL_NOT_STRING")
     if type(instructions) is not tuple:
         raise ValueError("BUILD_INSTRUCTIONS_NOT_TUPLE")
     for i, inst in enumerate(instructions):
