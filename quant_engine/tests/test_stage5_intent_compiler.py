@@ -374,7 +374,7 @@ class HostileInputTests(unittest.TestCase):
         __float__ = __bool__
 
     # --- Obs factory plain hostile: all fields table-driven ---
-    def test_hostile_obs_factory_plain_all_fields(self):
+    def test_hostile_obs_factory_all_fields(self):
         H = self._Hostile
         for field, call_fn, token in [
             ("strategy", lambda: create_stage5_strategy_intent_observation(
@@ -440,7 +440,7 @@ class HostileInputTests(unittest.TestCase):
                               f"Expected {token} for {field}, got: {ctx.exception}")
 
     # --- Obs factory hostile-str all 5 lineage fields ---
-    def test_hostile_obs_factory_str_all_fields(self):
+    def test_hostile_str_obs_factory_all_fields(self):
         for field, kw, token in [
             ("strategy", {"sid": self._HostileStr("x" * 64)}, "OBS_FACTORY_STRATEGY"),
             ("spec", {"spid": self._HostileStr("f" * 64)}, "OBS_FACTORY_SPEC_ID"),
@@ -454,7 +454,7 @@ class HostileInputTests(unittest.TestCase):
                 self.assertIn(token, str(ctx.exception))
 
     # --- Compiler plain hostile: all fields table-driven ---
-    def test_hostile_compiler_plain_all_fields(self):
+    def test_hostile_compiler_all_fields(self):
         base = dict(strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID,
                      symbol=_SYM, warmup_bars=30, max_holding_bars=96,
                      scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
@@ -502,7 +502,7 @@ class HostileInputTests(unittest.TestCase):
                     )
                 self.assertIn(token, str(ctx.exception))
 
-    def test_compiler_direct_hostile_obs_ids_from_valid(self):
+    def test_compilation_direct_hostile_obs_ids(self):
         # from valid compilation, mutate obs_ids to hostile tuple
         obs = tuple(_obs(i * F, le=(i == 0), lx=(i == 5)) for i in range(9))
         comp = compile_stage5_strategy_intent(
@@ -515,6 +515,35 @@ class HostileInputTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             Stage5IntentCompilation.__post_init__(comp)
         self.assertIn("COMPILATION_OBS_ID_MALFORMED", str(ctx.exception))
+
+    def test_hostile_strategy_id_obs_factory(self):
+        with self.assertRaises(ValueError) as ctx:
+            _obs(0, le=True, sid=self._Hostile())
+        self.assertIn("OBS_FACTORY_STRATEGY", str(ctx.exception))
+
+    def test_hostile_spec_id_obs_factory(self):
+        with self.assertRaises(ValueError) as ctx:
+            _obs(0, le=True, spid=self._Hostile())
+        self.assertIn("OBS_FACTORY_SPEC_ID", str(ctx.exception))
+
+    def test_hostile_int_time_obs_factory(self):
+        with self.assertRaises(ValueError):
+            create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID,
+                dataset_id=_DID, symbol=_SYM, signal_bar_open_time_ms=self._Hostile(),
+                has_outputs=True, long_entry=False, short_entry=False,
+                long_exit=False, short_exit=False)
+
+    def test_hostile_compiler_strategy_id(self):
+        with self.assertRaises(ValueError) as ctx:
+            compile_stage5_strategy_intent(
+                strategy_id=self._Hostile(), spec_id=_SPID, parameter_id=_PID,
+                dataset_id=_DID, symbol=_SYM, warmup_bars=30, max_holding_bars=96,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10,
+                observations=tuple(_obs(i * F) for i in range(9)),
+            )
+        self.assertIn("COMPILE_STRATEGY_NOT_STRING", str(ctx.exception))
 
     # --- Direct observation hostile schema ---
     def test_obs_direct_hostile_schema(self):
@@ -781,7 +810,7 @@ class VerifyExtendedTests(unittest.TestCase):
 
 
 class TransitiveImportTests(unittest.TestCase):
-    def test_transitive_no_forbidden_modules(self):
+    def test_transitive_import_chain_no_forbidden(self):
         import ast, importlib.util, os
         forbidden = {"strategy_adapter", "stage5_harness", "stage5r1_replay",
                      "stage5r1_protective_replay", "numpy", "pandas",
