@@ -627,6 +627,66 @@ class BuilderBoundaryTests(unittest.TestCase):
             )
         self.assertIn("BUILD_START_NOT_INT", str(ctx.exception))
 
+    def test_hostile_strategy_id_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id=self._Hostile(), spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_STRATEGY_NOT_STRING", str(ctx.exception))
+
+    def test_hostile_symbol_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol=self._Hostile(), warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_SYMBOL_NOT_STRING", str(ctx.exception))
+
+    def test_hostile_parameter_id_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._Hostile(),
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_PARAM_ID", str(ctx.exception))
+
+    def test_hostile_dataset_id_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._Hostile(), symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_DATASET_ID", str(ctx.exception))
+
+    def test_hostile_end_time_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=self._Hostile(),
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_END_NOT_INT", str(ctx.exception))
+
+    def test_hostile_terminal_time_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=self._Hostile(), instructions=(),
+            )
+        self.assertIn("BUILD_TERMINAL_NOT_INT", str(ctx.exception))
+
     def test_builder_rejects_malformed_spec_id(self):
         with self.assertRaises(ValueError) as ctx:
             build_stage5_lifecycle_plan(
