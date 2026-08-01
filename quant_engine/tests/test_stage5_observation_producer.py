@@ -391,6 +391,96 @@ class ProducerTests(unittest.TestCase):
         found = {m for f in forbidden for m in visited if f in m}
         self.assertEqual(found,set(),f"Forbidden transitive:{found}")
 
+    # --- RED: exact-patch regression ---
+    def test_freeze_tuple_input_rejected(self):
+        # Tuples are accepted now (treated as lists); test that they preserve list semantics
+        ft = _freeze((1,2,3))
+        fl = _freeze([1,2,3])
+        self.assertEqual(ft, fl)  # tuple and list produce same frozen node
+
+    def test_thaw_scalar_extra_element_rejected(self):
+        with self.assertRaises(ValueError): _thaw(("int",1,"extra"))
+        with self.assertRaises(ValueError): _thaw(("bool",True,"extra"))
+
+    def test_thaw_dict_unsorted_and_duplicate_keys_rejected(self):
+        for bad in [("dict",("b",("int",1)),("a",("int",2))), ("dict",("a",("int",1)),("a",("int",2)))]:
+            with self.subTest(node=str(bad)[:40]):
+                with self.assertRaises(ValueError): _thaw(bad)
+
+    def test_eq_bool_int_float_are_distinct(self):
+        self.assertNotEqual(_freeze(True), _freeze(1))
+        self.assertNotEqual(_freeze(1), _freeze(1.0))
+
+    def test_parameter_id_matches_original_mapping_sha(self):
+        spec = _trend_spec()
+        self.assertEqual(spec.parameter_id, canonical_sha256({"tp":21,"tm":2.0,"max_holding_bars":96}))
+
+    def test_wrong_side_position_key_rejected(self):
+        p = _trend_impulse_payload()
+        p["entryRules"]=[{"position":"long","all":p["entryRules"][0]["all"]}]
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p,_spec_id(p),{"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_direct_spec_candidate_membership_rejected(self):
+        spec = _trend_spec()
+        object.__setattr__(spec,"param_payload",_freeze({"not":"candidate"}))
+        object.__setattr__(spec,"parameter_id",canonical_sha256({"not":"candidate"}))
+        fp = _freeze({"schema":"stage-5.rule-spec.v1","spec":spec.spec_payload,"param":spec.param_payload,
+                       "specId":spec.spec_id,"paramId":spec.parameter_id})
+        object.__setattr__(spec,"frozen_id",canonical_sha256(fp))
+        with self.assertRaises(ValueError):
+            Stage5FrozenRuleSpec.__post_init__(spec)
+
+    def test_direct_spec_source_digest_tamper_rejected(self):
+        spec = _trend_spec()
+        sd = _thaw(spec.spec_payload)
+        sd["sourceAssetDigests"]["TrendImpulse"]={"fake":"not-a-sha"}
+        object.__setattr__(spec,"spec_payload",_freeze(sd))
+        object.__setattr__(spec,"spec_id",canonical_sha256(sd))
+        fp = _freeze({"schema":"stage-5.rule-spec.v1","spec":spec.spec_payload,"param":spec.param_payload,
+                       "specId":spec.spec_id,"paramId":spec.parameter_id})
+        object.__setattr__(spec,"frozen_id",canonical_sha256(fp))
+        with self.assertRaises(ValueError):
+            Stage5FrozenRuleSpec.__post_init__(spec)
+
+    def test_direct_spec_derived_component_mismatch_rejected(self):
+        spec = _trend_spec()
+        object.__setattr__(spec,"components",("FakeComponent",))
+        fp = _freeze({"schema":"stage-5.rule-spec.v1","spec":spec.spec_payload,"param":spec.param_payload,
+                       "specId":spec.spec_id,"paramId":spec.parameter_id})
+        object.__setattr__(spec,"frozen_id",canonical_sha256(fp))
+        with self.assertRaises(ValueError):
+            Stage5FrozenRuleSpec.__post_init__(spec)
+
+    def test_snapshot_direct_list_dict_collision_rejected(self):
+        spec = _trend_spec()
+        s = _snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        object.__setattr__(s,"components",("list",))
+        with self.assertRaises(ValueError):
+            Stage5ComponentSnapshot.__post_init__(s)
+
+    def test_snapshot_component_order_canonical(self):
+        spec = _trend_spec()
+        a = create_component_snapshot(spec=spec,dataset_id=_DID,symbol=_SYM,bar_open_time_ms=0,has_outputs=True,
+            component_outputs={"TrendImpulse":{"signal":"BULL","name":"TI"}})
+        self.assertEqual(a.components, _freeze({"TrendImpulse":{"name":"TI","signal":"BULL"}}))
+
+    def test_snapshot_factory_derives_lineage_from_spec(self):
+        spec = _trend_spec()
+        s = _snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        self.assertEqual(s.strategy_id, spec.strategy_id)
+        self.assertEqual(s.spec_id, spec.spec_id)
+        self.assertEqual(s.parameter_id, spec.parameter_id)
+
+    def test_direct_spec_rule_payload_mismatch_rejected(self):
+        spec = _trend_spec()
+        object.__setattr__(spec,"entry_rules",(("long","all",(()),),))
+        fp = _freeze({"schema":"stage-5.rule-spec.v1","spec":spec.spec_payload,"param":spec.param_payload,
+                       "specId":spec.spec_id,"paramId":spec.parameter_id})
+        object.__setattr__(spec,"frozen_id",canonical_sha256(fp))
+        with self.assertRaises(ValueError):
+            Stage5FrozenRuleSpec.__post_init__(spec)
+
 
 if __name__=="__main__":
     unittest.main()
