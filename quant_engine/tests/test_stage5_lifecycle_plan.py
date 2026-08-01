@@ -601,6 +601,11 @@ class BuilderBoundaryTests(unittest.TestCase):
         __int__ = __bool__
         __float__ = __bool__
         __eq__ = __bool__
+        __ne__ = __bool__
+        __lt__ = __bool__
+        __le__ = __bool__
+        __gt__ = __bool__
+        __ge__ = __bool__
 
     def test_hostile_spec_id_raises_value_error(self):
         with self.assertRaises(ValueError) as ctx:
@@ -744,6 +749,45 @@ class BuilderBoundaryTests(unittest.TestCase):
                 terminal_execution_bar_open_time_ms=F * 10, instructions=(inst,),
             )
         self.assertIn("INSTRUCTION_ID_MISMATCH", str(ctx.exception))
+
+    class _HostileStr(str):
+        def __new__(cls, s):
+            return super().__new__(cls, s)
+        def __bool__(self):
+            raise RuntimeError("BOOM_STR")
+        __repr__ = __bool__
+        __str__ = __bool__
+        __hash__ = __bool__
+        __eq__ = __bool__
+        __ne__ = __bool__
+        __lt__ = __bool__
+        __le__ = __bool__
+        __gt__ = __bool__
+        __ge__ = __bool__
+        __int__ = __bool__
+        __float__ = __bool__
+
+    def test_hostile_str_subclass_rejected_all_fields(self):
+        fields = (
+            ("strategy_id", "BUILD_STRATEGY_NOT_STRING"),
+            ("symbol", "BUILD_SYMBOL_NOT_STRING"),
+            ("spec_id", "BUILD_SPEC_ID"),
+            ("parameter_id", "BUILD_PARAM_ID"),
+            ("dataset_id", "BUILD_DATASET_ID"),
+        )
+        kwargs = dict(
+            strategy_id="s" * 64, symbol="BTC/USDT",
+            spec_id=self._SPID, parameter_id=self._PID, dataset_id=self._DID,
+            warmup_bars=30,
+            scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+            terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+        )
+        for field_name, expected_prefix in fields:
+            with self.subTest(field=field_name):
+                bad = {**kwargs, field_name: self._HostileStr(kwargs[field_name])}
+                with self.assertRaises(ValueError) as ctx:
+                    build_stage5_lifecycle_plan(**bad)
+                self.assertIn(expected_prefix, str(ctx.exception))
 
 
 class TimeAlignmentTests(unittest.TestCase):

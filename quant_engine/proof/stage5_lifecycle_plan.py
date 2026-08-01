@@ -16,7 +16,7 @@ _SHA = re.compile(r"^[a-f0-9]{64}$")
 
 
 def _vsha(v, label):
-    if not isinstance(v, str):
+    if type(v) is not str:
         raise ValueError(f"{label}_MALFORMED")
     if not _SHA.fullmatch(v):
         raise ValueError(f"{label}_MALFORMED")
@@ -173,7 +173,7 @@ class Stage5LifecyclePlan:
             raise ValueError("PLAN_INITIAL_NOT_FLAT")
         if self.final_state != "FLAT":
             raise ValueError("PLAN_FINAL_NOT_FLAT")
-        if not isinstance(self.strategy_id, str):
+        if type(self.strategy_id) is not str:
             raise ValueError("PLAN_STRATEGY_NOT_STRING")
         if not self.strategy_id:
             raise ValueError("PLAN_STRATEGY_INVALID")
@@ -181,7 +181,7 @@ class Stage5LifecyclePlan:
         _vsha(self.parameter_id, "PLAN_PARAM_ID")
         _vsha(self.dataset_id, "PLAN_DATASET_ID")
         _vsha(self.plan_id, "PLAN_PLAN_ID")
-        if not isinstance(self.symbol, str):
+        if type(self.symbol) is not str:
             raise ValueError("PLAN_SYMBOL_NOT_STRING")
         if not self.symbol:
             raise ValueError("PLAN_SYMBOL_INVALID")
@@ -287,11 +287,11 @@ def build_stage5_lifecycle_plan(
     terminal_execution_bar_open_time_ms, instructions,
 ) -> Stage5LifecyclePlan:
     # --- primitive validation: no hostile object may reach canonical_sha256 ---
-    if not isinstance(strategy_id, str):
+    if type(strategy_id) is not str:
         raise ValueError("BUILD_STRATEGY_NOT_STRING")
     if not strategy_id:
         raise ValueError("BUILD_STRATEGY_EMPTY")
-    if not isinstance(symbol, str):
+    if type(symbol) is not str:
         raise ValueError("BUILD_SYMBOL_NOT_STRING")
     if not symbol:
         raise ValueError("BUILD_SYMBOL_EMPTY")
