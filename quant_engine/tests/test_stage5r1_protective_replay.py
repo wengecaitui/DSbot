@@ -720,5 +720,49 @@ class FinalFailClosedTests(unittest.TestCase):
             ReplayExitSelection(**bogus)
 
 
+    def test_RES_XTIME_MISMATCH_0(self):
+        # Protective-trigger result (not explicit)
+        b = list(bars(200))
+        b[105] = bar(b[105].open_time_ms, 305, 306, 289, 305.5)
+        r = _run(b, _insts(b), _p_long())
+        s = r.selections[0]; t = r.trades[0]
+        self.assertEqual(s.source, PROTECTIVE_SOURCE)
+
+        altered_exit_time = t.selected_exit_bar_open_time_ms + 300000
+        self.assertNotEqual(altered_exit_time, s.selected_exit_bar_open_time_ms)
+        self.assertGreaterEqual(altered_exit_time, t.entry_execution_time_ms)
+        self.assertLessEqual(altered_exit_time, t.paired_exit_signal_bar_open_time_ms)
+
+        trade_payload = {"schemaVersion": t.schema_version, "tradeIndex": t.trade_index,
+            "bindingId": t.binding_id, "entrySignalBarOpenTimeMs": t.entry_signal_bar_open_time_ms,
+            "pairedExitSignalBarOpenTimeMs": t.paired_exit_signal_bar_open_time_ms,
+            "entryExecutionTimeMs": t.entry_execution_time_ms,
+            "selectedExitBarOpenTimeMs": altered_exit_time,
+            "selectionId": t.selection_id, "accountingId": t.accounting_id}
+        altered_trade = ProtectiveReplayTrade(schema_version=t.schema_version,
+            trade_index=t.trade_index, binding_id=t.binding_id,
+            entry_signal_bar_open_time_ms=t.entry_signal_bar_open_time_ms,
+            paired_exit_signal_bar_open_time_ms=t.paired_exit_signal_bar_open_time_ms,
+            entry_execution_time_ms=t.entry_execution_time_ms,
+            selected_exit_bar_open_time_ms=altered_exit_time,
+            selection_id=t.selection_id, accounting_id=t.accounting_id,
+            trade_id=canonical_sha256(trade_payload))
+
+        rpl = {"schemaVersion": r.schema_version, "symbol": r.symbol, "timeframeMs": r.timeframe_ms,
+            "datasetId": r.dataset_id, "instructionSetId": r.instruction_set_id,
+            "bindingSetId": r.binding_set_id, "replayConfigId": r.replay_config_id,
+            "capitalModelId": r.capital_model_id, "costModelId": r.cost_model_id,
+            "initialEquity": float(r.initial_equity), "finalEquity": float(r.final_equity),
+            "tradeCount": 1, "tradeIds": [altered_trade.trade_id]}
+        with self.assertRaisesRegex(ValueError, "RES_XTIME_MISMATCH_0"):
+            ProtectiveReplayResult(schema_version=r.schema_version, symbol=r.symbol,
+                timeframe_ms=r.timeframe_ms, dataset_id=r.dataset_id,
+                instruction_set_id=r.instruction_set_id, binding_set_id=r.binding_set_id,
+                replay_config_id=r.replay_config_id, capital_model_id=r.capital_model_id,
+                cost_model_id=r.cost_model_id, initial_equity=r.initial_equity,
+                final_equity=r.final_equity, trade_count=1,
+                trades=(altered_trade,), selections=(s,), replay_id=canonical_sha256(rpl))
+
+
 if __name__ == "__main__":
     unittest.main()
