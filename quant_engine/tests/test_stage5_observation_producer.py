@@ -1186,10 +1186,14 @@ class ProducerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,"SNAP_FACTORY_TIME_NOT_INT"):
                 create_component_snapshot(spec=spec,dataset_id=_DID,symbol=_SYM,
                     bar_open_time_ms=HInt(0),has_outputs=False,component_outputs={})
-        with self.subTest(route="produce_observations"):
+        with self.subTest(route="producer_start"):
             with self.assertRaisesRegex(ValueError,"PROD_START_NOT_INT"):
                 produce_observations(spec=spec,snapshots=(s,),dataset_id=_DID,
                     symbol=_SYM,scored_start_open_time_ms=HInt(0),scored_end_exclusive_open_time_ms=2*F)
+        with self.subTest(route="producer_end"):
+            with self.assertRaisesRegex(ValueError,"PROD_END_NOT_INT"):
+                produce_observations(spec=spec,snapshots=(s,),dataset_id=_DID,
+                    symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=HInt(2*F))
 
     def test_subclass_snap_outputs_rejected(self):
         class HD(dict):pass
@@ -1222,10 +1226,20 @@ class ProducerTests(unittest.TestCase):
     def test_subclass_producer_snapshots_rejected(self):
         class HT(tuple):pass
         spec=self._fresh_spec(); s=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
-        ss=HT((s,))
-        with self.assertRaisesRegex(ValueError, "PROD_SNAPS"):
-            produce_observations(spec=spec,snapshots=ss,dataset_id=_DID,
-                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        with self.subTest(route="tuple_subclass"):
+            ss=HT((s,))
+            with self.assertRaisesRegex(ValueError, "PROD_SNAPS_NOT_TUPLE"):
+                produce_observations(spec=spec,snapshots=ss,dataset_id=_DID,
+                    symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        with self.subTest(route="element_subclass"):
+            class HS(Stage5ComponentSnapshot):pass
+            hs=HS(schema_version=s.schema_version,strategy_id=s.strategy_id,
+                spec_id=s.spec_id,parameter_id=s.parameter_id,dataset_id=s.dataset_id,
+                symbol=s.symbol,bar_open_time_ms=s.bar_open_time_ms,
+                has_outputs=s.has_outputs,components=s.components,snapshot_id=s.snapshot_id)
+            with self.assertRaisesRegex(ValueError, "PROD_SNAP_TYPE_0"):
+                produce_observations(spec=spec,snapshots=(hs,),dataset_id=_DID,
+                    symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
 
     def test_subclass_verifier_batch_rejected(self):
         spec=self._fresh_spec(); s=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
@@ -1238,9 +1252,45 @@ class ProducerTests(unittest.TestCase):
             scored_start_open_time_ms=b.scored_start_open_time_ms,
             scored_end_exclusive_open_time_ms=b.scored_end_exclusive_open_time_ms,
             observations=b.observations,snapshot_ids=b.snapshot_ids,batch_id=b.batch_id)
-        with self.assertRaisesRegex(ValueError, "VERIFY_BATCH_TYPE"):
-            verify_observation_batch(batch=hb,spec=spec,snapshots=(s,),dataset_id=_DID,
-                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        # batch subclass
+        with self.subTest(route="batch_subclass"):
+            with self.assertRaisesRegex(ValueError, "VERIFY_BATCH_TYPE"):
+                verify_observation_batch(batch=hb,spec=spec,snapshots=(s,),dataset_id=_DID,
+                    symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        # delegated routes — valid exact batch, subclassed context args
+        class HSpec(Stage5FrozenRuleSpec):pass
+        hspec=HSpec(schema_version=spec.schema_version,spec_payload=spec.spec_payload,
+            param_payload=spec.param_payload,strategy_id=spec.strategy_id,version=spec.version,
+            spec_id=spec.spec_id,parameter_id=spec.parameter_id,components=spec.components,
+            symbols=spec.symbols,entry_rules=spec.entry_rules,exit_rules=spec.exit_rules,
+            warmup_bars=spec.warmup_bars,frozen_id=spec.frozen_id)
+        with self.subTest(route="spec_subclass"):
+            with self.assertRaisesRegex(ValueError, "PROD_SPEC_TYPE"):
+                verify_observation_batch(batch=b,spec=hspec,snapshots=(s,),dataset_id=_DID,
+                    symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        class HT(tuple):pass
+        with self.subTest(route="snapshots_tuple_subclass"):
+            with self.assertRaisesRegex(ValueError, "PROD_SNAPS_NOT_TUPLE"):
+                verify_observation_batch(batch=b,spec=spec,snapshots=HT((s,)),dataset_id=_DID,
+                    symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        class HS(str):pass
+        with self.subTest(route="dataset_subclass"):
+            with self.assertRaisesRegex(ValueError, "PROD_DATASET_MALFORMED"):
+                verify_observation_batch(batch=b,spec=spec,snapshots=(s,),dataset_id=HS(_DID),
+                    symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        with self.subTest(route="symbol_subclass"):
+            with self.assertRaisesRegex(ValueError, "PROD_SYMBOL_NOT_STRING"):
+                verify_observation_batch(batch=b,spec=spec,snapshots=(s,),dataset_id=_DID,
+                    symbol=HS(_SYM),scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        class HInt(int):pass
+        with self.subTest(route="start_subclass"):
+            with self.assertRaisesRegex(ValueError, "PROD_START_NOT_INT"):
+                verify_observation_batch(batch=b,spec=spec,snapshots=(s,),dataset_id=_DID,
+                    symbol=_SYM,scored_start_open_time_ms=HInt(0),scored_end_exclusive_open_time_ms=2*F)
+        with self.subTest(route="end_subclass"):
+            with self.assertRaisesRegex(ValueError, "PROD_END_NOT_INT"):
+                verify_observation_batch(batch=b,spec=spec,snapshots=(s,),dataset_id=_DID,
+                    symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=HInt(2*F))
 
     # --- 2C: deep caller immutability ---
     def test_deep_spec_immutability_on_success(self):
@@ -1277,41 +1327,40 @@ class ProducerTests(unittest.TestCase):
         # --- rejection immutability ---
         out2={"TrendImpulse":{"signal":"BULL"}}; orig2=copy.deepcopy(out2)
         class HSpec(Stage5FrozenRuleSpec):pass
-        bad=HSpec.__new__(HSpec)
-        for fn in ("schema_version","spec_payload","param_payload","strategy_id","version",
-            "spec_id","parameter_id","components","symbols","entry_rules","exit_rules",
-            "warmup_bars","frozen_id"):
-            object.__setattr__(bad,fn,getattr(spec,fn))
-        object.__setattr__(bad,"strategy_id","bad")
-        with self.assertRaises(ValueError):
-            _snap(bad,0,components=out2)
+        vs=HSpec(schema_version=spec.schema_version,spec_payload=spec.spec_payload,
+            param_payload=spec.param_payload,strategy_id=spec.strategy_id,version=spec.version,
+            spec_id=spec.spec_id,parameter_id=spec.parameter_id,components=spec.components,
+            symbols=spec.symbols,entry_rules=spec.entry_rules,exit_rules=spec.exit_rules,
+            warmup_bars=spec.warmup_bars,frozen_id=spec.frozen_id)
+        with self.assertRaisesRegex(ValueError,"SNAP_FACTORY_SPEC_TYPE"):
+            _snap(vs,0,components=out2)
         self.assertEqual(out2,orig2)
 
     def test_deep_producer_snapshots_immutability(self):
         import copy
         spec=self._fresh_spec(); orig_spec=copy.deepcopy(spec)
         out={"TrendImpulse":{"signal":"BULL"}}; orig_out=copy.deepcopy(out)
-        s=_snap(spec,0,components=out); sid0=s.snapshot_id; ss=(s,)
+        s=_snap(spec,0,components=out); sid0=s.snapshot_id; ss=(s,); oss=copy.deepcopy(ss)
         # --- success immutability ---
         b=self._produce(spec,ss)
-        self.assertEqual(s.snapshot_id,sid0)
-        self.assertEqual(out,orig_out)
+        self.assertEqual(spec,orig_spec); self.assertEqual(ss,oss)
+        self.assertEqual(s.snapshot_id,sid0); self.assertEqual(out,orig_out)
         self.assertEqual(b.spec_id,spec.spec_id)
         # --- verifier success immutability ---
         b0=copy.deepcopy(b); s0=copy.deepcopy(s)
         verify_observation_batch(batch=b,spec=spec,snapshots=(s,),dataset_id=_DID,
             symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
-        self.assertEqual(b.batch_id,b0.batch_id); self.assertEqual(s.snapshot_id,s0.snapshot_id)
+        self.assertEqual(b,b0); self.assertEqual(s,s0)
         # --- verifier rejection immutability ---
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError,"PROD_SNAP_DATASET_0"):
             verify_observation_batch(batch=b,spec=spec,snapshots=(s,),dataset_id="0"*64,
                 symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
-        self.assertEqual(b.batch_id,b0.batch_id); self.assertEqual(s.snapshot_id,s0.snapshot_id)
+        self.assertEqual(b,b0); self.assertEqual(s,s0)
         # --- producer rejection immutability ---
         spec2=self._fresh_spec(); s2=_snap(spec2,0,components=out); sid2=s2.snapshot_id
-        with self.assertRaises(ValueError):
-            produce_observations(spec=spec2,snapshots=(s2,),dataset_id=_DID,
-                symbol=_SYM,scored_start_open_time_ms=F,scored_end_exclusive_open_time_ms=F-1)
+        with self.assertRaisesRegex(ValueError,"PROD_SNAP_DATASET_0"):
+            produce_observations(spec=spec2,snapshots=(s2,),dataset_id="0"*64,
+                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
         self.assertEqual(s2.snapshot_id,sid2); self.assertEqual(out,orig_out)
 
 
