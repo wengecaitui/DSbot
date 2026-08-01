@@ -134,6 +134,9 @@ class ProtectiveCostMetrics:
             _vnonneg_finite(getattr(self, n), f"COST_{n.upper()}")
         if self.market_impact_cost_amount + self.explicit_cost_amount != self.total_cost_amount:
             raise ValueError("COST_TOTAL_MISMATCH")
+        if (self.spread_cost_amount + self.slippage_cost_amount !=
+                self.market_impact_cost_amount):
+            raise ValueError("COST_MARKET_IMPACT_MISMATCH")
 
 
 def _build_cost_metrics(d: dict) -> ProtectiveCostMetrics:
@@ -506,6 +509,35 @@ def build_stage5r1_protective_metrics(
     for b in bindings:
         if type(b) is not ProtectiveReplayBinding:
             raise ValueError(f"BINDING_TYPE_INVALID: {type(b).__name__}")
+        # Reconstruct plan from primitives and verify identity
+        plan = b.plan
+        if type(plan) is not ProtectiveExitPlan:
+            raise ValueError(f"BINDING_PLAN_TYPE_INVALID: {type(plan).__name__}")
+        try:
+            reconstructed = ProtectiveExitPlan(
+                side=plan.side,
+                entry_reference_price=plan.entry_reference_price,
+                stop_price=plan.stop_price,
+                take_profit_price=plan.take_profit_price,
+                schema_version=plan.schema_version,
+                gap_fill_policy=plan.gap_fill_policy,
+                intrabar_fill_policy=plan.intrabar_fill_policy,
+                same_bar_collision_policy=plan.same_bar_collision_policy,
+                scan_policy=plan.scan_policy,
+            )
+        except Exception:
+            raise ValueError("BINDING_PLAN_RECONSTRUCTION_FAILED")
+        if reconstructed != plan or reconstructed.plan_id != plan.plan_id:
+            raise ValueError("BINDING_PLAN_IDENTITY_FORGERY")
+        # Recompute binding_id
+        from quant_engine.proof.stage5r1_protective_replay import PROTECTIVE_REPLAY_BINDING_SCHEMA
+        expected_bid = canonical_sha256({
+            "schemaVersion": PROTECTIVE_REPLAY_BINDING_SCHEMA,
+            "entrySignalBarOpenTimeMs": b.entry_signal_bar_open_time_ms,
+            "planId": plan.plan_id,
+        })
+        if b.binding_id != expected_bid:
+            raise ValueError("BINDING_ID_MISMATCH")
         if b.binding_id in seen_ids:
             raise ValueError("BINDING_DUPLICATE_ID")
         seen_ids.add(b.binding_id)
@@ -518,6 +550,26 @@ def build_stage5r1_protective_metrics(
         raise ValueError(f"BINDING_COUNT_MISMATCH: {len(bindings)} != {result.trade_count}")
 
     binding_by_id = {b.binding_id: b for b in bindings}
+
+    # Stage E graph revalidation — call __post_init__ on result and nested objects
+    try:
+        result.__post_init__()
+        result.base.__post_init__()
+    except Exception:
+        raise ValueError("STAGE_E_RESULT_REVALIDATION_FAILED")
+    for ct in result.trades:
+        if type(ct) is not ProtectiveExcursionTrade:
+            raise ValueError(f"STAGE_E_TRADE_TYPE_INVALID: {type(ct).__name__}")
+        try:
+            ct.__post_init__()
+            ct.base.__post_init__()
+            ct.selection.__post_init__()
+            ct.excursion.__post_init__()
+            ct.resolution.__post_init__()
+            if ct.resolution.event is not None:
+                ct.resolution.event.__post_init__()
+        except Exception:
+            raise ValueError("STAGE_E_TRADE_REVALIDATION_FAILED")
 
     trade_metrics: list[ProtectiveTradeRiskMetrics] = []
     accounting_list: list[TradeAccounting] = []
