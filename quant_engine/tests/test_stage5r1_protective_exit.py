@@ -489,39 +489,69 @@ class ResolutionValidationExtendedTests(unittest.TestCase):
 
     def test_plan_id_mismatch_rejected(self):
         from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA, PROTECTIVE_EXIT_RESOLUTION_SCHEMA
-        ep = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
-            "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
-            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
-            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
-        eid = canonical_sha256(ep)
+        ev_pid = "a" * 64
         ev = ProtectiveExitEvent(schema_version=PROTECTIVE_EXIT_EVENT_SCHEMA, side=PositionSide.LONG,
             reason="STOP_LOSS", trigger_kind="INTRABAR_LEVEL", trigger_bar_open_time_ms=0,
             trigger_bar_index=1, trigger_level_price=90.0, raw_exit_price=90.0,
-            same_bar_collision=False, plan_id="a" * 64, observation_path_id="b" * 64, event_id=eid)
-        rp = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": "z" * 64,
-            "observationPathId": "b" * 64, "status": "TRIGGERED", "eventId": eid}
+            same_bar_collision=False, plan_id=ev_pid, observation_path_id="b" * 64,
+            event_id=canonical_sha256({"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+                "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+                "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+                "sameBarCollision": False, "planId": ev_pid, "observationPathId": "b" * 64}))
+        res_pid = "c" * 64  # different from event plan_id
+        rp = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": res_pid,
+            "observationPathId": "b" * 64, "status": "TRIGGERED", "eventId": ev.event_id}
         rid = canonical_sha256(rp)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "RESOLUTION_PLAN_ID_MISMATCH"):
             ProtectiveExitResolution(schema_version=PROTECTIVE_EXIT_RESOLUTION_SCHEMA, status="TRIGGERED",
-                plan_id="z" * 64, observation_path_id="b" * 64, event=ev, resolution_id=rid)
+                plan_id=res_pid, observation_path_id="b" * 64, event=ev, resolution_id=rid)
 
     def test_path_id_mismatch_rejected(self):
         from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA, PROTECTIVE_EXIT_RESOLUTION_SCHEMA
-        ep = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
-            "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
-            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
-            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
-        eid = canonical_sha256(ep)
+        ev_oid = "b" * 64
         ev = ProtectiveExitEvent(schema_version=PROTECTIVE_EXIT_EVENT_SCHEMA, side=PositionSide.LONG,
             reason="STOP_LOSS", trigger_kind="INTRABAR_LEVEL", trigger_bar_open_time_ms=0,
             trigger_bar_index=1, trigger_level_price=90.0, raw_exit_price=90.0,
-            same_bar_collision=False, plan_id="a" * 64, observation_path_id="b" * 64, event_id=eid)
+            same_bar_collision=False, plan_id="a" * 64, observation_path_id=ev_oid,
+            event_id=canonical_sha256({"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+                "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+                "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+                "sameBarCollision": False, "planId": "a" * 64, "observationPathId": ev_oid}))
+        res_oid = "d" * 64  # different from event path_id
         rp = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": "a" * 64,
-            "observationPathId": "z" * 64, "status": "TRIGGERED", "eventId": eid}
+            "observationPathId": res_oid, "status": "TRIGGERED", "eventId": ev.event_id}
         rid = canonical_sha256(rp)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "RESOLUTION_PATH_ID_MISMATCH"):
             ProtectiveExitResolution(schema_version=PROTECTIVE_EXIT_RESOLUTION_SCHEMA, status="TRIGGERED",
-                plan_id="a" * 64, observation_path_id="z" * 64, event=ev, resolution_id=rid)
+                plan_id="a" * 64, observation_path_id=res_oid, event=ev, resolution_id=rid)
+
+
+class CanonicalBindingTests(unittest.TestCase):
+    def test_event_mutated_payload_rejects(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitEvent, canonical_sha256, PROTECTIVE_EXIT_EVENT_SCHEMA
+        p = {"schemaVersion": PROTECTIVE_EXIT_EVENT_SCHEMA, "side": PositionSide.LONG.value,
+            "reason": "STOP_LOSS", "triggerKind": "INTRABAR_LEVEL", "triggerBarOpenTimeMs": 0,
+            "triggerBarIndex": 1, "triggerLevelPrice": 90.0, "rawExitPrice": 90.0,
+            "sameBarCollision": False, "planId": "a" * 64, "observationPathId": "b" * 64}
+        eid = canonical_sha256(p)
+        p2 = dict(p); p2["triggerLevelPrice"] = 99.0  # mutate
+        wrong_eid = canonical_sha256(p2)
+        with self.assertRaisesRegex(ValueError, "EVENT_ID_MISMATCH"):
+            ProtectiveExitEvent(schema_version=PROTECTIVE_EXIT_EVENT_SCHEMA, side=PositionSide.LONG,
+                reason="STOP_LOSS", trigger_kind="INTRABAR_LEVEL", trigger_bar_open_time_ms=0,
+                trigger_bar_index=1, trigger_level_price=99.0, raw_exit_price=90.0,
+                same_bar_collision=False, plan_id="a" * 64, observation_path_id="b" * 64,
+                event_id=eid)  # ID computed from original, but data is mutated
+
+    def test_resolution_mutated_payload_rejects(self):
+        from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitResolution, canonical_sha256, PROTECTIVE_EXIT_RESOLUTION_SCHEMA
+        p = {"schemaVersion": PROTECTIVE_EXIT_RESOLUTION_SCHEMA, "planId": "a" * 64,
+            "observationPathId": "b" * 64, "status": "NO_TRIGGER", "eventId": None}
+        rid = canonical_sha256(p)
+        p2 = dict(p); p2["observationPathId"] = "d" * 64  # mutate path, keep status valid
+        with self.assertRaisesRegex(ValueError, "RESOLUTION_ID_MISMATCH"):
+            ProtectiveExitResolution(schema_version=PROTECTIVE_EXIT_RESOLUTION_SCHEMA, status="NO_TRIGGER",
+                plan_id="a" * 64, observation_path_id="d" * 64, event=None, resolution_id=rid)
 
 
 if __name__ == "__main__":
