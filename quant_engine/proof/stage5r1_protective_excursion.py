@@ -1048,8 +1048,7 @@ def verify_stage5r1_protective_excursion(
     """Authoritative verification boundary for untrusted artifacts.
 
     Recomputes the Stage E result from authoritative inputs and rejects
-    any mismatch.  This closes coherent observation_path_id forgery when
-    source data is available.
+    any mismatch.  Returns the supplied result object on success.
     """
     if type(result) is not ProtectiveExcursionResult:
         raise ValueError(f"VERIFY_RESULT_TYPE_INVALID: {type(result).__name__}")
@@ -1066,4 +1065,10 @@ def verify_stage5r1_protective_excursion(
             f"recomputed={recomputed.result_id}"
         )
 
-    return recomputed
+    if result != recomputed:
+        raise ValueError(
+            "VERIFY_RESULT_CONTENT_MISMATCH: supplied result differs from "
+            "authoritative recomputation despite matching result_id"
+        )
+
+    return result

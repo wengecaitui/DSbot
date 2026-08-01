@@ -1536,6 +1536,43 @@ class VerifyAPITests(unittest.TestCase):
         self.assertEqual(verified.result_id, r.result_id)
         self.assertEqual(len(verified.trades), len(r.trades))
 
+    def test_valid_verify_returns_supplied_object(self):
+        """Verify returns the IDENTICAL supplied object, not a replacement."""
+        b = bars(200)
+        insts = _insts(b, entry_sig=99, exit_sig=110)
+        p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        r = _run_excursion(b, insts, bindings)
+        from quant_engine.proof.stage5r1_protective_excursion import \
+            verify_stage5r1_protective_excursion
+        verified = verify_stage5r1_protective_excursion(
+            result=r, bars=b, instructions=insts,
+            protective_bindings=bindings, config=_cfg(),
+            capital=_CM, cost=_ZC,
+        )
+        self.assertIs(verified, r)
+
+    def test_verify_content_mismatch_rejected(self):
+        """Result with same inputs but different bars → result_id mismatch is rejected."""
+        b1 = bars(200)
+        insts = _insts(b1, entry_sig=99, exit_sig=110)
+        p = _p_long(entry=float(b1[100].open), stop=1.0, tp=9999.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        r = _run_excursion(b1, insts, bindings)
+        from quant_engine.proof.stage5r1_protective_excursion import \
+            verify_stage5r1_protective_excursion
+        # Different bars → different result → result_id mismatch
+        b2 = list(bars(200))
+        b2[150] = bar(b2[150].open_time_ms, 999.0, 999.0, 999.0, 999.0)
+        b2 = tuple(b2)
+        with self.assertRaises(ValueError) as ctx:
+            verify_stage5r1_protective_excursion(
+                result=r, bars=b2, instructions=insts,
+                protective_bindings=bindings, config=_cfg(),
+                capital=_CM, cost=_ZC,
+            )
+        self.assertIn("VERIFY_RESULT_ID_MISMATCH", str(ctx.exception))
+
     def test_verify_rejects_subclass(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
