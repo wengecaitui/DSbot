@@ -852,6 +852,240 @@ class ProducerTests(unittest.TestCase):
             create_frozen_rule_spec(payload, s["specId"], ps)
         self.assertEqual(m, orig)
 
+    # --- 2C: direct-construction adversarial closure ---
+    def _fresh_spec(self):
+        return _trend_spec()
+
+    def test_direct_spec_schema_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"schema_version","bad")
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_strategy_id_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"strategy_id","bad")
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_version_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"version","")
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_spec_id_mismatch_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"spec_id","x"*64)
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_parameter_id_mismatch_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"parameter_id","x"*64)
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_components_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"components",("X",))
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_symbols_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"symbols",("X",))
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_entry_rules_empty_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"entry_rules",())
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_exit_rules_empty_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"exit_rules",())
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_spec_warmup_rejected(self):
+        s=self._fresh_spec(); object.__setattr__(s,"warmup_bars",1)
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_direct_snap_schema_rejected(self):
+        spec=self._fresh_spec(); snap=_snap(spec,0,has_outputs=False)
+        object.__setattr__(snap,"schema_version","bad")
+        with self.assertRaises(ValueError):Stage5ComponentSnapshot.__post_init__(snap)
+
+    def test_direct_snap_spec_id_rejected(self):
+        spec=self._fresh_spec(); s=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        object.__setattr__(s,"spec_id","x"*64)
+        # Self-consistent snapshot may pass post_init; must fail produce_observations
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+
+    def test_direct_snap_symbol_lineage_rejected(self):
+        spec=self._fresh_spec(); s=_snap(spec,0,has_outputs=False)
+        object.__setattr__(s,"symbol","ETH/USDT")
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+
+    def test_direct_snap_time_not_aligned_rejected(self):
+        spec=self._fresh_spec(); s=_snap(spec,0,has_outputs=False)
+        object.__setattr__(s,"bar_open_time_ms",150000)
+        # Recomputed snapshot_id makes it self-consistent; post_init may accept; produce must reject
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+
+    def test_direct_snap_components_tamper_rejected(self):
+        spec=self._fresh_spec(); s=_snap(spec,0,has_outputs=False)
+        object.__setattr__(s,"components",("dict",("TrendImpulse",("dict",("signal",("str","BULL"))))))
+        object.__setattr__(s,"has_outputs",True)
+        # Snapshot is now self-consistent; produce must reject component set
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+
+    def test_direct_batch_frozen_id_rejected(self):
+        spec=self._fresh_spec(); snaps=(_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}}),)
+        b=produce_observations(spec=spec,snapshots=snaps,dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
+        object.__setattr__(b,"frozen_spec_id","x"*64)
+        with self.assertRaises(ValueError):Stage5ObservationBatch.__post_init__(b)
+
+    def test_direct_batch_dataset_rejected(self):
+        spec=self._fresh_spec(); snaps=(_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}}),)
+        b=produce_observations(spec=spec,snapshots=snaps,dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
+        object.__setattr__(b,"dataset_id","e"*64)
+        # Self-consistent batch passes post_init; must fail verifier
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=b,spec=spec,snapshots=snaps,dataset_id=_DID,symbol=_SYM,
+                scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
+
+    def test_direct_batch_observation_order_rejected(self):
+        spec=self._fresh_spec()
+        s1=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        s2=_snap(spec,F,components={"TrendImpulse":{"signal":"BULL"}})
+        b=produce_observations(spec=spec,snapshots=(s1,s2),dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=3*F)
+        rev=tuple(reversed(b.observations))
+        object.__setattr__(b,"observations",rev)
+        with self.assertRaises(ValueError):Stage5ObservationBatch.__post_init__(b)
+
+    def test_batch_identity_sensitivity_table(self):
+        import copy
+        spec=self._fresh_spec()
+        s1=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        s2=_snap(spec,F,components={"TrendImpulse":{"signal":"BULL"}})
+        b=produce_observations(spec=spec,snapshots=(s1,s2),dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=3*F)
+        payload=b._batch_payload(); bid0=b.batch_id
+        mut=copy.deepcopy(payload)
+        mut["frozenSpecId"]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["specId"]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["parameterId"]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["datasetId"]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["symbol"]="X"; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["scoredStartOpenTimeMs"]=F; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["scoredEndExclusiveOpenTimeMs"]=4*F; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["observationIds"][0]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["observationIds"][1]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["snapshotIds"][0]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["snapshotIds"][1]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["observationIds"].reverse(); self.assertNotEqual(canonical_sha256(mut),bid0)
+        mut=copy.deepcopy(payload); mut["snapshotIds"].reverse(); self.assertNotEqual(canonical_sha256(mut),bid0)
+
+    def test_verify_rejects_reversed_snapshot_order(self):
+        spec=self._fresh_spec()
+        s1=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        s2=_snap(spec,F,components={"TrendImpulse":{"signal":"BULL"}})
+        b=produce_observations(spec=spec,snapshots=(s1,s2),dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=3*F)
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=b,spec=spec,snapshots=(s2,s1),dataset_id=_DID,symbol=_SYM,
+                scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=3*F)
+
+    # --- 2C: exact subclass rejection ---
+    def test_subclass_spec_payload_rejected(self):
+        class HD(dict):pass
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(HD(_trend_impulse_payload()),_spec_id(_trend_impulse_payload()),
+                {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_subclass_spec_id_rejected(self):
+        class HS(str):pass
+        p=_trend_impulse_payload()
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p,HS(_spec_id(p)),{"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_subclass_parameter_set_rejected(self):
+        class HD(dict):pass
+        p=_trend_impulse_payload()
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p,_spec_id(p),HD({"tp":21,"tm":2.0,"max_holding_bars":96}))
+
+    def test_subclass_snap_outputs_rejected(self):
+        class HD(dict):pass
+        with self.assertRaises(ValueError):
+            _snap(_trend_spec(),0,components=HD({"TrendImpulse":{"signal":"BULL"}}))
+
+    def test_subclass_dataset_id_rejected(self):
+        class HS(str):pass
+        with self.assertRaises(ValueError):
+            create_component_snapshot(spec=self._fresh_spec(),dataset_id=HS(_DID),symbol=_SYM,
+                bar_open_time_ms=0,has_outputs=False,component_outputs={})
+
+    def test_subclass_symbol_rejected(self):
+        class HS(str):pass
+        with self.assertRaises(ValueError):
+            create_component_snapshot(spec=self._fresh_spec(),dataset_id=_DID,symbol=HS(_SYM),
+                bar_open_time_ms=0,has_outputs=False,component_outputs={})
+
+    def test_subclass_bar_open_time_rejected(self):
+        with self.assertRaises(ValueError):
+            create_component_snapshot(spec=self._fresh_spec(),dataset_id=_DID,symbol=_SYM,
+                bar_open_time_ms=0,has_outputs=1,component_outputs={})
+
+    def test_subclass_producer_snapshots_rejected(self):
+        class HL(list):pass
+        with self.assertRaises(ValueError):
+            produce_observations(spec=self._fresh_spec(),snapshots=HL(),dataset_id=_DID,
+                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
+
+    def test_subclass_verifier_batch_rejected(self):
+        spec=self._fresh_spec(); s=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        b=produce_observations(spec=spec,snapshots=(s,),dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
+        class HB:pass
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=HB(),spec=spec,snapshots=(s,),dataset_id=_DID,
+                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
+
+    # --- 2C: deep caller immutability ---
+    def test_deep_spec_immutability_on_success(self):
+        import copy
+        p=_trend_impulse_payload(); orig=copy.deepcopy(p)
+        ps={"tp":21,"tm":2.0,"max_holding_bars":96}; orig_ps=copy.deepcopy(ps)
+        spec=create_frozen_rule_spec(p,_spec_id(p),dict(ps))
+        p["strategyId"]="evil"; p["components"][0]["assetId"]="X"
+        ps["tp"]=999
+        self.assertEqual(_thaw(spec.spec_payload),orig)
+        self.assertEqual(_thaw(spec.param_payload),orig_ps)
+        self.assertEqual(spec.strategy_id,_SID)
+
+    def test_deep_spec_immutability_on_rejection(self):
+        import copy
+        p=_trend_impulse_payload(); orig=copy.deepcopy(p)
+        ps={"tp":21,"tm":2.0,"max_holding_bars":96}; orig_ps=copy.deepcopy(ps)
+        try:create_frozen_rule_spec(p,"x"*64,ps)
+        except ValueError:pass
+        self.assertEqual(p,orig); self.assertEqual(ps,orig_ps)
+
+    def test_deep_snapshot_immutability(self):
+        import copy
+        spec=self._fresh_spec()
+        out={"TrendImpulse":{"signal":"BULL","name":"TI","nested":[1,2]}};orig=copy.deepcopy(out)
+        s=_snap(spec,0,components=out)
+        out["TrendImpulse"]["signal"]="EVIL"; out["TrendImpulse"]["nested"][0]=999
+        self.assertEqual(_thaw(s.components),orig)
+
+    def test_deep_producer_snapshots_immutability(self):
+        import copy
+        spec=self._fresh_spec()
+        out={"TrendImpulse":{"signal":"BULL"}}; orig_out=copy.deepcopy(out)
+        s=_snap(spec,0,components=out); sid0=s.snapshot_id
+        ss=(s,)
+        self._produce(spec,ss)
+        self.assertEqual(s.snapshot_id,sid0)
+        self.assertEqual(out,orig_out)
+
 
 if __name__=="__main__":
     unittest.main()
