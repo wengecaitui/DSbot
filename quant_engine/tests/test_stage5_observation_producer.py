@@ -388,10 +388,49 @@ class ProducerTests(unittest.TestCase):
 
     # --- RED: exact-patch regression ---
     def test_freeze_tuple_input_rejected(self):
-        # Tuples are accepted now (treated as lists); test that they preserve list semantics
-        ft = _freeze((1,2,3))
-        fl = _freeze([1,2,3])
-        self.assertEqual(ft, fl)  # tuple and list produce same frozen node
+        with self.assertRaises(ValueError): _freeze((1,2))
+
+    def test_parameter_id_nested_container_parity(self):
+        p = dict(_trend_impulse_payload())
+        p["parameters"]["candidateSets"]=[{"tp":21,"tm":2.0,"nested":[1,{"k":"v"}],"max_holding_bars":96}]
+        sid = canonical_sha256(p)
+        spec = create_frozen_rule_spec(p, sid, {"tp":21,"tm":2.0,"nested":[1,{"k":"v"}],"max_holding_bars":96})
+        self.assertEqual(spec.parameter_id, canonical_sha256({"tp":21,"tm":2.0,"nested":[1,{"k":"v"}],"max_holding_bars":96}))
+
+    def test_direct_duplicate_rule_rejected_with_recomputed_id(self):
+        spec = _trend_spec()
+        # Duplicate the first rule
+        rules = list(spec.entry_rules)
+        rules.append(rules[0])
+        object.__setattr__(spec,"entry_rules",tuple(rules))
+        from quant_engine.proof.stage5_observation_producer import _frozen_spec_identity_payload
+        fid = canonical_sha256(_frozen_spec_identity_payload(spec))
+        object.__setattr__(spec,"frozen_id",fid)
+        with self.assertRaises(ValueError):
+            Stage5FrozenRuleSpec.__post_init__(spec)
+
+    def test_direct_spec_rule_payload_mismatch_rejected(self):
+        spec = _trend_spec()
+        object.__setattr__(spec,"entry_rules",(("long","all",(()),),))
+        # Rule validation happens before frozen_id check
+        with self.assertRaises(ValueError):
+            Stage5FrozenRuleSpec.__post_init__(spec)
+
+    def test_direct_spec_rule_expected_hostile_rejected(self):
+        spec = _trend_spec()
+        er = list(spec.entry_rules)
+        s,m,cl = er[0]; c,f,o,v = cl[0]
+        er[0] = (s,m,((c,f,o,("str","BULL","EXTRA")),))
+        object.__setattr__(spec,"entry_rules",tuple(er))
+        # Rule validation happens before frozen_id check
+        with self.assertRaises(ValueError):
+            Stage5FrozenRuleSpec.__post_init__(spec)
+
+    def test_unknown_rule_and_clause_keys_rejected(self):
+        p = _trend_impulse_payload()
+        p["entryRules"][0]["extra_key"] = "forged"
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p,_spec_id(p),{"tp":21,"tm":2.0,"max_holding_bars":96})
 
     def test_thaw_scalar_extra_element_rejected(self):
         with self.assertRaises(ValueError): _thaw(("int",1,"extra"))
@@ -416,13 +455,15 @@ class ProducerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_frozen_rule_spec(p,_spec_id(p),{"tp":21,"tm":2.0,"max_holding_bars":96})
 
+    def _recompute_id(self, spec):
+        from quant_engine.proof.stage5_observation_producer import _frozen_spec_identity_payload
+        object.__setattr__(spec, "frozen_id", canonical_sha256(_frozen_spec_identity_payload(spec)))
+
     def test_direct_spec_candidate_membership_rejected(self):
         spec = _trend_spec()
         object.__setattr__(spec,"param_payload",_freeze({"not":"candidate"}))
         object.__setattr__(spec,"parameter_id",canonical_sha256({"not":"candidate"}))
-        fp = _freeze({"schema":"stage-5.rule-spec.v1","spec":spec.spec_payload,"param":spec.param_payload,
-                       "specId":spec.spec_id,"paramId":spec.parameter_id})
-        object.__setattr__(spec,"frozen_id",canonical_sha256(fp))
+        self._recompute_id(spec)
         with self.assertRaises(ValueError):
             Stage5FrozenRuleSpec.__post_init__(spec)
 
@@ -432,18 +473,14 @@ class ProducerTests(unittest.TestCase):
         sd["sourceAssetDigests"]["TrendImpulse"]={"fake":"not-a-sha"}
         object.__setattr__(spec,"spec_payload",_freeze(sd))
         object.__setattr__(spec,"spec_id",canonical_sha256(sd))
-        fp = _freeze({"schema":"stage-5.rule-spec.v1","spec":spec.spec_payload,"param":spec.param_payload,
-                       "specId":spec.spec_id,"paramId":spec.parameter_id})
-        object.__setattr__(spec,"frozen_id",canonical_sha256(fp))
+        self._recompute_id(spec)
         with self.assertRaises(ValueError):
             Stage5FrozenRuleSpec.__post_init__(spec)
 
     def test_direct_spec_derived_component_mismatch_rejected(self):
         spec = _trend_spec()
         object.__setattr__(spec,"components",("FakeComponent",))
-        fp = _freeze({"schema":"stage-5.rule-spec.v1","spec":spec.spec_payload,"param":spec.param_payload,
-                       "specId":spec.spec_id,"paramId":spec.parameter_id})
-        object.__setattr__(spec,"frozen_id",canonical_sha256(fp))
+        self._recompute_id(spec)
         with self.assertRaises(ValueError):
             Stage5FrozenRuleSpec.__post_init__(spec)
 
@@ -466,15 +503,6 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(s.strategy_id, spec.strategy_id)
         self.assertEqual(s.spec_id, spec.spec_id)
         self.assertEqual(s.parameter_id, spec.parameter_id)
-
-    def test_direct_spec_rule_payload_mismatch_rejected(self):
-        spec = _trend_spec()
-        object.__setattr__(spec,"entry_rules",(("long","all",(()),),))
-        fp = _freeze({"schema":"stage-5.rule-spec.v1","spec":spec.spec_payload,"param":spec.param_payload,
-                       "specId":spec.spec_id,"paramId":spec.parameter_id})
-        object.__setattr__(spec,"frozen_id",canonical_sha256(fp))
-        with self.assertRaises(ValueError):
-            Stage5FrozenRuleSpec.__post_init__(spec)
 
 
 if __name__=="__main__":

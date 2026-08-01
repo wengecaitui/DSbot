@@ -44,6 +44,24 @@ def _vstr(v, label):
     if not v: raise ValueError(f"{label}_EMPTY")
 
 
+def _frozen_spec_identity_payload(spec) -> dict:
+    """Return plain JSON dict from a Stage5FrozenRuleSpec for frozen_id."""
+    sd = _thaw(spec.spec_payload)
+    pd = _thaw(spec.param_payload)
+    return {
+        "schema": RULE_SPEC_SCHEMA,
+        "spec": sd,
+        "param": pd,
+        "specId": spec.spec_id,
+        "paramId": spec.parameter_id,
+        "components": list(spec.components),
+        "symbols": list(spec.symbols),
+        "entryRules": [[s, m, [[c, f, o, _thaw(v)] for c,f,o,v in cl]] for s,m,cl in spec.entry_rules],
+        "exitRules": [[s, m, [[c, f, o, _thaw(v)] for c,f,o,v in cl]] for s,m,cl in spec.exit_rules],
+        "warmupBars": spec.warmup_bars,
+    }
+
+
 # --- Tagged immutable JSON tree ---
 
 def _freeze(value):
@@ -56,8 +74,10 @@ def _freeze(value):
         if math.isnan(value) or math.isinf(value): raise ValueError("FREEZE_NAN_INF")
         return ("float", value)
     if t is str: return ("str", value)
-    if t is list or t is tuple:
+    if t is list:
         return ("list",) + tuple(_freeze(v) for v in value)
+    if t is tuple:
+        raise ValueError("FREEZE_TUPLE_REJECTED")
     if t is dict:
         for k in value:
             if type(k) is not str: raise ValueError("FREEZE_NON_STR_KEY")
@@ -335,8 +355,8 @@ class Stage5FrozenRuleSpec:
         if self.param_payload[0] != "dict": raise ValueError("SPEC_PARAM_NOT_DICT")
 
         # Validate stored rules (tagged expected values)
-        seen = set()
         for rules, is_entry in [(self.entry_rules, True), (self.exit_rules, False)]:
+            seen = set()
             if type(rules) is not tuple or len(rules)==0:
                 raise ValueError("SPEC_ENTRY_EMPTY" if is_entry else "SPEC_EXIT_EMPTY")
             for rule in rules:
@@ -347,7 +367,8 @@ class Stage5FrozenRuleSpec:
                 if is_entry and sp not in ("long","short"): raise ValueError("SPEC_ENTRY_SIDE_INVALID")
                 if not is_entry and sp not in ("long","short"): raise ValueError("SPEC_EXIT_POS_INVALID")
                 if type(clauses) is not tuple or len(clauses)==0: raise ValueError("SPEC_CLAUSES_EMPTY")
-                if rule in seen: raise ValueError("SPEC_RULE_DUPLICATE"); seen.add(rule)
+                if rule in seen: raise ValueError("SPEC_RULE_DUPLICATE")
+                seen.add(rule)
                 for c in clauses:
                     if type(c) is not tuple or len(c)!=4: raise ValueError("SPEC_CLAUSE_SHAPE")
                     comp, field, op, val = c
@@ -375,12 +396,7 @@ class Stage5FrozenRuleSpec:
         if self.warmup_bars != e_warmup: raise ValueError("SPEC_WARMUP_MISMATCH")
 
         # Frozen ID
-        fp = _freeze({"schema":RULE_SPEC_SCHEMA,"spec":self.spec_payload,"param":self.param_payload,
-                       "specId":self.spec_id,"paramId":self.parameter_id,
-                       "components":list(self.components),"symbols":list(self.symbols),
-                       "entryRules":[[s,m,[[c,f,o,v] for c,f,o,v in cl]] for s,m,cl in self.entry_rules],
-                       "exitRules":[[s,m,[[c,f,o,v] for c,f,o,v in cl]] for s,m,cl in self.exit_rules],
-                       "warmupBars":self.warmup_bars})
+        fp = _frozen_spec_identity_payload(self)
         expected_fid = canonical_sha256(fp)
         if self.frozen_id != expected_fid: raise ValueError("SPEC_FROZEN_MISMATCH")
 
@@ -412,13 +428,13 @@ def create_frozen_rule_spec(payload: dict, expected_spec_id: str, parameter_set:
 
     if spec_id != expected_spec_id: raise ValueError("FACTORY_SPEC_ID_MISMATCH")
 
-    fp = _freeze({"schema":RULE_SPEC_SCHEMA,"spec":spec_frozen,"param":param_frozen,
-                   "specId":spec_id,"paramId":param_id,
-                   "components":list(comps),"symbols":list(syms),
-                   "entryRules":[[s,m,[[c,f,o,v] for c,f,o,v in cl]] for s,m,cl in er],
-                   "exitRules":[[s,m,[[c,f,o,v] for c,f,o,v in cl]] for s,m,cl in xr],
-                   "warmupBars":warmup})
-    fid = canonical_sha256(fp)
+    fid = canonical_sha256({
+        "schema":RULE_SPEC_SCHEMA,"spec":spec_dict,"param":param_dict,
+        "specId":spec_id,"paramId":param_id,
+        "components":list(comps),"symbols":list(syms),
+        "entryRules":[[s,m,[[c,f,o,_thaw(v)] for c,f,o,v in cl]] for s,m,cl in er],
+        "exitRules":[[s,m,[[c,f,o,_thaw(v)] for c,f,o,v in cl]] for s,m,cl in xr],
+        "warmupBars":warmup})
 
     return Stage5FrozenRuleSpec(
         schema_version=RULE_SPEC_SCHEMA, spec_payload=spec_frozen, param_payload=param_frozen,
@@ -474,6 +490,10 @@ def create_component_snapshot(*, spec: Stage5FrozenRuleSpec, dataset_id, symbol,
         comps = ("dict",)
     else:
         if not component_outputs: raise ValueError("SNAP_FACTORY_OUTPUT_BUT_NO_DATA")
+        # Validate keys before set/sort
+        for key in component_outputs:
+            if type(key) is not str or not key:
+                raise ValueError(f"SNAP_FACTORY_COMP_KEY_INVALID:{key}")
         if set(component_outputs.keys()) != set(spec.components):
             raise ValueError("SNAP_FACTORY_COMP_KEYS_MISMATCH")
         ordered = {}
