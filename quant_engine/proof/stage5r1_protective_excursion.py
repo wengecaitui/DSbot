@@ -24,15 +24,13 @@ from quant_engine.proof.stage5r1_protective_exit import (
     ProtectiveExitPlan, ProtectiveExitEvent, ProtectiveExitResolution,
     resolve_protective_exit,
     KIND_GAP_OPEN, KIND_INTRABAR_LEVEL,
-    REASON_STOP_LOSS, REASON_TAKE_PROFIT,
     STATUS_TRIGGERED, STATUS_NO_TRIGGER,
 )
 from quant_engine.proof.stage5r1_protective_replay import (
     ProtectiveReplayBinding, ReplayExitSelection,
     ProtectiveReplayTrade, ProtectiveReplayResult,
     run_stage5r1_protective_replay,
-    PROTECTIVE_SOURCE, EXPLICIT_SOURCE, EXPLICIT_REASON_VAL,
-    ACCOUNTING_TIME_POLICY,
+    PROTECTIVE_SOURCE, EXPLICIT_SOURCE,
     _binding_set_id,
 )
 from quant_engine.proof.stage5_evaluation import canonical_sha256
@@ -45,11 +43,6 @@ PROTECTIVE_EXCURSION_SCHEMA = "stage-5r1.protective-excursion.v1"
 PROTECTIVE_EXCURSION_TRADE_SCHEMA = "stage-5r1.protective-excursion-trade.v1"
 PROTECTIVE_EXCURSION_RESULT_SCHEMA = "stage-5r1.protective-excursion-result.v1"
 OBSERVATION_PATH_SCHEMA = "stage-5r1.protective-observation-path.v1"
-
-# Frontier point roles
-ROLE_EXIT_OPEN = "EXIT_OPEN"
-ROLE_TRIGGER_OPEN = "TRIGGER_OPEN"
-ROLE_TRIGGER_LEVEL = "TRIGGER_LEVEL"
 
 # Extreme source labels
 SOURCE_FULL_BAR = "FULL_BAR"
@@ -90,6 +83,29 @@ def _vnonneg_finite(v, label):
         raise ValueError(f"{label}_NEGATIVE: {v}")
 
 
+# --- Source label validation ---
+
+_EXPLICIT_ALLOWED_SOURCES = frozenset({SOURCE_FULL_BAR, SOURCE_FRONTIER_EXIT_OPEN})
+_GAP_OPEN_ALLOWED_SOURCES = frozenset({SOURCE_FULL_BAR, SOURCE_FRONTIER_TRIGGER_OPEN})
+_INTRABAR_ALLOWED_SOURCES = frozenset({
+    SOURCE_FULL_BAR, SOURCE_FRONTIER_TRIGGER_OPEN, SOURCE_FRONTIER_TRIGGER_LEVEL,
+})
+
+_ALLOWED_SOURCE_MAP = {
+    (EXPLICIT_SOURCE, None): _EXPLICIT_ALLOWED_SOURCES,
+    (PROTECTIVE_SOURCE, KIND_GAP_OPEN): _GAP_OPEN_ALLOWED_SOURCES,
+    (PROTECTIVE_SOURCE, KIND_INTRABAR_LEVEL): _INTRABAR_ALLOWED_SOURCES,
+}
+
+
+def _allowed_sources(source: str, trigger_kind: str | None) -> frozenset[str]:
+    """Return the allowed extreme source labels for this excursion type."""
+    key = (source, trigger_kind)
+    if key in _ALLOWED_SOURCE_MAP:
+        return _ALLOWED_SOURCE_MAP[key]
+    raise ValueError(f"EXC_UNKNOWN_SOURCE_COMBO: {source}/{trigger_kind}")
+
+
 # --- Observation path ---
 
 def _observation_path_id(
@@ -101,12 +117,7 @@ def _observation_path_id(
     symbol: str,
     timeframe_ms: int,
 ) -> str:
-    """Causal execution frontier observation path identity.
-
-    full_pre_exit_bars = bars[entry_idx:exit_idx] — the exit_idx bar itself
-    is NEVER in full pre-exit bars.  The frontier carries what is observable
-    on the exit bar.
-    """
+    """Causal execution frontier observation path identity."""
     payload = {
         "schemaVersion": OBSERVATION_PATH_SCHEMA,
         "symbol": symbol,
@@ -138,33 +149,23 @@ def _compute_extrema(
     frontier: list[dict],
     side: PositionSide,
 ) -> tuple[float, int, str, float, int, str]:
-    """Return (fav_price, fav_time, fav_source, adv_price, adv_time, adv_source).
-
-    Scans full bars chronologically first, then frontier in order.
-    Earliest match wins per the tie policy.
-    """
-    # Candidates: (price, time_ms, source_label)
+    """Return (fav_price, fav_time, fav_source, adv_price, adv_time, adv_source)."""
     candidates: list[tuple[float, int, str]] = []
 
-    # Full bars
     for b in full_bars:
         candidates.append((float(b.high), b.open_time_ms, SOURCE_FULL_BAR))
         candidates.append((float(b.low), b.open_time_ms, SOURCE_FULL_BAR))
 
-    # Frontier points
     for fp in frontier:
         candidates.append((float(fp["price"]), fp["time"], fp["role"]))
 
     if side is PositionSide.LONG:
-        # favorable = max price, adverse = min price
         fav_price = max(c[0] for c in candidates)
         adv_price = min(c[0] for c in candidates)
     else:
-        # favorable = min price, adverse = max price
         fav_price = min(c[0] for c in candidates)
         adv_price = max(c[0] for c in candidates)
 
-    # Earliest tie: scan candidates in insertion order, take first match
     fav_time = -1
     fav_source = ""
     for price, t, src in candidates:
@@ -217,6 +218,7 @@ def _excursion_payload(e: ProtectiveTradeExcursion) -> dict:
         "exitExecutionTimeMs": e.exit_execution_time_ms,
         "selectedExitBarIndex": e.selected_exit_bar_index,
         "fullPreExitBarCount": e.full_pre_exit_bar_count,
+        "exitBarOpenPrice": float(e.exit_bar_open_price),
         "entryFillPrice": float(e.entry_fill_price),
         "quantity": float(e.quantity),
         "entryEquity": float(e.entry_equity),
@@ -276,6 +278,7 @@ class ProtectiveTradeExcursion:
     exit_execution_time_ms: int
     selected_exit_bar_index: int
     full_pre_exit_bar_count: int
+    exit_bar_open_price: float
     entry_fill_price: float
     quantity: float
     entry_equity: float
@@ -316,15 +319,13 @@ class ProtectiveTradeExcursion:
                   "accounting_id", "observation_path_id", "excursion_id"):
             _vsha(getattr(self, n), f"EXC_{n.upper()}")
 
-        # Nullable SHAs
         if self.protective_event_id is not None:
             _vsha(self.protective_event_id, "EXC_PROTECTIVE_EVENT_ID")
 
-        # Side
         if type(self.side) is not PositionSide:
             raise ValueError("EXC_SIDE_INVALID")
 
-        # Source
+        # --- Source validation ---
         if self.source not in (PROTECTIVE_SOURCE, EXPLICIT_SOURCE):
             raise ValueError(f"EXC_SOURCE_INVALID: {self.source}")
         if self.source == EXPLICIT_SOURCE:
@@ -332,31 +333,36 @@ class ProtectiveTradeExcursion:
                 raise ValueError("EXC_EXPLICIT_EVENT_NOT_NULL")
             if self.trigger_kind is not None:
                 raise ValueError("EXC_EXPLICIT_TRIGGER_KIND_NOT_NULL")
-            if self.raw_exit_price != float(self.raw_exit_price):
-                pass  # already float
         else:
             if type(self.protective_event_id) is not str:
                 raise ValueError("EXC_PROTECTIVE_EVENT_MISSING")
             if self.trigger_kind not in (KIND_GAP_OPEN, KIND_INTRABAR_LEVEL):
                 raise ValueError(f"EXC_TRIGGER_KIND_INVALID: {self.trigger_kind}")
 
-        # Times
+        # --- Times ---
         _vint(self.entry_execution_time_ms, "EXC_ENTRY_TIME")
         _vint(self.exit_execution_time_ms, "EXC_EXIT_TIME")
         if self.exit_execution_time_ms < self.entry_execution_time_ms:
             raise ValueError("EXC_TIME_ORDER_INVALID")
-
         _vint(self.selected_exit_bar_index, "EXC_SEL_EXIT_IDX")
         _vint(self.favorable_extreme_time_ms, "EXC_FAV_TIME")
         _vint(self.adverse_extreme_time_ms, "EXC_ADV_TIME")
 
-        # full_pre_exit_bar_count
+        # Extreme times must be within [entry_time, exit_time]
+        if self.favorable_extreme_time_ms < self.entry_execution_time_ms:
+            raise ValueError("EXC_FAV_TIME_BEFORE_ENTRY")
+        if self.favorable_extreme_time_ms > self.exit_execution_time_ms:
+            raise ValueError("EXC_FAV_TIME_AFTER_EXIT")
+        if self.adverse_extreme_time_ms < self.entry_execution_time_ms:
+            raise ValueError("EXC_ADV_TIME_BEFORE_ENTRY")
+        if self.adverse_extreme_time_ms > self.exit_execution_time_ms:
+            raise ValueError("EXC_ADV_TIME_AFTER_EXIT")
+
+        # --- full_pre_exit_bar_count ---
         if isinstance(self.full_pre_exit_bar_count, bool) or not isinstance(self.full_pre_exit_bar_count, int):
             raise ValueError("EXC_HOLDING_COUNT_NOT_INT")
         if self.full_pre_exit_bar_count < 0:
             raise ValueError("EXC_HOLDING_COUNT_NEGATIVE")
-
-        # Time span consistency
         expected_span = self.full_pre_exit_bar_count * FROZEN_TIMEFRAME_MS
         actual_span = self.exit_execution_time_ms - self.entry_execution_time_ms
         if actual_span != expected_span:
@@ -365,13 +371,154 @@ class ProtectiveTradeExcursion:
                 f"span={actual_span} expected={expected_span}"
             )
 
-        # Numeric validations
+        # --- Numeric validations ---
         _vpos(self.entry_fill_price, "EXC_ENTRY_FILL")
         _vpos(self.quantity, "EXC_QUANTITY")
         _vpos(self.entry_equity, "EXC_ENTRY_EQUITY")
         _vpos(self.raw_exit_price, "EXC_RAW_EXIT")
+        _vpos(self.exit_bar_open_price, "EXC_EXIT_BAR_OPEN")
         _vpos(self.favorable_extreme_price, "EXC_FAV_PRICE")
         _vpos(self.adverse_extreme_price, "EXC_ADV_PRICE")
+
+        # --- Source label semantics ---
+        allowed = _allowed_sources(self.source, self.trigger_kind)
+        if self.favorable_extreme_source not in allowed:
+            raise ValueError(
+                f"EXC_FAV_SOURCE_DISALLOWED: {self.favorable_extreme_source} "
+                f"for source={self.source} trigger_kind={self.trigger_kind}"
+            )
+        if self.adverse_extreme_source not in allowed:
+            raise ValueError(
+                f"EXC_ADV_SOURCE_DISALLOWED: {self.adverse_extreme_source} "
+                f"for source={self.source} trigger_kind={self.trigger_kind}"
+            )
+
+        # Zero-count cannot have FULL_BAR source
+        if self.full_pre_exit_bar_count == 0:
+            if self.favorable_extreme_source == SOURCE_FULL_BAR:
+                raise ValueError("EXC_FAV_FULL_BAR_IMPOSSIBLE_ZERO_COUNT")
+            if self.adverse_extreme_source == SOURCE_FULL_BAR:
+                raise ValueError("EXC_ADV_FULL_BAR_IMPOSSIBLE_ZERO_COUNT")
+
+        # FULL_BAR extreme time must be < exit time
+        if self.favorable_extreme_source == SOURCE_FULL_BAR:
+            if self.favorable_extreme_time_ms >= self.exit_execution_time_ms:
+                raise ValueError("EXC_FAV_FULL_BAR_TIME_NOT_BEFORE_EXIT")
+        if self.adverse_extreme_source == SOURCE_FULL_BAR:
+            if self.adverse_extreme_time_ms >= self.exit_execution_time_ms:
+                raise ValueError("EXC_ADV_FULL_BAR_TIME_NOT_BEFORE_EXIT")
+
+        # Frontier extreme time must equal exit time
+        if self.favorable_extreme_source in (
+            SOURCE_FRONTIER_EXIT_OPEN, SOURCE_FRONTIER_TRIGGER_OPEN, SOURCE_FRONTIER_TRIGGER_LEVEL,
+        ):
+            if self.favorable_extreme_time_ms != self.exit_execution_time_ms:
+                raise ValueError("EXC_FAV_FRONTIER_TIME_NOT_EXIT")
+        if self.adverse_extreme_source in (
+            SOURCE_FRONTIER_EXIT_OPEN, SOURCE_FRONTIER_TRIGGER_OPEN, SOURCE_FRONTIER_TRIGGER_LEVEL,
+        ):
+            if self.adverse_extreme_time_ms != self.exit_execution_time_ms:
+                raise ValueError("EXC_ADV_FRONTIER_TIME_NOT_EXIT")
+
+        # FRONTIER_EXIT_OPEN extreme price must always equal raw exit price
+        for lbl, name in ((SOURCE_FRONTIER_EXIT_OPEN, "FRONTIER_EXIT_OPEN"),):
+            if self.favorable_extreme_source == lbl:
+                if self.favorable_extreme_price != self.raw_exit_price:
+                    raise ValueError(
+                        f"EXC_FAV_{name}_PRICE_NOT_RAW_EXIT: "
+                        f"{self.favorable_extreme_price} != {self.raw_exit_price}"
+                    )
+            if self.adverse_extreme_source == lbl:
+                if self.adverse_extreme_price != self.raw_exit_price:
+                    raise ValueError(
+                        f"EXC_ADV_{name}_PRICE_NOT_RAW_EXIT: "
+                        f"{self.adverse_extreme_price} != {self.raw_exit_price}"
+                    )
+
+        # GAP FRONTIER_TRIGGER_OPEN extreme price must equal raw exit price
+        if self.source == PROTECTIVE_SOURCE and self.trigger_kind == KIND_GAP_OPEN:
+            if self.favorable_extreme_source == SOURCE_FRONTIER_TRIGGER_OPEN:
+                if self.favorable_extreme_price != self.raw_exit_price:
+                    raise ValueError(
+                        f"EXC_FAV_GAP_TRIGGER_OPEN_PRICE_NOT_RAW_EXIT: "
+                        f"{self.favorable_extreme_price} != {self.raw_exit_price}"
+                    )
+            if self.adverse_extreme_source == SOURCE_FRONTIER_TRIGGER_OPEN:
+                if self.adverse_extreme_price != self.raw_exit_price:
+                    raise ValueError(
+                        f"EXC_ADV_GAP_TRIGGER_OPEN_PRICE_NOT_RAW_EXIT: "
+                        f"{self.adverse_extreme_price} != {self.raw_exit_price}"
+                    )
+
+        # FRONTIER_TRIGGER_LEVEL extreme price must equal raw exit price
+        if self.favorable_extreme_source == SOURCE_FRONTIER_TRIGGER_LEVEL:
+            if self.favorable_extreme_price != self.raw_exit_price:
+                raise ValueError("EXC_FAV_TRIGGER_LEVEL_PRICE_NOT_RAW_EXIT")
+        if self.adverse_extreme_source == SOURCE_FRONTIER_TRIGGER_LEVEL:
+            if self.adverse_extreme_price != self.raw_exit_price:
+                raise ValueError("EXC_ADV_TRIGGER_LEVEL_PRICE_NOT_RAW_EXIT")
+
+        # --- Side-consistency for extrema ---
+        if self.side is PositionSide.LONG:
+            if self.favorable_extreme_price < self.adverse_extreme_price:
+                raise ValueError("EXC_LONG_FAV_LT_ADV")
+        else:
+            if self.favorable_extreme_price > self.adverse_extreme_price:
+                raise ValueError("EXC_SHORT_FAV_GT_ADV")
+
+        # --- Arithmetic coherent validation ---
+        entry_fill = self.entry_fill_price
+        quantity = self.quantity
+        entry_eq = self.entry_equity
+
+        if self.side is PositionSide.LONG:
+            exp_mfe_delta = max(0.0, self.favorable_extreme_price - entry_fill)
+            exp_mae_delta = max(0.0, entry_fill - self.adverse_extreme_price)
+        else:
+            exp_mfe_delta = max(0.0, entry_fill - self.favorable_extreme_price)
+            exp_mae_delta = max(0.0, self.adverse_extreme_price - entry_fill)
+
+        if self.mfe_price_delta != exp_mfe_delta:
+            raise ValueError(
+                f"EXC_MFE_DELTA_INCONSISTENT: {self.mfe_price_delta} != {exp_mfe_delta}"
+            )
+        if self.mae_price_delta != exp_mae_delta:
+            raise ValueError(
+                f"EXC_MAE_DELTA_INCONSISTENT: {self.mae_price_delta} != {exp_mae_delta}"
+            )
+
+        exp_mfe_amount = quantity * exp_mfe_delta
+        exp_mae_amount = quantity * exp_mae_delta
+        if self.mfe_amount_before_exit_costs != exp_mfe_amount:
+            raise ValueError(
+                f"EXC_MFE_AMOUNT_INCONSISTENT: {self.mfe_amount_before_exit_costs} != {exp_mfe_amount}"
+            )
+        if self.mae_amount_before_exit_costs != exp_mae_amount:
+            raise ValueError(
+                f"EXC_MAE_AMOUNT_INCONSISTENT: {self.mae_amount_before_exit_costs} != {exp_mae_amount}"
+            )
+
+        exp_mfe_return = exp_mfe_amount / entry_eq
+        exp_mae_return = exp_mae_amount / entry_eq
+        if self.mfe_return_on_entry_equity != exp_mfe_return:
+            raise ValueError(
+                f"EXC_MFE_RETURN_INCONSISTENT: {self.mfe_return_on_entry_equity} != {exp_mfe_return}"
+            )
+        if self.mae_return_on_entry_equity != exp_mae_return:
+            raise ValueError(
+                f"EXC_MAE_RETURN_INCONSISTENT: {self.mae_return_on_entry_equity} != {exp_mae_return}"
+            )
+
+        exp_mfe_frac = exp_mfe_delta / entry_fill
+        exp_mae_frac = exp_mae_delta / entry_fill
+        if self.mfe_fraction_of_entry_fill_price != exp_mfe_frac:
+            raise ValueError(
+                f"EXC_MFE_FRAC_INCONSISTENT: {self.mfe_fraction_of_entry_fill_price} != {exp_mfe_frac}"
+            )
+        if self.mae_fraction_of_entry_fill_price != exp_mae_frac:
+            raise ValueError(
+                f"EXC_MAE_FRAC_INCONSISTENT: {self.mae_fraction_of_entry_fill_price} != {exp_mae_frac}"
+            )
 
         _vnonneg_finite(self.mfe_price_delta, "EXC_MFE_DELTA")
         _vnonneg_finite(self.mae_price_delta, "EXC_MAE_DELTA")
@@ -382,19 +529,7 @@ class ProtectiveTradeExcursion:
         _vnonneg_finite(self.mfe_fraction_of_entry_fill_price, "EXC_MFE_FRAC")
         _vnonneg_finite(self.mae_fraction_of_entry_fill_price, "EXC_MAE_FRAC")
 
-        # Source labels
-        if self.favorable_extreme_source not in (
-            SOURCE_FULL_BAR, SOURCE_FRONTIER_EXIT_OPEN,
-            SOURCE_FRONTIER_TRIGGER_OPEN, SOURCE_FRONTIER_TRIGGER_LEVEL,
-        ):
-            raise ValueError(f"EXC_FAV_SOURCE_INVALID: {self.favorable_extreme_source}")
-        if self.adverse_extreme_source not in (
-            SOURCE_FULL_BAR, SOURCE_FRONTIER_EXIT_OPEN,
-            SOURCE_FRONTIER_TRIGGER_OPEN, SOURCE_FRONTIER_TRIGGER_LEVEL,
-        ):
-            raise ValueError(f"EXC_ADV_SOURCE_INVALID: {self.adverse_extreme_source}")
-
-        # Excursion ID
+        # --- Excursion ID ---
         expected = canonical_sha256(_excursion_payload(self))
         if self.excursion_id != expected:
             raise ValueError("EXC_ID_MISMATCH")
@@ -431,15 +566,56 @@ class ProtectiveExcursionTrade:
         if type(self.excursion) is not ProtectiveTradeExcursion:
             raise ValueError("COMP_TRADE_EXC_TYPE_INVALID")
 
-        # Cross-object consistency
-        if self.selection.selection_id != self.base.selection_id:
+        exc = self.excursion
+        sel = self.selection
+        base = self.base
+        acct = self.accounting
+
+        # --- Identity chain ---
+        if sel.selection_id != base.selection_id:
             raise ValueError("COMP_TRADE_SEL_ID_MISMATCH")
-        if self.accounting.accounting_id != self.base.accounting_id:
+        if acct.accounting_id != base.accounting_id:
             raise ValueError("COMP_TRADE_ACCT_ID_MISMATCH")
-        if self.excursion.selection_id != self.base.selection_id:
+        if exc.selection_id != base.selection_id:
             raise ValueError("COMP_TRADE_EXC_SEL_ID_MISMATCH")
-        if self.excursion.accounting_id != self.base.accounting_id:
+        if exc.accounting_id != base.accounting_id:
             raise ValueError("COMP_TRADE_EXC_ACCT_ID_MISMATCH")
+
+        # --- Full nested lineage ---
+        if exc.base_trade_id != base.trade_id:
+            raise ValueError("COMP_TRADE_EXC_BASE_TRADE_ID_MISMATCH")
+        if exc.binding_id != base.binding_id:
+            raise ValueError("COMP_TRADE_EXC_BINDING_ID_MISMATCH")
+        if exc.binding_id != sel.binding_id:
+            raise ValueError("COMP_TRADE_EXC_BINDING_SEL_ID_MISMATCH")
+        if exc.plan_id != sel.plan_id:
+            raise ValueError("COMP_TRADE_EXC_PLAN_ID_MISMATCH")
+        if exc.protective_resolution_id != sel.protective_resolution_id:
+            raise ValueError("COMP_TRADE_EXC_RESOLUTION_ID_MISMATCH")
+        if exc.protective_event_id != sel.protective_event_id:
+            raise ValueError("COMP_TRADE_EXC_EVENT_ID_MISMATCH")
+        if exc.source != sel.source:
+            raise ValueError("COMP_TRADE_EXC_SOURCE_MISMATCH")
+        if exc.entry_execution_time_ms != sel.entry_execution_time_ms:
+            raise ValueError("COMP_TRADE_EXC_ENTRY_TIME_SEL_MISMATCH")
+        if exc.entry_execution_time_ms != base.entry_execution_time_ms:
+            raise ValueError("COMP_TRADE_EXC_ENTRY_TIME_BASE_MISMATCH")
+        if exc.exit_execution_time_ms != sel.selected_exit_bar_open_time_ms:
+            raise ValueError("COMP_TRADE_EXC_EXIT_TIME_SEL_MISMATCH")
+        if exc.exit_execution_time_ms != base.selected_exit_bar_open_time_ms:
+            raise ValueError("COMP_TRADE_EXC_EXIT_TIME_BASE_MISMATCH")
+        if exc.selected_exit_bar_index != sel.selected_exit_bar_index:
+            raise ValueError("COMP_TRADE_EXC_EXIT_IDX_MISMATCH")
+        if exc.raw_exit_price != sel.raw_exit_price:
+            raise ValueError("COMP_TRADE_EXC_RAW_EXIT_MISMATCH")
+        if exc.side is not acct.side:
+            raise ValueError("COMP_TRADE_EXC_SIDE_MISMATCH")
+        if exc.entry_fill_price != acct.entry_fill_price:
+            raise ValueError("COMP_TRADE_EXC_ENTRY_FILL_MISMATCH")
+        if exc.quantity != acct.quantity:
+            raise ValueError("COMP_TRADE_EXC_QUANTITY_MISMATCH")
+        if exc.entry_equity != acct.entry_equity:
+            raise ValueError("COMP_TRADE_EXC_ENTRY_EQUITY_MISMATCH")
 
         _vsha(self.composite_trade_id, "COMP_TRADE_ID")
         expected = canonical_sha256(_composite_trade_payload(self))
@@ -452,16 +628,16 @@ class ProtectiveExcursionTrade:
 def _excursion_result_payload(r: ProtectiveExcursionResult) -> dict:
     return {
         "schemaVersion": PROTECTIVE_EXCURSION_RESULT_SCHEMA,
-        "baseReplayId": r.base.replay_id,
-        "symbol": r.base.symbol,
-        "timeframeMs": r.base.timeframe_ms,
-        "datasetId": r.base.dataset_id,
-        "instructionSetId": r.base.instruction_set_id,
-        "bindingSetId": r.base.binding_set_id,
-        "replayConfigId": r.base.replay_config_id,
-        "capitalModelId": r.base.capital_model_id,
-        "costModelId": r.base.cost_model_id,
-        "tradeCount": r.base.trade_count,
+        "baseProtectiveReplayId": r.base_protective_replay_id,
+        "symbol": r.symbol,
+        "timeframeMs": r.timeframe_ms,
+        "datasetId": r.dataset_id,
+        "instructionSetId": r.instruction_set_id,
+        "bindingSetId": r.binding_set_id,
+        "replayConfigId": r.replay_config_id,
+        "capitalModelId": r.capital_model_id,
+        "costModelId": r.cost_model_id,
+        "tradeCount": r.trade_count,
         "compositeTradeIds": [t.composite_trade_id for t in r.trades],
         "excursionIds": [t.excursion.excursion_id for t in r.trades],
     }
@@ -470,14 +646,62 @@ def _excursion_result_payload(r: ProtectiveExcursionResult) -> dict:
 @dataclass(frozen=True)
 class ProtectiveExcursionResult:
     base: ProtectiveReplayResult
+    base_protective_replay_id: str
+    symbol: str
+    timeframe_ms: int
+    dataset_id: str
+    instruction_set_id: str
+    binding_set_id: str
+    replay_config_id: str
+    capital_model_id: str
+    cost_model_id: str
+    trade_count: int
     trades: tuple[ProtectiveExcursionTrade, ...]
     result_id: str
 
     def __post_init__(self) -> None:
         if type(self.base) is not ProtectiveReplayResult:
             raise ValueError("RES_BASE_TYPE_INVALID")
+
+        # --- Root field validation against base ---
+        if self.base_protective_replay_id != self.base.replay_id:
+            raise ValueError("RES_BASE_REPLAY_ID_MISMATCH")
+        if self.symbol != self.base.symbol:
+            raise ValueError("RES_SYMBOL_MISMATCH")
+        if self.timeframe_ms != self.base.timeframe_ms:
+            raise ValueError("RES_TIMEFRAME_MISMATCH")
+        if self.dataset_id != self.base.dataset_id:
+            raise ValueError("RES_DATASET_ID_MISMATCH")
+        if self.instruction_set_id != self.base.instruction_set_id:
+            raise ValueError("RES_INSTRUCTION_SET_ID_MISMATCH")
+        if self.binding_set_id != self.base.binding_set_id:
+            raise ValueError("RES_BINDING_SET_ID_MISMATCH")
+        if self.replay_config_id != self.base.replay_config_id:
+            raise ValueError("RES_REPLAY_CONFIG_ID_MISMATCH")
+        if self.capital_model_id != self.base.capital_model_id:
+            raise ValueError("RES_CAPITAL_MODEL_ID_MISMATCH")
+        if self.cost_model_id != self.base.cost_model_id:
+            raise ValueError("RES_COST_MODEL_ID_MISMATCH")
+        if self.trade_count != self.base.trade_count:
+            raise ValueError("RES_TRADE_COUNT_MISMATCH")
+
+        # --- Exact count validation ---
+        if len(self.trades) != self.trade_count:
+            raise ValueError(
+                f"RES_TRADE_COUNT_LEN_MISMATCH: {len(self.trades)} != {self.trade_count}"
+            )
+        if len(self.trades) != len(self.base.trades):
+            raise ValueError(
+                f"RES_TRADE_BASE_LEN_MISMATCH: {len(self.trades)} != {len(self.base.trades)}"
+            )
+        if len(self.trades) != len(self.base.selections):
+            raise ValueError(
+                f"RES_TRADE_SEL_LEN_MISMATCH: {len(self.trades)} != {len(self.base.selections)}"
+            )
+
         if type(self.trades) is not tuple:
             raise ValueError("RES_TRADES_NOT_TUPLE")
+
         for i, t in enumerate(self.trades):
             if type(t) is not ProtectiveExcursionTrade:
                 raise ValueError(f"RES_TRADE_TYPE_{i}")
@@ -488,8 +712,37 @@ class ProtectiveExcursionResult:
                 raise ValueError(f"RES_BASE_TRADE_ID_MISMATCH_{i}")
             if t.selection.selection_id != self.base.selections[i].selection_id:
                 raise ValueError(f"RES_BASE_SEL_ID_MISMATCH_{i}")
+            # Verify excursion root IDs match result
+            if t.excursion.base_protective_replay_id != self.base_protective_replay_id:
+                raise ValueError(f"RES_EXC_REPLAY_ID_MISMATCH_{i}")
+            if t.excursion.dataset_id != self.dataset_id:
+                raise ValueError(f"RES_EXC_DATASET_ID_MISMATCH_{i}")
+            if t.excursion.instruction_set_id != self.instruction_set_id:
+                raise ValueError(f"RES_EXC_INSTRUCTION_ID_MISMATCH_{i}")
+            if t.excursion.binding_set_id != self.binding_set_id:
+                raise ValueError(f"RES_EXC_BINDING_ID_MISMATCH_{i}")
+            if t.excursion.replay_config_id != self.replay_config_id:
+                raise ValueError(f"RES_EXC_CONFIG_ID_MISMATCH_{i}")
+            if t.excursion.capital_model_id != self.capital_model_id:
+                raise ValueError(f"RES_EXC_CAPITAL_ID_MISMATCH_{i}")
+            if t.excursion.cost_model_id != self.cost_model_id:
+                raise ValueError(f"RES_EXC_COST_ID_MISMATCH_{i}")
 
+        # SHA validations
+        _vsha(self.base_protective_replay_id, "RES_BASE_REPLAY_ID")
+        _vsha(self.dataset_id, "RES_DATASET_ID")
+        _vsha(self.instruction_set_id, "RES_INSTRUCTION_SET_ID")
+        _vsha(self.binding_set_id, "RES_BINDING_SET_ID")
+        _vsha(self.replay_config_id, "RES_REPLAY_CONFIG_ID")
+        _vsha(self.capital_model_id, "RES_CAPITAL_MODEL_ID")
+        _vsha(self.cost_model_id, "RES_COST_MODEL_ID")
         _vsha(self.result_id, "RES_RESULT_ID")
+
+        if type(self.timeframe_ms) is not int:
+            raise ValueError("RES_TIMEFRAME_NOT_INT")
+        if isinstance(self.trade_count, bool) or not isinstance(self.trade_count, int):
+            raise ValueError("RES_TRADE_COUNT_NOT_INT")
+
         expected = canonical_sha256(_excursion_result_payload(self))
         if self.result_id != expected:
             raise ValueError("RES_ID_MISMATCH")
@@ -506,12 +759,7 @@ def run_stage5r1_protective_excursion(
     capital,
     cost,
 ) -> ProtectiveExcursionResult:
-    """Run Stage D protective replay, then compose Stage E excursion analytics.
-
-    Calls run_stage5r1_protective_replay unchanged.  Recomputes and
-    independently verifies every TradeAccounting and ProtectiveExitResolution
-    before computing causal-execution-frontier excursion metrics.
-    """
+    """Run Stage D protective replay, then compose Stage E excursion analytics."""
     # --- Exact type checks at boundary ---
     if type(config) is not ReplayConfig:
         raise ValueError("CONFIG_TYPE_INVALID")
@@ -530,7 +778,6 @@ def run_stage5r1_protective_excursion(
         cost=cost,
     )
 
-    # --- Validate base result type ---
     if type(base_result) is not ProtectiveReplayResult:
         raise ValueError("BASE_RESULT_TYPE_INVALID")
 
@@ -540,16 +787,26 @@ def run_stage5r1_protective_excursion(
     for i, b in enumerate(valid_bars):
         bar_time_to_idx[b.open_time_ms] = i
 
-    # --- Setup: identity helper values ---
+    # --- Independently compute root IDs and validate against base ---
     ds_id = _dataset_id(valid_bars, symbol=config.symbol, timeframe_ms=config.timeframe_ms)
     is_id = _instruction_set_id(validate_instruction_set(instructions, valid_bars, config.warmup_bars))
-    bs_id = _binding_set_id(base_result.trades) if len(base_result.trades) == 0 else (
-        # Reconstruct binding set ID from the bindings passed in
-        _build_binding_set_id(protective_bindings)
-    )
+    bs_id = _binding_set_id(protective_bindings)
     rc_id = _replay_config_id(config)
     cm_id = capital_model_id(capital)
     co_id = cost_model_id(cost)
+
+    if ds_id != base_result.dataset_id:
+        raise ValueError("ROOT_DATASET_ID_MISMATCH")
+    if is_id != base_result.instruction_set_id:
+        raise ValueError("ROOT_INSTRUCTION_SET_ID_MISMATCH")
+    if bs_id != base_result.binding_set_id:
+        raise ValueError("ROOT_BINDING_SET_ID_MISMATCH")
+    if rc_id != base_result.replay_config_id:
+        raise ValueError("ROOT_REPLAY_CONFIG_ID_MISMATCH")
+    if cm_id != base_result.capital_model_id:
+        raise ValueError("ROOT_CAPITAL_MODEL_ID_MISMATCH")
+    if co_id != base_result.cost_model_id:
+        raise ValueError("ROOT_COST_MODEL_ID_MISMATCH")
 
     # --- Process each trade ---
     current_eq = float(capital.initial_equity)
@@ -560,16 +817,15 @@ def run_stage5r1_protective_excursion(
     ):
         entry_idx = bar_time_to_idx[base_selection.entry_execution_time_ms]
 
-        # --- Recompute and verify TradeAccounting ---
         entry_open = float(valid_bars[entry_idx].open)
         raw_exit = base_selection.raw_exit_price
         sel_time = base_selection.selected_exit_bar_open_time_ms
 
-        # Find the binding for this trade to get side
+        # Find the binding
         matching_binding = None
         for b in protective_bindings:
             if type(b) is not ProtectiveReplayBinding:
-                continue
+                raise ValueError("EXC_BINDING_TYPE_INVALID")
             if b.entry_signal_bar_open_time_ms == base_selection.entry_signal_bar_open_time_ms:
                 matching_binding = b
                 break
@@ -605,7 +861,6 @@ def run_stage5r1_protective_excursion(
         # --- Recompute and verify ProtectiveExitResolution ---
         exit_sig_idx = bar_time_to_idx[base_selection.paired_exit_signal_bar_open_time_ms]
 
-        # For protective exits, resolve up to the trigger bar
         if base_selection.source == PROTECTIVE_SOURCE:
             trigger_idx = base_selection.selected_exit_bar_index
             resolution = resolve_protective_exit(
@@ -629,7 +884,6 @@ def run_stage5r1_protective_excursion(
             if resolution.event.trigger_kind not in (KIND_GAP_OPEN, KIND_INTRABAR_LEVEL):
                 raise ValueError("EXC_EVENT_TRIGGER_KIND_INVALID")
         else:
-            # No-trigger explicit — resolve up to exit signal bar, expect NO_TRIGGER
             resolution = resolve_protective_exit(
                 bars=valid_bars,
                 entry_execution_index=entry_idx,
@@ -649,12 +903,13 @@ def run_stage5r1_protective_excursion(
         if base_selection.source == PROTECTIVE_SOURCE:
             event = resolution.event
             trigger_idx = base_selection.selected_exit_bar_index
+            exit_bar_open = float(valid_bars[trigger_idx].open)
 
             if event.trigger_kind == KIND_GAP_OPEN:
                 full_pre_exit_bars = valid_bars[entry_idx:trigger_idx]
                 frontier = [{
                     "time": valid_bars[trigger_idx].open_time_ms,
-                    "price": float(valid_bars[trigger_idx].open),
+                    "price": exit_bar_open,
                     "role": SOURCE_FRONTIER_TRIGGER_OPEN,
                 }]
                 full_count = trigger_idx - entry_idx
@@ -663,7 +918,7 @@ def run_stage5r1_protective_excursion(
                 frontier = [
                     {
                         "time": valid_bars[trigger_idx].open_time_ms,
-                        "price": float(valid_bars[trigger_idx].open),
+                        "price": exit_bar_open,
                         "role": SOURCE_FRONTIER_TRIGGER_OPEN,
                     },
                     {
@@ -675,10 +930,11 @@ def run_stage5r1_protective_excursion(
                 full_count = trigger_idx - entry_idx
         else:  # EXPLICIT_SOURCE
             exit_idx = base_selection.selected_exit_bar_index
+            exit_bar_open = float(valid_bars[exit_idx].open)
             full_pre_exit_bars = valid_bars[entry_idx:exit_idx]
             frontier = [{
                 "time": valid_bars[exit_idx].open_time_ms,
-                "price": float(valid_bars[exit_idx].open),
+                "price": exit_bar_open,
                 "role": SOURCE_FRONTIER_EXIT_OPEN,
             }]
             full_count = exit_idx - entry_idx
@@ -686,9 +942,7 @@ def run_stage5r1_protective_excursion(
         obs_path_id = _observation_path_id(
             bars=valid_bars,
             entry_idx=entry_idx,
-            exit_idx=(base_selection.selected_exit_bar_index
-                      if base_selection.source == PROTECTIVE_SOURCE
-                      else base_selection.selected_exit_bar_index),
+            exit_idx=(base_selection.selected_exit_bar_index),
             full_pre_exit_bar_count=full_count,
             frontier=frontier,
             symbol=config.symbol,
@@ -757,6 +1011,7 @@ def run_stage5r1_protective_excursion(
             "exitExecutionTimeMs": sel_time,
             "selectedExitBarIndex": base_selection.selected_exit_bar_index,
             "fullPreExitBarCount": full_count,
+            "exitBarOpenPrice": float(exit_bar_open),
             "entryFillPrice": float(entry_fill),
             "quantity": float(quantity),
             "entryEquity": float(entry_eq),
@@ -815,6 +1070,7 @@ def run_stage5r1_protective_excursion(
             exit_execution_time_ms=sel_time,
             selected_exit_bar_index=base_selection.selected_exit_bar_index,
             full_pre_exit_bar_count=full_count,
+            exit_bar_open_price=exit_bar_open,
             entry_fill_price=entry_fill,
             quantity=quantity,
             entry_equity=entry_eq,
@@ -859,7 +1115,7 @@ def run_stage5r1_protective_excursion(
     # --- Build result ---
     result_id = canonical_sha256({
         "schemaVersion": PROTECTIVE_EXCURSION_RESULT_SCHEMA,
-        "baseReplayId": base_result.replay_id,
+        "baseProtectiveReplayId": base_result.replay_id,
         "symbol": base_result.symbol,
         "timeframeMs": base_result.timeframe_ms,
         "datasetId": base_result.dataset_id,
@@ -875,12 +1131,16 @@ def run_stage5r1_protective_excursion(
 
     return ProtectiveExcursionResult(
         base=base_result,
+        base_protective_replay_id=base_result.replay_id,
+        symbol=base_result.symbol,
+        timeframe_ms=base_result.timeframe_ms,
+        dataset_id=base_result.dataset_id,
+        instruction_set_id=base_result.instruction_set_id,
+        binding_set_id=base_result.binding_set_id,
+        replay_config_id=base_result.replay_config_id,
+        capital_model_id=base_result.capital_model_id,
+        cost_model_id=base_result.cost_model_id,
+        trade_count=base_result.trade_count,
         trades=tuple(comp_trades),
         result_id=result_id,
     )
-
-
-def _build_binding_set_id(bindings) -> str:
-    """Reconstruct binding set ID from bindings."""
-    from quant_engine.proof.stage5r1_protective_replay import _binding_set_id as _bsi
-    return _bsi(bindings)

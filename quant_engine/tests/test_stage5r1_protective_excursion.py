@@ -25,6 +25,7 @@ from quant_engine.proof.stage5r1_protective_excursion import (
     PROTECTIVE_EXCURSION_TIE_POLICY,
     SOURCE_FULL_BAR, SOURCE_FRONTIER_TRIGGER_OPEN, SOURCE_FRONTIER_TRIGGER_LEVEL,
     SOURCE_FRONTIER_EXIT_OPEN,
+    _excursion_payload,
 )
 from quant_engine.proof.stage5_evaluation import canonical_sha256
 
@@ -582,7 +583,15 @@ class CompositeTamperTests(unittest.TestCase):
         # Swap trades
         swapped = (r.trades[1], r.trades[0])
         with self.assertRaises(ValueError):
-            ProtectiveExcursionResult(base=r.base, trades=swapped, result_id="0" * 64)
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base_protective_replay_id,
+                symbol=r.symbol, timeframe_ms=r.timeframe_ms,
+                dataset_id=r.dataset_id, instruction_set_id=r.instruction_set_id,
+                binding_set_id=r.binding_set_id, replay_config_id=r.replay_config_id,
+                capital_model_id=r.capital_model_id, cost_model_id=r.cost_model_id,
+                trade_count=r.trade_count,
+                trades=swapped, result_id="0" * 64)
 
 
 # ========================================================================
@@ -597,7 +606,15 @@ class FailClosedTypeTests(unittest.TestCase):
         bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
         r = _run_excursion(b, insts, bindings)
         with self.assertRaises(ValueError):
-            ProtectiveExcursionResult(base=r.base, trades=list(r.trades), result_id="0" * 64)
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base_protective_replay_id,
+                symbol=r.symbol, timeframe_ms=r.timeframe_ms,
+                dataset_id=r.dataset_id, instruction_set_id=r.instruction_set_id,
+                binding_set_id=r.binding_set_id, replay_config_id=r.replay_config_id,
+                capital_model_id=r.capital_model_id, cost_model_id=r.cost_model_id,
+                trade_count=r.trade_count,
+                trades=list(r.trades), result_id="0" * 64)
 
     def test_subclass_not_accepted(self):
         """Subclass of ProtectiveExcursionTrade rejected in result."""
@@ -618,7 +635,15 @@ class FailClosedTypeTests(unittest.TestCase):
             composite_trade_id=r.trades[0].composite_trade_id,
         )
         with self.assertRaises(ValueError):
-            ProtectiveExcursionResult(base=r.base, trades=(fake,), result_id="0" * 64)
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base_protective_replay_id,
+                symbol=r.symbol, timeframe_ms=r.timeframe_ms,
+                dataset_id=r.dataset_id, instruction_set_id=r.instruction_set_id,
+                binding_set_id=r.binding_set_id, replay_config_id=r.replay_config_id,
+                capital_model_id=r.capital_model_id, cost_model_id=r.cost_model_id,
+                trade_count=r.trade_count,
+                trades=(fake,), result_id="0" * 64)
 
     def test_bool_for_int_rejected(self):
         """Bool True/False where int is expected fails."""
@@ -852,7 +877,7 @@ class CompositeTradeBindingTests(unittest.TestCase):
         r = _run_excursion(b, insts, bindings)
         expected = canonical_sha256({
             "schemaVersion": "stage-5r1.protective-excursion-result.v1",
-            "baseReplayId": r.base.replay_id,
+            "baseProtectiveReplayId": r.base.replay_id,
             "symbol": r.base.symbol,
             "timeframeMs": r.base.timeframe_ms,
             "datasetId": r.base.dataset_id,
@@ -897,6 +922,448 @@ class TriggerBarHLCProofIntrabarTests(unittest.TestCase):
         # Both should be identical to first run
         self.assertEqual(exc1.favorable_extreme_price, exc2.favorable_extreme_price)
         self.assertEqual(exc1.adverse_extreme_price, exc2.adverse_extreme_price)
+
+
+# ========================================================================
+# EXTRA: Adversarial coherent-forgery tests
+# ========================================================================
+
+def _make_explicit_result():
+    """Helper: build a valid explicit no-trigger result for forging."""
+    b = bars(200)
+    insts = _insts(b, entry_sig=99, exit_sig=110)
+    p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
+    bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+    return _run_excursion(b, insts, bindings)
+
+
+def _make_protective_result():
+    """Helper: build a valid protective (intrabar stop) result for forging."""
+    b = list(bars(200))
+    b[105] = bar(b[105].open_time_ms, 250.0, 255.0, 239.0, 251.0)
+    b = tuple(b)
+    insts = _insts(b, entry_sig=99, exit_sig=150)
+    p = _p_long(entry=float(b[100].open), stop=240.0, tp=310.0)
+    bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+    return _run_excursion(b, insts, bindings)
+
+
+class AdversarialCoherentForgeryTests(unittest.TestCase):
+    """Prove that canonical hashes alone do not secure the contract —
+    cross-object truth validation must reject forged-but-consistent composites."""
+
+    def test_missing_last_composite_rejected(self):
+        r = _make_explicit_result()
+        # Drop last (and only) composite, recompute result_id
+        empty = ()
+        # result_id would be consistent with empty trades
+        forgery_id = canonical_sha256({
+            "schemaVersion": "stage-5r1.protective-excursion-result.v1",
+            "baseProtectiveReplayId": r.base.replay_id,
+            "symbol": r.base.symbol, "timeframeMs": r.base.timeframe_ms,
+            "datasetId": r.base.dataset_id,
+            "instructionSetId": r.base.instruction_set_id,
+            "bindingSetId": r.base.binding_set_id,
+            "replayConfigId": r.base.replay_config_id,
+            "capitalModelId": r.base.capital_model_id,
+            "costModelId": r.base.cost_model_id,
+            "tradeCount": r.base.trade_count,
+            "compositeTradeIds": [],
+            "excursionIds": [],
+        })
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base.replay_id,
+                symbol=r.base.symbol, timeframe_ms=r.base.timeframe_ms,
+                dataset_id=r.base.dataset_id,
+                instruction_set_id=r.base.instruction_set_id,
+                binding_set_id=r.base.binding_set_id,
+                replay_config_id=r.base.replay_config_id,
+                capital_model_id=r.base.capital_model_id,
+                cost_model_id=r.base.cost_model_id,
+                trade_count=r.base.trade_count,
+                trades=empty, result_id=forgery_id,
+            )
+        self.assertIn("TRADE_COUNT_LEN", str(ctx.exception))
+
+    def test_extra_composite_rejected(self):
+        r = _make_explicit_result()
+        t = r.trades[0]
+        # Duplicate the trade — now 2 trades but trade_count=1
+        doubled = (t, t)
+        forgery_id = canonical_sha256({
+            "schemaVersion": "stage-5r1.protective-excursion-result.v1",
+            "baseProtectiveReplayId": r.base.replay_id,
+            "symbol": r.base.symbol, "timeframeMs": r.base.timeframe_ms,
+            "datasetId": r.base.dataset_id,
+            "instructionSetId": r.base.instruction_set_id,
+            "bindingSetId": r.base.binding_set_id,
+            "replayConfigId": r.base.replay_config_id,
+            "capitalModelId": r.base.capital_model_id,
+            "costModelId": r.base.cost_model_id,
+            "tradeCount": r.base.trade_count,
+            "compositeTradeIds": [t.composite_trade_id, t.composite_trade_id],
+            "excursionIds": [t.excursion.excursion_id, t.excursion.excursion_id],
+        })
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base.replay_id,
+                symbol=r.base.symbol, timeframe_ms=r.base.timeframe_ms,
+                dataset_id=r.base.dataset_id,
+                instruction_set_id=r.base.instruction_set_id,
+                binding_set_id=r.base.binding_set_id,
+                replay_config_id=r.base.replay_config_id,
+                capital_model_id=r.base.capital_model_id,
+                cost_model_id=r.base.cost_model_id,
+                trade_count=r.base.trade_count,
+                trades=doubled, result_id=forgery_id,
+            )
+        self.assertIn("TRADE_COUNT_LEN", str(ctx.exception))
+
+    def test_excursion_dataset_id_changed_rejected(self):
+        r = _make_explicit_result()
+        t = r.trades[0]
+        exc = t.excursion
+        # Forge dataset_id, recompute all downstream IDs
+        forged_ds = "0" * 64
+        exc_payload = _excursion_payload(exc)
+        exc_payload["datasetId"] = forged_ds
+        forged_exc_id = canonical_sha256(exc_payload)
+
+        forged_exc = ProtectiveTradeExcursion(
+            **{**exc.__dict__, "dataset_id": forged_ds, "excursion_id": forged_exc_id})
+
+        # Recompute composite and result IDs
+        forged_ct_id = canonical_sha256({
+            "schemaVersion": "stage-5r1.protective-excursion-trade.v1",
+            "baseTradeId": t.base.trade_id,
+            "selectionId": t.selection.selection_id,
+            "accountingId": t.accounting.accounting_id,
+            "excursionId": forged_exc_id,
+            "tradeIndex": t.base.trade_index,
+        })
+        forged_ct = ProtectiveExcursionTrade(
+            base=t.base, selection=t.selection, accounting=t.accounting,
+            excursion=forged_exc, composite_trade_id=forged_ct_id,
+        )
+        forgery_rid = canonical_sha256({
+            "schemaVersion": "stage-5r1.protective-excursion-result.v1",
+            "baseProtectiveReplayId": r.base.replay_id,
+            "symbol": r.base.symbol, "timeframeMs": r.base.timeframe_ms,
+            "datasetId": r.base.dataset_id,
+            "instructionSetId": r.base.instruction_set_id,
+            "bindingSetId": r.base.binding_set_id,
+            "replayConfigId": r.base.replay_config_id,
+            "capitalModelId": r.base.capital_model_id,
+            "costModelId": r.base.cost_model_id,
+            "tradeCount": r.base.trade_count,
+            "compositeTradeIds": [forged_ct_id],
+            "excursionIds": [forged_exc_id],
+        })
+        # Result constructor should reject: excursion dataset_id != result dataset_id
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base.replay_id,
+                symbol=r.base.symbol, timeframe_ms=r.base.timeframe_ms,
+                dataset_id=r.base.dataset_id,
+                instruction_set_id=r.base.instruction_set_id,
+                binding_set_id=r.base.binding_set_id,
+                replay_config_id=r.base.replay_config_id,
+                capital_model_id=r.base.capital_model_id,
+                cost_model_id=r.base.cost_model_id,
+                trade_count=r.base.trade_count,
+                trades=(forged_ct,), result_id=forgery_rid,
+            )
+        self.assertIn("EXC_DATASET_ID", str(ctx.exception))
+
+    def test_base_protective_replay_id_changed_rejected(self):
+        r = _make_explicit_result()
+        t = r.trades[0]
+        exc = t.excursion
+        forged_replay = "f" * 64
+        exc_payload = _excursion_payload(exc)
+        exc_payload["baseProtectiveReplayId"] = forged_replay
+        forged_exc_id = canonical_sha256(exc_payload)
+
+        forged_exc = ProtectiveTradeExcursion(
+            **{**exc.__dict__, "base_protective_replay_id": forged_replay,
+               "excursion_id": forged_exc_id})
+        forged_ct_id = canonical_sha256({
+            "schemaVersion": "stage-5r1.protective-excursion-trade.v1",
+            "baseTradeId": t.base.trade_id,
+            "selectionId": t.selection.selection_id,
+            "accountingId": t.accounting.accounting_id,
+            "excursionId": forged_exc_id,
+            "tradeIndex": t.base.trade_index,
+        })
+        forged_ct = ProtectiveExcursionTrade(
+            base=t.base, selection=t.selection, accounting=t.accounting,
+            excursion=forged_exc, composite_trade_id=forged_ct_id,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base.replay_id,
+                symbol=r.base.symbol, timeframe_ms=r.base.timeframe_ms,
+                dataset_id=r.base.dataset_id,
+                instruction_set_id=r.base.instruction_set_id,
+                binding_set_id=r.base.binding_set_id,
+                replay_config_id=r.base.replay_config_id,
+                capital_model_id=r.base.capital_model_id,
+                cost_model_id=r.base.cost_model_id,
+                trade_count=r.base.trade_count,
+                trades=(forged_ct,), result_id="0" * 64,
+            )
+        self.assertIn("EXC_REPLAY_ID", str(ctx.exception))
+
+    def test_binding_id_changed_rejected(self):
+        r = _make_explicit_result()
+        t = r.trades[0]
+        exc = t.excursion
+        forged_bid = "a" * 64
+        exc_payload = _excursion_payload(exc)
+        exc_payload["bindingId"] = forged_bid
+        forged_exc_id = canonical_sha256(exc_payload)
+
+        forged_exc = ProtectiveTradeExcursion(
+            **{**exc.__dict__, "binding_id": forged_bid, "excursion_id": forged_exc_id})
+        # When constructing the composite, the nested lineage check fires
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionTrade(
+                base=t.base, selection=t.selection, accounting=t.accounting,
+                excursion=forged_exc, composite_trade_id="0" * 64,
+            )
+        self.assertIn("BINDING_ID", str(ctx.exception))
+
+    def test_selection_id_changed_rejected(self):
+        r = _make_explicit_result()
+        t = r.trades[0]
+        exc = t.excursion
+        forged_sid = "b" * 64
+        exc_payload = _excursion_payload(exc)
+        exc_payload["selectionId"] = forged_sid
+        forged_exc_id = canonical_sha256(exc_payload)
+
+        forged_exc = ProtectiveTradeExcursion(
+            **{**exc.__dict__, "selection_id": forged_sid, "excursion_id": forged_exc_id})
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionTrade(
+                base=t.base, selection=t.selection, accounting=t.accounting,
+                excursion=forged_exc, composite_trade_id="0" * 64,
+            )
+        self.assertIn("EXC_SEL_ID", str(ctx.exception))
+
+    def test_accounting_id_changed_rejected(self):
+        r = _make_explicit_result()
+        t = r.trades[0]
+        exc = t.excursion
+        forged_aid = "c" * 64
+        exc_payload = _excursion_payload(exc)
+        exc_payload["accountingId"] = forged_aid
+        forged_exc_id = canonical_sha256(exc_payload)
+
+        forged_exc = ProtectiveTradeExcursion(
+            **{**exc.__dict__, "accounting_id": forged_aid, "excursion_id": forged_exc_id})
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionTrade(
+                base=t.base, selection=t.selection, accounting=t.accounting,
+                excursion=forged_exc, composite_trade_id="0" * 64,
+            )
+        self.assertIn("EXC_ACCT_ID", str(ctx.exception))
+
+    def test_arithmetic_magnitude_forged_rejected(self):
+        """Forge mfe_price_delta with recomputed excursion_id — arithmetic check rejects."""
+        r = _make_explicit_result()
+        exc = r.trades[0].excursion
+        forged_delta = exc.mfe_price_delta + 100.0
+        exc_payload = _excursion_payload(exc)
+        exc_payload["mfePriceDelta"] = float(forged_delta)
+        forged_exc_id = canonical_sha256(exc_payload)
+
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveTradeExcursion(
+                **{**exc.__dict__, "mfe_price_delta": forged_delta,
+                   "excursion_id": forged_exc_id})
+        self.assertIn("MFE_DELTA_INCONSISTENT", str(ctx.exception))
+
+    def test_extreme_price_semantic_violation_rejected(self):
+        """Change extreme price + recompute IDs but violate side-consistency."""
+        r = _make_explicit_result()
+        exc = r.trades[0].excursion
+        # Swap favorable and adverse prices
+        swap_fav = exc.adverse_extreme_price
+        swap_adv = exc.favorable_extreme_price
+        # Recompute arithmetic
+        if exc.side.value == "long":
+            new_mfe = max(0.0, swap_fav - exc.entry_fill_price)
+            new_mae = max(0.0, exc.entry_fill_price - swap_adv)
+        else:
+            new_mfe = max(0.0, exc.entry_fill_price - swap_fav)
+            new_mae = max(0.0, swap_adv - exc.entry_fill_price)
+        new_amt_mfe = exc.quantity * new_mfe
+        new_amt_mae = exc.quantity * new_mae
+        new_ret_mfe = new_amt_mfe / exc.entry_equity
+        new_ret_mae = new_amt_mae / exc.entry_equity
+        new_frac_mfe = new_mfe / exc.entry_fill_price
+        new_frac_mae = new_mae / exc.entry_fill_price
+
+        payload = _excursion_payload(exc)
+        payload["favorableExtremePrice"] = float(swap_fav)
+        payload["adverseExtremePrice"] = float(swap_adv)
+        payload["mfePriceDelta"] = float(new_mfe)
+        payload["maePriceDelta"] = float(new_mae)
+        payload["mfeAmountBeforeExitCosts"] = float(new_amt_mfe)
+        payload["maeAmountBeforeExitCosts"] = float(new_amt_mae)
+        payload["mfeReturnOnEntryEquity"] = float(new_ret_mfe)
+        payload["maeReturnOnEntryEquity"] = float(new_ret_mae)
+        payload["mfeFractionOfEntryFillPrice"] = float(new_frac_mfe)
+        payload["maeFractionOfEntryFillPrice"] = float(new_frac_mae)
+        forged_id = canonical_sha256(payload)
+
+        # LONG: favorable must be >= adverse — swapped makes favorable < adverse
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveTradeExcursion(
+                **{**exc.__dict__,
+                   "favorable_extreme_price": swap_fav,
+                   "adverse_extreme_price": swap_adv,
+                   "mfe_price_delta": new_mfe,
+                   "mae_price_delta": new_mae,
+                   "mfe_amount_before_exit_costs": new_amt_mfe,
+                   "mae_amount_before_exit_costs": new_amt_mae,
+                   "mfe_return_on_entry_equity": new_ret_mfe,
+                   "mae_return_on_entry_equity": new_ret_mae,
+                   "mfe_fraction_of_entry_fill_price": new_frac_mfe,
+                   "mae_fraction_of_entry_fill_price": new_frac_mae,
+                   "excursion_id": forged_id})
+        self.assertIn("LONG_FAV_LT_ADV", str(ctx.exception))
+
+    def test_explicit_using_trigger_source_label_rejected(self):
+        r = _make_explicit_result()
+        exc = r.trades[0].excursion
+        # Forge: change favorable source to FRONTIER_TRIGGER_LEVEL (disallowed for explicit)
+        payload = _excursion_payload(exc)
+        payload["favorableExtremeSource"] = SOURCE_FRONTIER_TRIGGER_LEVEL
+        forged_id = canonical_sha256(payload)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveTradeExcursion(
+                **{**exc.__dict__,
+                   "favorable_extreme_source": SOURCE_FRONTIER_TRIGGER_LEVEL,
+                   "excursion_id": forged_id})
+        self.assertIn("FAV_SOURCE_DISALLOWED", str(ctx.exception))
+
+    def test_protective_using_exit_open_source_label_rejected(self):
+        r = _make_protective_result()
+        exc = r.trades[0].excursion
+        # Forge: change source label to FRONTIER_EXIT_OPEN (disallowed for protective)
+        payload = _excursion_payload(exc)
+        payload["favorableExtremeSource"] = SOURCE_FRONTIER_EXIT_OPEN
+        forged_id = canonical_sha256(payload)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveTradeExcursion(
+                **{**exc.__dict__,
+                   "favorable_extreme_source": SOURCE_FRONTIER_EXIT_OPEN,
+                   "excursion_id": forged_id})
+        self.assertIn("FAV_SOURCE_DISALLOWED", str(ctx.exception))
+
+    def test_zero_count_full_bar_source_rejected(self):
+        """Zero-duration entry-bar exit cannot claim FULL_BAR source."""
+        b = list(bars(200))
+        b[100] = bar(b[100].open_time_ms, 300.0, 305.0, 289.0, 301.0)
+        b = tuple(b)
+        insts = _insts(b, entry_sig=99, exit_sig=150)
+        p = _p_long(entry=float(b[100].open), stop=290.0, tp=310.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        r = _run_excursion(b, insts, bindings)
+        exc = r.trades[0].excursion
+        self.assertEqual(exc.full_pre_exit_bar_count, 0)
+        # Forge: change favorable source to FULL_BAR
+        payload = _excursion_payload(exc)
+        payload["favorableExtremeSource"] = SOURCE_FULL_BAR
+        forged_id = canonical_sha256(payload)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveTradeExcursion(
+                **{**exc.__dict__,
+                   "favorable_extreme_source": SOURCE_FULL_BAR,
+                   "excursion_id": forged_id})
+        self.assertIn("FULL_BAR_IMPOSSIBLE_ZERO_COUNT", str(ctx.exception))
+
+    def test_result_count_must_equal_base_trade_count(self):
+        """ProtectiveExcursionResult enforces len(trades) == base.trade_count."""
+        r = _make_explicit_result()
+        # Try to construct with trades=() — length 0 but trade_count=1
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base.replay_id,
+                symbol=r.base.symbol, timeframe_ms=r.base.timeframe_ms,
+                dataset_id=r.base.dataset_id,
+                instruction_set_id=r.base.instruction_set_id,
+                binding_set_id=r.base.binding_set_id,
+                replay_config_id=r.base.replay_config_id,
+                capital_model_id=r.base.capital_model_id,
+                cost_model_id=r.base.cost_model_id,
+                trade_count=r.base.trade_count,
+                trades=(), result_id="0" * 64,
+            )
+        self.assertIn("TRADE_COUNT_LEN", str(ctx.exception))
+
+    def test_exc_root_id_must_equal_result_root_id(self):
+        """Result validates each excursion's root IDs match result's exposed fields."""
+        r = _make_explicit_result()
+        t = r.trades[0]
+        exc = t.excursion
+        # Forge the excursion's instruction_set_id but keep result's fields matching base
+        forged_is = "d" * 64
+        exc_payload = _excursion_payload(exc)
+        exc_payload["instructionSetId"] = forged_is
+        forged_exc_id = canonical_sha256(exc_payload)
+        forged_exc = ProtectiveTradeExcursion(
+            **{**exc.__dict__, "instruction_set_id": forged_is,
+               "excursion_id": forged_exc_id})
+        forged_ct_id = canonical_sha256({
+            "schemaVersion": "stage-5r1.protective-excursion-trade.v1",
+            "baseTradeId": t.base.trade_id,
+            "selectionId": t.selection.selection_id,
+            "accountingId": t.accounting.accounting_id,
+            "excursionId": forged_exc_id,
+            "tradeIndex": t.base.trade_index,
+        })
+        forged_ct = ProtectiveExcursionTrade(
+            base=t.base, selection=t.selection, accounting=t.accounting,
+            excursion=forged_exc, composite_trade_id=forged_ct_id,
+        )
+        forgery_rid = canonical_sha256({
+            "schemaVersion": "stage-5r1.protective-excursion-result.v1",
+            "baseProtectiveReplayId": r.base.replay_id,
+            "symbol": r.base.symbol, "timeframeMs": r.base.timeframe_ms,
+            "datasetId": r.base.dataset_id,
+            "instructionSetId": r.base.instruction_set_id,
+            "bindingSetId": r.base.binding_set_id,
+            "replayConfigId": r.base.replay_config_id,
+            "capitalModelId": r.base.capital_model_id,
+            "costModelId": r.base.cost_model_id,
+            "tradeCount": r.base.trade_count,
+            "compositeTradeIds": [forged_ct_id],
+            "excursionIds": [forged_exc_id],
+        })
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionResult(
+                base=r.base,
+                base_protective_replay_id=r.base.replay_id,
+                symbol=r.base.symbol, timeframe_ms=r.base.timeframe_ms,
+                dataset_id=r.base.dataset_id,
+                instruction_set_id=r.base.instruction_set_id,
+                binding_set_id=r.base.binding_set_id,
+                replay_config_id=r.base.replay_config_id,
+                capital_model_id=r.base.capital_model_id,
+                cost_model_id=r.base.cost_model_id,
+                trade_count=r.base.trade_count,
+                trades=(forged_ct,), result_id=forgery_rid,
+            )
+        self.assertIn("EXC_INSTRUCTION_ID", str(ctx.exception))
 
 
 if __name__ == "__main__":
