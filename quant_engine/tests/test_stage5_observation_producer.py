@@ -880,6 +880,9 @@ class ProducerTests(unittest.TestCase):
         "observations","snapshot_ids","batch_id"}
 
     def test_authoritative_spec_field_table(self):
+        import dataclasses
+        self.assertEqual({f.name for f in dataclasses.fields(Stage5FrozenRuleSpec)}, self.SPEC_FIELDS,
+            "SPEC_FIELDS must match dataclass fields")
         spec=self._fresh_spec(); fid=spec.frozen_id
         # schema_version
         s=self._fresh_spec(); object.__setattr__(s,"schema_version","bad")
@@ -924,13 +927,13 @@ class ProducerTests(unittest.TestCase):
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_authoritative_snapshot_route_table(self):
-        import copy
+        import copy,dataclasses
+        self.assertEqual({f.name for f in dataclasses.fields(Stage5ComponentSnapshot)}, self.SNAP_FIELDS,
+            "SNAP_FIELDS must match dataclass fields")
         spec=self._fresh_spec(); snap=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        assert snap.has_outputs and "BULL" in str(snap.components)  # baseline sanity
         # schema_version → post_init reject
         s=copy.deepcopy(snap); object.__setattr__(s,"schema_version","bad")
-        with self.assertRaises(ValueError):Stage5ComponentSnapshot.__post_init__(s)
-        # has_outputs + components inconsistent → post_init reject
-        s=copy.deepcopy(snap); object.__setattr__(s,"has_outputs",False)
         with self.assertRaises(ValueError):Stage5ComponentSnapshot.__post_init__(s)
         # strategy_id → external reject
         s=copy.deepcopy(snap); object.__setattr__(s,"strategy_id","derived-bad"); self._recompute_snapshot_id(s)
@@ -947,17 +950,28 @@ class ProducerTests(unittest.TestCase):
         # symbol → external reject
         s=copy.deepcopy(snap); object.__setattr__(s,"symbol","ETH/USDT"); self._recompute_snapshot_id(s)
         with self.assertRaises(ValueError):self._produce(spec,(s,))
-        # bar_open_time_ms aligned alternate → external reject (time mismatch)
+        # bar_open_time_ms → external reject
         s=copy.deepcopy(snap); object.__setattr__(s,"bar_open_time_ms",F); self._recompute_snapshot_id(s)
         with self.assertRaises(ValueError):self._produce(spec,(s,))
-        # components value changed → external reject via verifier
+        # has_outputs → self-consistent alternate accepted (no-output is valid)
+        s=copy.deepcopy(snap); object.__setattr__(s,"has_outputs",False)
+        object.__setattr__(s,"components",("dict",)); self._recompute_snapshot_id(s)
+        Stage5ComponentSnapshot.__post_init__(s)  # self-consistent
+        b=self._produce(spec,(s,))  # accepted — produces all-false observations
+        self.assertEqual(len(b.observations),1)
+        # components → external reject via verifier
         s=copy.deepcopy(snap); s2=_snap(spec,0,components={"TrendImpulse":{"signal":"BEAR"}})
         with self.assertRaises(ValueError):
             verify_observation_batch(batch=self._produce(spec,(snap,)),spec=spec,snapshots=(s2,),
                 dataset_id=_DID,symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        # snapshot_id → post_init reject
+        s=copy.deepcopy(snap); object.__setattr__(s,"snapshot_id","0"*64)
+        with self.assertRaises(ValueError):Stage5ComponentSnapshot.__post_init__(s)
 
     def test_authoritative_batch_route_table(self):
-        import copy
+        import copy,dataclasses
+        self.assertEqual({f.name for f in dataclasses.fields(Stage5ObservationBatch)}, self.BATCH_FIELDS,
+            "BATCH_FIELDS must match dataclass fields")
         spec=self._fresh_spec(); snap=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
         b=produce_observations(spec=spec,snapshots=(snap,),dataset_id=_DID,symbol=_SYM,
             scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
@@ -1192,8 +1206,8 @@ class ProducerTests(unittest.TestCase):
         import copy
         p=_trend_impulse_payload(); orig=copy.deepcopy(p)
         ps={"tp":21,"tm":2.0,"max_holding_bars":96}; orig_ps=copy.deepcopy(ps)
-        try:create_frozen_rule_spec(p,"x"*64,ps)
-        except ValueError:pass
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p,"0"*64,ps)
         self.assertEqual(p,orig); self.assertEqual(ps,orig_ps)
 
     def test_deep_snapshot_immutability(self):
