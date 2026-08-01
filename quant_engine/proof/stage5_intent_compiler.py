@@ -73,6 +73,8 @@ class Stage5StrategyIntentObservation:
     observation_id: str
 
     def __post_init__(self):
+        if type(self.schema_version) is not str:
+            raise ValueError("OBS_SCHEMA_NOT_STRING")
         if self.schema_version != OBS_SCHEMA:
             raise ValueError("OBS_SCHEMA_INVALID")
         if type(self.strategy_id) is not str:
@@ -173,8 +175,12 @@ class Stage5IntentCompilation:
     compilation_id: str
 
     def __post_init__(self):
+        if type(self.schema_version) is not str:
+            raise ValueError("COMPILATION_SCHEMA_NOT_STRING")
         if self.schema_version != COMPILATION_SCHEMA:
             raise ValueError("COMPILATION_SCHEMA_INVALID")
+        if type(self.scope) is not str:
+            raise ValueError("COMPILATION_SCOPE_NOT_STRING")
         if self.scope != COMPILATION_SCOPE:
             raise ValueError("COMPILATION_SCOPE_INVALID")
         if type(self.plan) is not Stage5LifecyclePlan:
