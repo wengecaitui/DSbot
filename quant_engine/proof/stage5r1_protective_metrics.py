@@ -14,12 +14,12 @@ from typing import Sequence
 
 from quant_engine.proof.stage5r1_capital import PositionSide, TradeAccounting
 from quant_engine.proof.stage5r1_protective_exit import (
-    ProtectiveExitPlan,
+    ProtectiveExitPlan, ProtectiveExitResolution, ProtectiveExitEvent,
     KIND_GAP_OPEN, KIND_INTRABAR_LEVEL,
     REASON_STOP_LOSS, REASON_TAKE_PROFIT,
 )
 from quant_engine.proof.stage5r1_protective_replay import (
-    ProtectiveReplayBinding, ProtectiveReplayResult,
+    ProtectiveReplayBinding, ProtectiveReplayResult, ProtectiveReplayTrade, ReplayExitSelection,
     _binding_set_id,
 )
 from quant_engine.proof.stage5r1_protective_excursion import (
@@ -437,12 +437,19 @@ class ProtectiveExcursionMetricsReport:
             raise ValueError("REPORT_TRADES_NOT_TUPLE")
         if len(self.trade_metrics) != self.trade_count:
             raise ValueError("REPORT_TRADE_METRIC_COUNT_MISMATCH")
-        for i, m in enumerate(self.trade_metrics):
-            if type(m) is not ProtectiveTradeRiskMetrics:
-                raise ValueError(f"REPORT_METRIC_TYPE_{i}")
 
         if type(self.counts) is not ProtectiveExcursionMetricCounts:
             raise ValueError("REPORT_COUNTS_TYPE_INVALID")
+        # Nested revalidation — class methods on each nested object
+        for m in self.trade_metrics:
+            if type(m) is not ProtectiveTradeRiskMetrics:
+                raise ValueError("REPORT_METRIC_TYPE_INVALID")
+            ProtectiveTradeRiskMetrics.__post_init__(m)
+        ProtectiveExcursionMetricCounts.__post_init__(self.counts)
+        if self.cost_metrics is not None:
+            if type(self.cost_metrics) is not ProtectiveCostMetrics:
+                raise ValueError("REPORT_COST_TYPE_INVALID")
+            ProtectiveCostMetrics.__post_init__(self.cost_metrics)
         if self.counts.long_count + self.counts.short_count != self.trade_count:
             raise ValueError("REPORT_COUNTS_TOTAL_MISMATCH")
         if self.counts.same_bar_collision_count > self.trade_count:
@@ -507,22 +514,110 @@ class ProtectiveExcursionMetricsReport:
 # --- build_stage5r1_protective_metrics ---
 
 
-def _validate_trade_accounting(acct: TradeAccounting) -> None:
-    """Fail-closed validator for Stage D TradeAccounting derived fields."""
-    if acct.trade_accounting_schema_version != "stage-5r1.trade-accounting.v1":
+def _validate_trade_accounting(acct: TradeAccounting, *, entry_time_ms: int, exit_time_ms: int) -> None:
+    """Full fail-closed validator for Stage D TradeAccounting derived fields."""
+    if type(acct) is not TradeAccounting:
+        raise ValueError("ACCT_TYPE_INVALID")
+    VER = "stage-5r1.trade-accounting.v1"
+    if acct.schema_version != VER or acct.trade_accounting_schema_version != VER:
         raise ValueError("ACCT_SCHEMA_INVALID")
+    if acct.contract_type != "LINEAR_USDT":
+        raise ValueError("ACCT_CONTRACT_INVALID")
     if type(acct.side) is not PositionSide:
         raise ValueError("ACCT_SIDE_INVALID")
+
+    _vint(entry_time_ms, "ACCT_ENTRY_MS")
+    _vint(exit_time_ms, "ACCT_EXIT_MS")
+    if exit_time_ms < entry_time_ms:
+        raise ValueError("ACCT_TIME_ORDER")
+    _vint(acct.holding_time_ms, "ACCT_HOLDING_MS")
+    _vint(acct.completed_funding_periods, "ACCT_FUNDING_PERIODS")
+    if acct.holding_time_ms != exit_time_ms - entry_time_ms:
+        raise ValueError("ACCT_HOLDING_TIME_MISMATCH")
+
+    if type(acct.bankrupt) is not bool:
+        raise ValueError("ACCT_BANKRUPT_TYPE")
+
+    _vsha(acct.capital_model_id, "ACCT_CAPITAL_ID")
+    _vsha(acct.cost_model_id, "ACCT_COST_ID")
+    _vsha(acct.accounting_id, "ACCT_ACCOUNTING_ID")
+
+    for n in ("entry_equity", "position_fraction", "entry_notional", "quantity",
+              "raw_entry_price", "raw_exit_price", "entry_fill_price",
+              "exit_fill_price", "exit_notional", "capital_initial_equity"):
+        _vpos(getattr(acct, n), f"ACCT_{n.upper()}")
+    if acct.position_fraction > 1.0:
+        raise ValueError("ACCT_POSITION_FRACTION_GT_1")
+
+    for n in ("spread_cost_amount", "slippage_cost_amount", "market_impact_cost_amount",
+              "entry_fee_amount", "exit_fee_amount", "fee_amount", "funding_amount",
+              "explicit_cost_amount", "total_cost_amount", "closing_equity"):
+        _vnonneg_finite(getattr(acct, n), f"ACCT_{n.upper()}")
+
+    for n in ("raw_price_pnl_amount", "execution_pnl_amount", "gross_pnl_amount",
+              "net_pnl_amount", "gross_return_on_entry_equity",
+              "net_return_on_entry_equity", "raw_closing_equity"):
+        _vfinite(getattr(acct, n), f"ACCT_{n.upper()}")
+
+    if acct.entry_notional != acct.entry_equity * acct.position_fraction:
+        raise ValueError("ACCT_ENTRY_NOTIONAL_MISMATCH")
+    if acct.quantity != acct.entry_notional / acct.entry_fill_price:
+        raise ValueError("ACCT_QUANTITY_MISMATCH")
+    if acct.exit_notional != acct.quantity * acct.exit_fill_price:
+        raise ValueError("ACCT_EXIT_NOTIONAL_MISMATCH")
+
+    if acct.side is PositionSide.LONG:
+        exp_raw = acct.quantity * (acct.raw_exit_price - acct.raw_entry_price)
+        exp_exec = acct.quantity * (acct.exit_fill_price - acct.entry_fill_price)
+    else:
+        exp_raw = acct.quantity * (acct.raw_entry_price - acct.raw_exit_price)
+        exp_exec = acct.quantity * (acct.entry_fill_price - acct.exit_fill_price)
+    if acct.raw_price_pnl_amount != exp_raw:
+        raise ValueError("ACCT_RAW_PNL_MISMATCH")
+    if acct.execution_pnl_amount != exp_exec:
+        raise ValueError("ACCT_EXECUTION_PNL_MISMATCH")
     if acct.gross_pnl_amount != acct.execution_pnl_amount:
         raise ValueError("ACCT_GROSS_PNL_MISMATCH")
+
     if acct.market_impact_cost_amount != acct.spread_cost_amount + acct.slippage_cost_amount:
         raise ValueError("ACCT_MARKET_IMPACT_MISMATCH")
+    if acct.fee_amount != acct.entry_fee_amount + acct.exit_fee_amount:
+        raise ValueError("ACCT_FEE_MISMATCH")
     if acct.explicit_cost_amount != acct.fee_amount + acct.funding_amount:
         raise ValueError("ACCT_EXPLICIT_MISMATCH")
     if acct.total_cost_amount != acct.market_impact_cost_amount + acct.explicit_cost_amount:
         raise ValueError("ACCT_TOTAL_COST_MISMATCH")
     if acct.net_pnl_amount != acct.execution_pnl_amount - acct.explicit_cost_amount:
         raise ValueError("ACCT_NET_PNL_MISMATCH")
+
+    if acct.gross_return_on_entry_equity != acct.execution_pnl_amount / acct.entry_equity:
+        raise ValueError("ACCT_GROSS_RETURN_MISMATCH")
+    if acct.net_return_on_entry_equity != acct.net_pnl_amount / acct.entry_equity:
+        raise ValueError("ACCT_NET_RETURN_MISMATCH")
+
+    exp_raw_ce = acct.entry_equity + acct.net_pnl_amount
+    if acct.raw_closing_equity != exp_raw_ce:
+        raise ValueError("ACCT_RAW_CLOSING_MISMATCH")
+    exp_bankrupt = exp_raw_ce <= 0.0
+    if acct.bankrupt != exp_bankrupt:
+        raise ValueError("ACCT_BANKRUPT_MISMATCH")
+    exp_ce = max(exp_raw_ce, 0.0)
+    if acct.closing_equity != exp_ce:
+        raise ValueError("ACCT_CLOSING_EQUITY_MISMATCH")
+
+    expected = canonical_sha256({
+        "tradeAccountingSchemaVersion": VER,
+        "capitalModelId": acct.capital_model_id,
+        "costModelId": acct.cost_model_id,
+        "side": acct.side.value,
+        "entryEquity": float(acct.entry_equity),
+        "rawEntryPrice": float(acct.raw_entry_price),
+        "rawExitPrice": float(acct.raw_exit_price),
+        "entryTimeMs": entry_time_ms,
+        "exitTimeMs": exit_time_ms,
+    })
+    if acct.accounting_id != expected:
+        raise ValueError("ACCT_ID_MISMATCH")
 
 
 def build_stage5r1_protective_metrics(
@@ -582,23 +677,31 @@ def build_stage5r1_protective_metrics(
 
     binding_by_id = {b.binding_id: b for b in bindings}
 
-    # Stage E graph revalidation — call __post_init__ on result and nested objects
+    # Stage E graph revalidation — class methods, object identity checks
     try:
-        result.__post_init__()
-        result.base.__post_init__()
+        ProtectiveExcursionResult.__post_init__(result)
+        ProtectiveReplayResult.__post_init__(result.base)
     except Exception:
         raise ValueError("STAGE_E_RESULT_REVALIDATION_FAILED")
-    for ct in result.trades:
+    for i, ct in enumerate(result.trades):
         if type(ct) is not ProtectiveExcursionTrade:
             raise ValueError(f"STAGE_E_TRADE_TYPE_INVALID: {type(ct).__name__}")
+        if type(ct.base) is not ProtectiveReplayTrade:
+            raise ValueError(f"STAGE_E_BASE_TYPE_INVALID_{i}")
+        if type(ct.selection) is not ReplayExitSelection:
+            raise ValueError(f"STAGE_E_SEL_TYPE_INVALID_{i}")
+        if ct.base != result.base.trades[i]:
+            raise ValueError(f"STAGE_E_BASE_IDENTITY_{i}")
+        if ct.selection != result.base.selections[i]:
+            raise ValueError(f"STAGE_E_SEL_IDENTITY_{i}")
         try:
-            ct.__post_init__()
-            ct.base.__post_init__()
-            ct.selection.__post_init__()
-            ct.excursion.__post_init__()
-            ct.resolution.__post_init__()
+            ProtectiveReplayTrade.__post_init__(ct.base)
+            ReplayExitSelection.__post_init__(ct.selection)
+            ProtectiveExcursionTrade.__post_init__(ct)
+            ProtectiveTradeExcursion.__post_init__(ct.excursion)
+            ProtectiveExitResolution.__post_init__(ct.resolution)
             if ct.resolution.event is not None:
-                ct.resolution.event.__post_init__()
+                ProtectiveExitEvent.__post_init__(ct.resolution.event)
         except Exception:
             raise ValueError("STAGE_E_TRADE_REVALIDATION_FAILED")
 
@@ -690,7 +793,7 @@ def build_stage5r1_protective_metrics(
         )
         trade_metrics.append(tm)
         accounting_list.append(acct)
-        _validate_trade_accounting(acct)
+        _validate_trade_accounting(acct, entry_time_ms=ct.excursion.entry_execution_time_ms, exit_time_ms=ct.excursion.exit_execution_time_ms)
 
         # Counts
         if side is PositionSide.LONG: lc += 1

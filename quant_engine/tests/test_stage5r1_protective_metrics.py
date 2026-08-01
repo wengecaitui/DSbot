@@ -643,5 +643,75 @@ class NestedForgeryTests(unittest.TestCase):
         self.assertIn("TOTAL", str(ctx.exception))
 
 
+class Level3GenuineTests(unittest.TestCase):
+    """Tests that exercise nested revalidation guards via report constructor."""
+
+    def test_nested_metric_forgery_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        tm = report.trade_metrics[0]
+        object.__setattr__(tm, "realized_net_r", 999.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        self.assertIn("METRIC", str(ctx.exception))
+
+    def test_nested_counts_forgery_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        c = report.counts
+        object.__setattr__(c, "long_count", 999)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        self.assertIn("COUNTS", str(ctx.exception))
+
+    def test_collision_exceeds_trade_count_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        c = report.counts
+        object.__setattr__(c, "same_bar_collision_count", 999)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        self.assertIn("COLLISION", str(ctx.exception))
+
+    def test_no_trades_nonzero_count_rejected(self):
+        b = bars(200)
+        r = run_stage5r1_protective_excursion(bars=b, instructions=(), protective_bindings=(), config=_cfg(), capital=_CM, cost=_ZC)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=())
+        c = report.counts
+        object.__setattr__(c, "same_bar_collision_count", 1)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        self.assertIn("COLLISION", str(ctx.exception))
+
+    def test_measured_rpf_nan_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "return_profit_factor": float("nan"), "report_id": "0"*64})
+        self.assertIn("RPF", str(ctx.exception).upper())
+
+    def test_measured_rpf_negative_rejected(self):
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "return_profit_factor": -1.0, "report_id": "0"*64})
+        self.assertIn("RPF", str(ctx.exception).upper())
+
+    def test_base_trade_forgery_rejected(self):
+        b, insts, bindings, r = _two_trade_setup()
+        bt = r.base.trades[0]
+        object.__setattr__(bt, "trade_id", "0" * 64)
+        with self.assertRaises(ValueError):
+            build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+
+
 if __name__ == "__main__":
     unittest.main()
