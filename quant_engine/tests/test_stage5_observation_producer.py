@@ -1347,20 +1347,23 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(s.snapshot_id,sid0); self.assertEqual(out,orig_out)
         self.assertEqual(b.spec_id,spec.spec_id)
         # --- verifier success immutability ---
-        b0=copy.deepcopy(b); s0=copy.deepcopy(s)
+        b0=copy.deepcopy(b); s0=copy.deepcopy(s); spec0v=copy.deepcopy(spec); ss0v=copy.deepcopy((s,))
         verify_observation_batch(batch=b,spec=spec,snapshots=(s,),dataset_id=_DID,
             symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
         self.assertEqual(b,b0); self.assertEqual(s,s0)
+        self.assertEqual(spec,spec0v); self.assertEqual((s,),ss0v)
         # --- verifier rejection immutability ---
         with self.assertRaisesRegex(ValueError,"PROD_SNAP_DATASET_0"):
             verify_observation_batch(batch=b,spec=spec,snapshots=(s,),dataset_id="0"*64,
                 symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
-        self.assertEqual(b,b0); self.assertEqual(s,s0)
+        self.assertEqual(b,b0); self.assertEqual(s,s0); self.assertEqual(spec,spec0v)
         # --- producer rejection immutability ---
         spec2=self._fresh_spec(); s2=_snap(spec2,0,components=out); sid2=s2.snapshot_id
+        ss2=(s2,); oss2=copy.deepcopy(ss2); spec20=copy.deepcopy(spec2)
         with self.assertRaisesRegex(ValueError,"PROD_SNAP_DATASET_0"):
-            produce_observations(spec=spec2,snapshots=(s2,),dataset_id="0"*64,
+            produce_observations(spec=spec2,snapshots=ss2,dataset_id="0"*64,
                 symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        self.assertEqual(spec2,spec20); self.assertEqual(ss2,oss2)
         self.assertEqual(s2.snapshot_id,sid2); self.assertEqual(out,orig_out)
 
 
