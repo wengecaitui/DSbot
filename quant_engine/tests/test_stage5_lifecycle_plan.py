@@ -587,7 +587,7 @@ class FloatTimeframeTests(unittest.TestCase):
         self.assertIn("TIMEFRAME_NOT_INT", str(ctx.exception))
 
 
-class HostileTruthinessTests(unittest.TestCase):
+class BuilderBoundaryTests(unittest.TestCase):
     _SPID = "b" * 64
     _PID = "c" * 64
     _DID = "d" * 64
@@ -596,27 +596,88 @@ class HostileTruthinessTests(unittest.TestCase):
         def __bool__(self):
             raise RuntimeError("BOOM")
 
-    def test_hostile_strategy_id_raises_value_error(self):
-        sid = self._Hostile()
+    def test_hostile_spec_id_raises_value_error(self):
         with self.assertRaises(ValueError) as ctx:
             build_stage5_lifecycle_plan(
-                strategy_id=sid, spec_id=self._SPID, parameter_id=self._PID,
+                strategy_id="s" * 64, spec_id=self._Hostile(), parameter_id=self._PID,
                 dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
                 scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
                 terminal_execution_bar_open_time_ms=F * 10, instructions=(),
             )
-        self.assertIn("BUILD_STRATEGY_NOT_STRING", str(ctx.exception))
+        self.assertIn("BUILD_SPEC_ID", str(ctx.exception))
 
-    def test_hostile_symbol_raises_value_error(self):
-        sym = self._Hostile()
+    def test_hostile_warmup_raises_value_error(self):
         with self.assertRaises(ValueError) as ctx:
             build_stage5_lifecycle_plan(
                 strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
-                dataset_id=self._DID, symbol=sym, warmup_bars=30,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=self._Hostile(),
                 scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
                 terminal_execution_bar_open_time_ms=F * 10, instructions=(),
             )
-        self.assertIn("BUILD_SYMBOL_NOT_STRING", str(ctx.exception))
+        self.assertIn("BUILD_WARMUP", str(ctx.exception))
+
+    def test_hostile_start_time_raises_value_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=self._Hostile(),
+                scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_START_NOT_INT", str(ctx.exception))
+
+    def test_builder_rejects_malformed_spec_id(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id="not-a-sha", parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_SPEC_ID", str(ctx.exception))
+
+    def test_builder_rejects_float_start(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0.0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(),
+            )
+        self.assertIn("BUILD_START_NOT_INT", str(ctx.exception))
+
+    def test_builder_rejects_bool_terminal(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=True, instructions=(),
+            )
+        self.assertIn("BUILD_TERMINAL_NOT_INT", str(ctx.exception))
+
+    def test_builder_rejects_non_aligned_times(self):
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=150_000, scored_end_exclusive_open_time_ms=750_000,
+                terminal_execution_bar_open_time_ms=750_000, instructions=(),
+            )
+        self.assertIn("BUILD_START_NOT_ALIGNED", str(ctx.exception))
+
+    def test_builder_rejects_forged_instruction(self):
+        inst = create_stage5_lifecycle_instruction(0, Stage5LifecycleAction.ENTER_LONG, Stage5LifecycleOrigin.STRATEGY)
+        object.__setattr__(inst, "action", Stage5LifecycleAction.EXIT)
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id="s" * 64, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(inst,),
+            )
+        self.assertIn("INSTRUCTION_ID_MISMATCH", str(ctx.exception))
 
 
 class TimeAlignmentTests(unittest.TestCase):

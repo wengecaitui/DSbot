@@ -284,15 +284,48 @@ def build_stage5_lifecycle_plan(
     warmup_bars, scored_start_open_time_ms, scored_end_exclusive_open_time_ms,
     terminal_execution_bar_open_time_ms, instructions,
 ) -> Stage5LifecyclePlan:
+    # --- primitive validation: no hostile object may reach canonical_sha256 ---
     if not isinstance(strategy_id, str):
         raise ValueError("BUILD_STRATEGY_NOT_STRING")
+    if not strategy_id:
+        raise ValueError("BUILD_STRATEGY_EMPTY")
     if not isinstance(symbol, str):
         raise ValueError("BUILD_SYMBOL_NOT_STRING")
+    if not symbol:
+        raise ValueError("BUILD_SYMBOL_EMPTY")
+    _vsha(spec_id, "BUILD_SPEC_ID")
+    _vsha(parameter_id, "BUILD_PARAM_ID")
+    _vsha(dataset_id, "BUILD_DATASET_ID")
+    if type(warmup_bars) is not int:
+        raise ValueError("BUILD_WARMUP_NOT_INT")
+    if warmup_bars <= 0:
+        raise ValueError("BUILD_WARMUP_INVALID")
+    if type(scored_start_open_time_ms) is not int:
+        raise ValueError("BUILD_START_NOT_INT")
+    if scored_start_open_time_ms < 0:
+        raise ValueError("BUILD_START_NEGATIVE")
+    if type(scored_end_exclusive_open_time_ms) is not int:
+        raise ValueError("BUILD_END_NOT_INT")
+    if scored_end_exclusive_open_time_ms < 0:
+        raise ValueError("BUILD_END_NEGATIVE")
+    if type(terminal_execution_bar_open_time_ms) is not int:
+        raise ValueError("BUILD_TERMINAL_NOT_INT")
+    if terminal_execution_bar_open_time_ms < 0:
+        raise ValueError("BUILD_TERMINAL_NEGATIVE")
+    if scored_start_open_time_ms >= scored_end_exclusive_open_time_ms:
+        raise ValueError("BUILD_WINDOW_INVALID")
+    if terminal_execution_bar_open_time_ms != scored_end_exclusive_open_time_ms:
+        raise ValueError("BUILD_TERMINAL_NOT_END")
+    if scored_start_open_time_ms % TIMEFRAME != 0:
+        raise ValueError("BUILD_START_NOT_ALIGNED")
+    if scored_end_exclusive_open_time_ms % TIMEFRAME != 0:
+        raise ValueError("BUILD_END_NOT_ALIGNED")
     if type(instructions) is not tuple:
         raise ValueError("BUILD_INSTRUCTIONS_NOT_TUPLE")
     for i, inst in enumerate(instructions):
         if type(inst) is not Stage5LifecycleInstruction:
             raise ValueError(f"BUILD_INSTR_TYPE_{i}")
+        Stage5LifecycleInstruction.__post_init__(inst)
     rev_count = sum(1 for i in instructions if i.action in (
         Stage5LifecycleAction.REVERSE_TO_LONG,
         Stage5LifecycleAction.REVERSE_TO_SHORT))
