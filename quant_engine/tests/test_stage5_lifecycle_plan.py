@@ -595,6 +595,12 @@ class BuilderBoundaryTests(unittest.TestCase):
     class _Hostile:
         def __bool__(self):
             raise RuntimeError("BOOM")
+        __repr__ = __bool__
+        __str__ = __bool__
+        __hash__ = __bool__
+        __int__ = __bool__
+        __float__ = __bool__
+        __eq__ = __bool__
 
     def test_hostile_spec_id_raises_value_error(self):
         with self.assertRaises(ValueError) as ctx:

@@ -16,15 +16,17 @@ _SHA = re.compile(r"^[a-f0-9]{64}$")
 
 
 def _vsha(v, label):
-    if not isinstance(v, str) or not _SHA.fullmatch(v):
-        raise ValueError(f"{label}_MALFORMED: {v!r}")
+    if not isinstance(v, str):
+        raise ValueError(f"{label}_MALFORMED")
+    if not _SHA.fullmatch(v):
+        raise ValueError(f"{label}_MALFORMED")
 
 
 def _vint(v, label):
     if isinstance(v, bool) or not isinstance(v, int):
-        raise ValueError(f"{label}_NOT_INT: {v!r}")
+        raise ValueError(f"{label}_NOT_INT")
     if v < 0:
-        raise ValueError(f"{label}_NEGATIVE: {v}")
+        raise ValueError(f"{label}_NEGATIVE")
 
 
 class Stage5LifecycleAction(str, Enum):
