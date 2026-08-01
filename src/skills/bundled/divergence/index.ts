@@ -163,6 +163,7 @@ async function execute(args: string): Promise<string> {
           preferMaker: true, makerTimeoutMs: 15000, takerBufferCents: 0.01, negRisk: true,
           takeProfitPct: 15, stopLossPct: 25, trailingStopPct: 8, trailingActivationPct: 10,
           forceExitSec: 30, timeExitSec: 120, maxDailyLossUsd: 200,
+          adaptiveStoplossEnabled: false, adaptiveSlBasePct: 25, adaptiveSlHighK: 3.0, adaptiveSlNormalK: 2.0, adaptiveSlLowK: 1.5, adaptiveSlMaxMultiplier: 1.5,
           cooldownAfterLossSec: 30, cooldownAfterExitSec: 15, dryRun: true,
         };
         const rotator = createMarketRotator(() => defaultCfg);

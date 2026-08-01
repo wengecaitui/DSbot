@@ -344,6 +344,14 @@ const DEFAULT_ENGINE_CONFIG: HftDivergenceConfig = {
 
   takeProfitPct: 15,
   stopLossPct: 25,
+
+  // Adaptive Stop Loss — AdaptiveTrend-inspired binary-price heuristic
+  adaptiveStoplossEnabled: false,
+  adaptiveSlBasePct: 25,
+  adaptiveSlHighK: 3.0,
+  adaptiveSlNormalK: 2.0,
+  adaptiveSlLowK: 1.5,
+  adaptiveSlMaxMultiplier: 1.5,
   trailingStopPct: 8,
   trailingActivationPct: 10,
   forceExitSec: 30,

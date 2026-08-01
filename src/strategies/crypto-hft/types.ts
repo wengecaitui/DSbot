@@ -78,6 +78,23 @@ export interface CryptoHftConfig {
   takeProfitPct: number;
   stopLossPct: number;
 
+  // ── Price-Level Adaptive Initial Stop (AdaptiveTrend-Inspired, arXiv 2602.11708) ──
+  // Paper-inspired, project-specific binary-market heuristic. NOT an exact
+  // reproduction of AdaptiveTrend's dynamic trailing stop. Entry-price
+  // distance from 0.50 is a project-specific uncertainty proxy, NOT measured
+  // ATR and NOT verified realized volatility.
+  adaptiveStoplossEnabled: boolean;
+  /** Base stop loss % before uncertainty adjustment (default = stopLossPct) */
+  adaptiveSlBasePct: number;
+  /** k when entry near 0.50 (ATM zone, |dist| <= 0.15) */
+  adaptiveSlHighK: number;
+  /** k for MID zone (0.15 < |dist| <= 0.25) — nominal baseline */
+  adaptiveSlNormalK: number;
+  /** k when entry near edges (EDGE zone, |dist| > 0.25) */
+  adaptiveSlLowK: number;
+  /** Cap on effective stop as multiple of base (default 1.5) */
+  adaptiveSlMaxMultiplier: number;
+
   // ── Ratchet floor (progressive giveback from confirmed high) ──
   ratchetEnabled: boolean;
   /** Number of consecutive ticks near high to confirm HWM */
@@ -111,6 +128,27 @@ export interface CryptoHftConfig {
   exitCooldownSec: number;
   negRisk: boolean;
   dryRun: boolean;
+
+  // ── Realized Cost-Drag Circuit Breaker (arXiv 2607.19453-inspired) ──
+  // Inspired by the paper's finding that predictive accuracy does not
+  // guarantee tradable profitability. Project-specific FEES_ONLY cost model:
+  // only entry + exit fees are counted — NOT spread, slippage, market
+  // impact, or funding (data not available in this strategy layer).
+  costHurdleGateEnabled: boolean;
+  /** Block new entries when fee/gross ratio strictly exceeds this (0.5 = 50%) */
+  costHurdleMaxCostRatio: number;
+  /** Rolling window for cost ratio calculation (completed trades) */
+  costHurdleWindowTrades: number;
+  /** Min completed trades before the breaker may activate (warming-up gate) */
+  costHurdleMinCompletedTrades: number;
+  /** Cooldown (seconds) before a single probe entry is allowed after a block */
+  costHurdleBlockCooldownSec: number;
+  /** Max successful entries per rolling 60-min window (0 = disabled) */
+  costHurdleMaxTradesPerHour: number;
+
+  // ── Regime Gate (SUSA-Inspired, arXiv 2607.22491) ──
+  /** Enable 4-state deterministic regime heuristic: blocks entries in persistent_stress/UNKNOWN */
+  regimeGateEnabled: boolean;
 }
 
 // ── Orderbook ───────────────────────────────────────────────────────────────
@@ -228,6 +266,16 @@ export interface OpenPosition {
   highPnlPct: number;
   lowPnlPct: number;
   wasEverPositive: boolean;
+
+  // ── Frozen at entry (adaptive stop, never recomputed per-tick) ──
+  /** Effective stop loss % frozen when the position was opened. */
+  effectiveStopLossPct: number;
+  /** Policy version used at entry (immutable). */
+  adaptiveStopPolicyVersion: string;
+  /** Entry price used to select the stop zone (immutable). */
+  adaptiveStopEntryPrice: number;
+  /** Whether the adaptive stop policy was enabled at entry. */
+  adaptiveStopEnabledAtEntry: boolean;
 }
 
 export type ExitReason =
@@ -256,6 +304,15 @@ export interface ClosedPosition extends OpenPosition {
   holdTimeSec: number;
 }
 
+// ── Cost-Drag Audit (arXiv 2607.19453-inspired) ────────────────────────────
+// Single source of truth for these types lives in src/strategies/shared/
+// cost-drag.ts. Re-exported here for backward compatibility so existing
+// importers of './types.js' keep working.
+
+import type { CostModelScope, CostHurdleStatus, TradeCostSample } from '../shared/cost-drag.js';
+export { COST_MODEL_SCOPE } from '../shared/cost-drag.js';
+export type { CostModelScope, CostHurdleStatus, TradeCostSample };
+
 // ── Stats ───────────────────────────────────────────────────────────────────
 
 export interface HftStats {
@@ -274,6 +331,24 @@ export interface HftStats {
   makerEntryRate: number;
   makerExitRate: number;
   exitReasons: Record<string, number>;
+
+  // ── Cost-Drag Audit (arXiv 2607.19453-inspired) ──
+  /** Amount-weighted gross return in basis points over the rolling window. */
+  grossBps: number;
+  /** Amount-weighted net return in basis points over the rolling window. */
+  netBps: number;
+  /** Amount-weighted fees in basis points (FEES_ONLY scope). */
+  costBps: number;
+  /** Fee/gross ratio; null when aggregate gross <= 0. */
+  costToGrossRatio: number | null;
+  /** FEES_ONLY — spread/slippage/impact/funding are NOT modeled. */
+  costModelScope: CostModelScope;
+  /** Current breaker status (DISABLED/WARMING_UP/NO_POSITIVE_GROSS/OK/BLOCKED/PROBE_IN_FLIGHT). */
+  costHurdleStatus: CostHurdleStatus;
+  /** Entries successfully opened in the rolling 60-min window. */
+  hourlyTradeCount: number;
+  /** Basis for hourlyTradeCount: successful OPENED positions, not fills/closes. */
+  hourlyTradeCountBasis: 'OPENED_POSITIONS';
 }
 
 // ── Presets ──────────────────────────────────────────────────────────────────

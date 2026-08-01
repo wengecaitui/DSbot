@@ -6,6 +6,7 @@
  */
 
 import { logger } from '../../utils/logger.js';
+import { computeAdaptiveStop } from '../shared/adaptive-stop.js';
 import type {
   HftDivergenceConfig,
   DivPosition,
@@ -60,6 +61,28 @@ export function createDivPositionManager(
   return {
     open(params) {
       const id = `div-${nextId++}`;
+      const config = getConfig();
+      const now = Date.now();
+
+      // ── Freeze effective stop at entry (shared implementation) ───────────
+      let effectiveStopLossPct = config.stopLossPct;
+      let adaptiveStopEnabledAtEntry = false;
+      let adaptiveStopPolicyVersion = 'fixed-stop';
+
+      if (config.adaptiveStoplossEnabled) {
+        const r = computeAdaptiveStop({
+          entryPrice: params.entryPrice,
+          baseStopLossPct: config.adaptiveSlBasePct,
+          highK: config.adaptiveSlHighK,
+          normalK: config.adaptiveSlNormalK,
+          lowK: config.adaptiveSlLowK,
+          maxMultiplier: config.adaptiveSlMaxMultiplier,
+        });
+        effectiveStopLossPct = r.effectiveStopLossPct;
+        adaptiveStopEnabledAtEntry = true;
+        adaptiveStopPolicyVersion = r.policyVersion;
+      }
+
       const pos: DivPosition = {
         id,
         asset: params.asset,
@@ -73,8 +96,13 @@ export function createDivPositionManager(
         costUsd: params.entryPrice * params.shares,
         highWaterMark: params.entryPrice,
         trailingActivated: false,
-        enteredAt: Date.now(),
+        enteredAt: now,
         expiresAt: params.expiresAt,
+        // Frozen-at-entry adaptive stop
+        effectiveStopLossPct,
+        adaptiveStopPolicyVersion,
+        adaptiveStopEntryPrice: params.entryPrice,
+        adaptiveStopEnabledAtEntry,
       };
       positions.set(id, pos);
       signalCounts.set(params.strategyTag, (signalCounts.get(params.strategyTag) ?? 0) + 1);
@@ -84,7 +112,7 @@ export function createDivPositionManager(
       }
 
       logger.info(
-        { id, asset: pos.asset, dir: pos.direction, tag: pos.strategyTag, price: pos.entryPrice.toFixed(2), shares: pos.shares },
+        { id, asset: pos.asset, dir: pos.direction, tag: pos.strategyTag, price: pos.entryPrice.toFixed(2), shares: pos.shares, effectiveSl: effectiveStopLossPct.toFixed(2) + '%' },
         'Div position opened'
       );
       return pos;
@@ -131,8 +159,10 @@ export function createDivPositionManager(
           continue;
         }
 
-        // 3. Stop loss
-        if (pnlPct <= -config.stopLossPct) {
+        // 3. Stop loss — uses value FROZEN AT ENTRY (fixed or adaptive),
+        // never recomputed from live config.
+        const effectiveSlPct = pos.effectiveStopLossPct;
+        if (pnlPct <= -effectiveSlPct) {
           exits.push({ positionId: pos.id, reason: 'stop_loss', exitPrice: price });
           continue;
         }

@@ -37,6 +37,17 @@ export interface HftDivergenceConfig {
   // Exit rules
   takeProfitPct: number;               // 15
   stopLossPct: number;                 // 25
+
+  // Adaptive Stop Loss — AdaptiveTrend-inspired binary-price heuristic
+  // (arXiv 2602.11708). Project-specific adaptation: entry-price distance
+  // from 0.50 is an uncertainty proxy, NOT measured ATR. NOT an exact
+  // reproduction of AdaptiveTrend.
+  adaptiveStoplossEnabled: boolean;
+  adaptiveSlBasePct: number;
+  adaptiveSlHighK: number;
+  adaptiveSlNormalK: number;
+  adaptiveSlLowK: number;
+  adaptiveSlMaxMultiplier: number;
   trailingStopPct: number;             // 8
   trailingActivationPct: number;       // 10
   forceExitSec: number;                // 30
@@ -105,6 +116,16 @@ export interface DivPosition {
   trailingActivated: boolean;
   enteredAt: number;
   expiresAt: number;
+
+  // ── Frozen at entry (adaptive stop, never recomputed per-tick) ──
+  /** Effective stop loss % frozen when the position was opened. */
+  effectiveStopLossPct: number;
+  /** Policy version used at entry (immutable). */
+  adaptiveStopPolicyVersion: string;
+  /** Entry price used to select the stop zone (immutable). */
+  adaptiveStopEntryPrice: number;
+  /** Whether the adaptive stop policy was enabled at entry. */
+  adaptiveStopEnabledAtEntry: boolean;
 }
 
 export type DivExitReason =
