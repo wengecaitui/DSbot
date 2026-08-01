@@ -13,6 +13,7 @@ from quant_engine.proof.stage5_intent_compiler import (
 from quant_engine.proof.stage5_lifecycle_plan import (
     Stage5LifecycleAction,
 )
+from quant_engine.proof.stage5_evaluation import canonical_sha256
 
 F = 300_000
 _SID = "a" * 64
@@ -309,7 +310,7 @@ class CompilerTests(unittest.TestCase):
         acts = [i.action for i in comp.plan.instructions]
         times = [i.signal_bar_open_time_ms for i in comp.plan.instructions]
         self.assertEqual(acts[1], Stage5LifecycleAction.EXIT)
-        self.assertEqual(times[1], 4 * F)  # exit at bar4
+        self.assertEqual(times[1], 4 * F)
         self.assertNotIn(Stage5LifecycleAction.EXIT, acts[:1])
 
     def test_dual_entry_while_long_on_timeout(self):
@@ -320,7 +321,7 @@ class CompilerTests(unittest.TestCase):
         acts = [i.action for i in comp.plan.instructions]
         times = [i.signal_bar_open_time_ms for i in comp.plan.instructions]
         self.assertEqual(acts[1], Stage5LifecycleAction.EXIT)
-        self.assertEqual(times[1], 4 * F)  # exit at bar4
+        self.assertEqual(times[1], 4 * F)
         self.assertNotIn(Stage5LifecycleAction.EXIT, [acts[0]])
 
     def test_long_short_entry_reverse_at_bar(self):
@@ -372,64 +373,88 @@ class HostileInputTests(unittest.TestCase):
         __int__ = __bool__
         __float__ = __bool__
 
-    def test_hostile_strategy_id_obs_factory(self):
-        with self.assertRaises(ValueError) as ctx:
-            _obs(0, le=True, sid=self._Hostile())
-        self.assertIn("OBS_FACTORY_STRATEGY", str(ctx.exception))
-
-    def test_hostile_spec_id_obs_factory(self):
-        with self.assertRaises(ValueError) as ctx:
-            _obs(0, le=True, spid=self._Hostile())
-        self.assertIn("OBS_FACTORY_SPEC_ID", str(ctx.exception))
-
-    def test_hostile_int_time_obs_factory(self):
-        with self.assertRaises(ValueError):
-            create_stage5_strategy_intent_observation(
-                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID,
-                dataset_id=_DID, symbol=_SYM, signal_bar_open_time_ms=self._Hostile(),
-                has_outputs=True, long_entry=False, short_entry=False,
-                long_exit=False, short_exit=False)
-
-    def test_hostile_compiler_strategy_id(self):
-        with self.assertRaises(ValueError) as ctx:
-            compile_stage5_strategy_intent(
-                strategy_id=self._Hostile(), spec_id=_SPID, parameter_id=_PID,
-                dataset_id=_DID, symbol=_SYM, warmup_bars=30, max_holding_bars=96,
-                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
-                terminal_execution_bar_open_time_ms=F * 10,
-                observations=tuple(_obs(i * F) for i in range(9)),
-            )
-        self.assertIn("COMPILE_STRATEGY_NOT_STRING", str(ctx.exception))
-
-    # Table-driven hostile obs factory across all fields
-    def test_hostile_obs_factory_all_fields(self):
-        for field, kw, token in [
-            ("strategy_id", {"sid": self._Hostile()}, "OBS_FACTORY_STRATEGY"),
-            ("parameter_id", {"pid": self._Hostile()}, "OBS_FACTORY_PARAM_ID"),
-            ("dataset_id", {"did": self._Hostile()}, "OBS_FACTORY_DATASET_ID"),
-            ("symbol", {"sym": self._Hostile()}, "OBS_FACTORY_SYMBOL_NOT_STRING"),
+    # --- Obs factory plain hostile: all fields table-driven ---
+    def test_hostile_obs_factory_plain_all_fields(self):
+        H = self._Hostile
+        for field, call_fn, token in [
+            ("strategy", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=H(), spec_id=_SPID, parameter_id=_PID, dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=False, short_entry=False, long_exit=False, short_exit=False),
+             "OBS_FACTORY_STRATEGY"),
+            ("spec", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=H(), parameter_id=_PID, dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=False, short_entry=False, long_exit=False, short_exit=False),
+             "OBS_FACTORY_SPEC_ID"),
+            ("parameter", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=H(), dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=False, short_entry=False, long_exit=False, short_exit=False),
+             "OBS_FACTORY_PARAM_ID"),
+            ("dataset", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=H(), symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=False, short_entry=False, long_exit=False, short_exit=False),
+             "OBS_FACTORY_DATASET_ID"),
+            ("symbol", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID, symbol=H(),
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=False, short_entry=False, long_exit=False, short_exit=False),
+             "OBS_FACTORY_SYMBOL_NOT_STRING"),
+            ("signal_time", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=H(), has_outputs=False,
+                long_entry=False, short_entry=False, long_exit=False, short_exit=False),
+             "OBS_FACTORY_TIME"),
+            ("has_outputs", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=H(),
+                long_entry=False, short_entry=False, long_exit=False, short_exit=False),
+             "OBS_FACTORY_HAS"),
+            ("long_entry", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=H(), short_entry=False, long_exit=False, short_exit=False),
+             "OBS_FACTORY_LE"),
+            ("short_entry", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=False, short_entry=H(), long_exit=False, short_exit=False),
+             "OBS_FACTORY_SE"),
+            ("long_exit", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=False, short_entry=False, long_exit=H(), short_exit=False),
+             "OBS_FACTORY_LX"),
+            ("short_exit", lambda: create_stage5_strategy_intent_observation(
+                strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID, symbol=_SYM,
+                signal_bar_open_time_ms=0, has_outputs=False,
+                long_entry=False, short_entry=False, long_exit=False, short_exit=H()),
+             "OBS_FACTORY_SX"),
         ]:
             with self.subTest(field=field):
                 with self.assertRaises(ValueError) as ctx:
-                    _obs(0, le=True, **kw)
-                self.assertIn(token, str(ctx.exception))
+                    call_fn()
+                self.assertIn(token, str(ctx.exception),
+                              f"Expected {token} for {field}, got: {ctx.exception}")
 
-    # Hostile str subclass across all 5 lineage fields
-    def test_hostile_str_obs_factory_all_fields(self):
+    # --- Obs factory hostile-str all 5 lineage fields ---
+    def test_hostile_obs_factory_str_all_fields(self):
         for field, kw, token in [
-            ("strategy_id", {"sid": self._HostileStr("x" * 64)}, "OBS_FACTORY_STRATEGY"),
-            ("spec_id", {"spid": self._HostileStr("f" * 64)}, "OBS_FACTORY_SPEC_ID"),
-            ("parameter_id", {"pid": self._HostileStr("f" * 64)}, "OBS_FACTORY_PARAM_ID"),
-            ("dataset_id", {"did": self._HostileStr("f" * 64)}, "OBS_FACTORY_DATASET_ID"),
+            ("strategy", {"sid": self._HostileStr("x" * 64)}, "OBS_FACTORY_STRATEGY"),
+            ("spec", {"spid": self._HostileStr("f" * 64)}, "OBS_FACTORY_SPEC_ID"),
+            ("parameter", {"pid": self._HostileStr("f" * 64)}, "OBS_FACTORY_PARAM_ID"),
+            ("dataset", {"did": self._HostileStr("f" * 64)}, "OBS_FACTORY_DATASET_ID"),
             ("symbol", {"sym": self._HostileStr("BTC/USDT")}, "OBS_FACTORY_SYMBOL_NOT_STRING"),
         ]:
             with self.subTest(field=field):
                 with self.assertRaises(ValueError) as ctx:
-                    _obs(0, le=True, **kw)
+                    _obs(0, **kw)
                 self.assertIn(token, str(ctx.exception))
 
-    # Compiler hostile plain object across all fields
-    def test_hostile_compiler_all_fields(self):
+    # --- Compiler plain hostile: all fields table-driven ---
+    def test_hostile_compiler_plain_all_fields(self):
         base = dict(strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID,
                      symbol=_SYM, warmup_bars=30, max_holding_bars=96,
                      scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
@@ -442,13 +467,56 @@ class HostileInputTests(unittest.TestCase):
             ("dataset_id", "COMPILE_DATASET_ID"),
             ("symbol", "COMPILE_SYMBOL_NOT_STRING"),
             ("warmup_bars", "COMPILE_WARMUP_NOT_INT"),
+            ("max_holding_bars", "COMPILE_MAX_HOLD_NOT_INT"),
+            ("scored_start_open_time_ms", "COMPILE_START_NOT_INT"),
+            ("scored_end_exclusive_open_time_ms", "COMPILE_END_NOT_INT"),
+            ("terminal_execution_bar_open_time_ms", "COMPILE_TERMINAL_NOT_INT"),
+            ("observations", "COMPILE_OBS_NOT_TUPLE"),
         ]:
             with self.subTest(field=field):
                 with self.assertRaises(ValueError) as ctx:
                     compile_stage5_strategy_intent(**{**base, field: self._Hostile()})
                 self.assertIn(token, str(ctx.exception))
 
-    # Direct observation hostile schema
+    # --- Compiler hostile-str: all 5 lineage fields ---
+    def test_hostile_compiler_str_all_fields(self):
+        obs = tuple(_obs(i * F) for i in range(9))
+        for field, value, token in [
+            ("strategy_id", HostileInputTests._HostileStr("x" * 64), "COMPILE_STRATEGY_NOT_STRING"),
+            ("spec_id", HostileInputTests._HostileStr("f" * 64), "COMPILE_SPEC_ID"),
+            ("parameter_id", HostileInputTests._HostileStr("f" * 64), "COMPILE_PARAM_ID"),
+            ("dataset_id", HostileInputTests._HostileStr("f" * 64), "COMPILE_DATASET_ID"),
+            ("symbol", HostileInputTests._HostileStr("BTC/USDT"), "COMPILE_SYMBOL_NOT_STRING"),
+        ]:
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError) as ctx:
+                    compile_stage5_strategy_intent(
+                        strategy_id=_SID if field != "strategy_id" else value,
+                        spec_id=_SPID if field != "spec_id" else value,
+                        parameter_id=_PID if field != "parameter_id" else value,
+                        dataset_id=_DID if field != "dataset_id" else value,
+                        symbol=_SYM if field != "symbol" else value,
+                        warmup_bars=30, max_holding_bars=96,
+                        scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                        terminal_execution_bar_open_time_ms=F * 10, observations=obs,
+                    )
+                self.assertIn(token, str(ctx.exception))
+
+    def test_compiler_direct_hostile_obs_ids_from_valid(self):
+        # from valid compilation, mutate obs_ids to hostile tuple
+        obs = tuple(_obs(i * F, le=(i == 0), lx=(i == 5)) for i in range(9))
+        comp = compile_stage5_strategy_intent(
+            strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID,
+            symbol=_SYM, warmup_bars=30, max_holding_bars=96,
+            scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+            terminal_execution_bar_open_time_ms=F * 10, observations=obs,
+        )
+        object.__setattr__(comp, "observation_ids", (self._Hostile(),))
+        with self.assertRaises(ValueError) as ctx:
+            Stage5IntentCompilation.__post_init__(comp)
+        self.assertIn("COMPILATION_OBS_ID_MALFORMED", str(ctx.exception))
+
+    # --- Direct observation hostile schema ---
     def test_obs_direct_hostile_schema(self):
         with self.assertRaises(ValueError) as ctx:
             Stage5StrategyIntentObservation(
@@ -460,6 +528,7 @@ class HostileInputTests(unittest.TestCase):
             )
         self.assertIn("OBS_SCHEMA", str(ctx.exception))
 
+    # --- Direct compilation hostile schema/scope ---
     def test_compilation_direct_hostile_schema(self):
         base = dict(schema_version=self._Hostile(), scope=COMPILATION_SCOPE, plan=None,
                      observation_ids=(), max_holding_bars=96,
@@ -469,14 +538,92 @@ class HostileInputTests(unittest.TestCase):
             Stage5IntentCompilation(**base)
         self.assertIn("COMPILATION_SCHEMA", str(ctx.exception))
 
-    def test_compilation_direct_hostile_obs_ids(self):
-        with self.assertRaises(ValueError):
-            Stage5IntentCompilation(
-                schema_version="stage-5.intent-compilation.v1", scope=COMPILATION_SCOPE,
-                plan=None, observation_ids=(self._Hostile(),), max_holding_bars=96,
-                protective_execution_included=False, replay_compatible=False,
-                requires_protective_state_bridge=True, compilation_id="0" * 64,
-            )
+    def test_compilation_direct_hostile_scope(self):
+        obs = tuple(_obs(i * F, le=(i == 0), lx=(i == 5)) for i in range(9))
+        comp = compile_stage5_strategy_intent(
+            strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID,
+            symbol=_SYM, warmup_bars=30, max_holding_bars=96,
+            scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+            terminal_execution_bar_open_time_ms=F * 10, observations=obs,
+        )
+        object.__setattr__(comp, "scope", self._Hostile())
+        with self.assertRaises(ValueError) as ctx:
+            Stage5IntentCompilation.__post_init__(comp)
+        self.assertIn("COMPILATION_SCOPE", str(ctx.exception))
+
+
+class DirectCompilationTamperTests(unittest.TestCase):
+    class _Hostile:
+        def __bool__(self): raise RuntimeError("BOOM")
+        __repr__ = __bool__
+        __str__ = __bool__
+        __hash__ = __bool__
+        __int__ = __bool__
+        __float__ = __bool__
+        __eq__ = __bool__
+        __ne__ = __bool__
+        __lt__ = __bool__
+        __le__ = __bool__
+        __gt__ = __bool__
+        __ge__ = __bool__
+
+    def _valid_comp(self):
+        obs = tuple(_obs(i * F, le=(i == 0), lx=(i == 5)) for i in range(9))
+        return compile_stage5_strategy_intent(
+            strategy_id=_SID, spec_id=_SPID, parameter_id=_PID, dataset_id=_DID,
+            symbol=_SYM, warmup_bars=30, max_holding_bars=96,
+            scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+            terminal_execution_bar_open_time_ms=F * 10, observations=obs,
+        )
+
+    def _recompute_id(self, comp):
+        from quant_engine.proof.stage5_intent_compiler import _compilation_payload
+        object.__setattr__(comp, "compilation_id", canonical_sha256(_compilation_payload(comp)))
+
+    def test_hostile_obs_id_element(self):
+        comp = self._valid_comp()
+        object.__setattr__(comp, "observation_ids", (self._Hostile(),))
+        with self.assertRaises(ValueError) as ctx:
+            Stage5IntentCompilation.__post_init__(comp)
+        self.assertIn("COMPILATION_OBS_ID_MALFORMED", str(ctx.exception))
+
+    def test_malformed_obs_id_string(self):
+        comp = self._valid_comp()
+        object.__setattr__(comp, "observation_ids", ("not-a-sha",))
+        with self.assertRaises(ValueError) as ctx:
+            Stage5IntentCompilation.__post_init__(comp)
+        self.assertIn("COMPILATION_OBS_ID_MALFORMED", str(ctx.exception))
+
+    def test_non_tuple_obs_ids(self):
+        comp = self._valid_comp()
+        object.__setattr__(comp, "observation_ids", ["abc123"] * 9)
+        with self.assertRaises(ValueError) as ctx:
+            Stage5IntentCompilation.__post_init__(comp)
+        self.assertIn("COMPILATION_OBS_IDS_NOT_TUPLE", str(ctx.exception))
+
+    def test_flags_protective(self):
+        comp = self._valid_comp()
+        object.__setattr__(comp, "protective_execution_included", True)
+        self._recompute_id(comp)
+        with self.assertRaises(ValueError) as ctx:
+            Stage5IntentCompilation.__post_init__(comp)
+        self.assertIn("COMPILATION_PROTECTIVE_NOT_FALSE", str(ctx.exception))
+
+    def test_flags_replay(self):
+        comp = self._valid_comp()
+        object.__setattr__(comp, "replay_compatible", True)
+        self._recompute_id(comp)
+        with self.assertRaises(ValueError) as ctx:
+            Stage5IntentCompilation.__post_init__(comp)
+        self.assertIn("COMPILATION_REPLAY_NOT_FALSE", str(ctx.exception))
+
+    def test_flags_bridge(self):
+        comp = self._valid_comp()
+        object.__setattr__(comp, "requires_protective_state_bridge", False)
+        self._recompute_id(comp)
+        with self.assertRaises(ValueError) as ctx:
+            Stage5IntentCompilation.__post_init__(comp)
+        self.assertIn("COMPILATION_BRIDGE_NOT_TRUE", str(ctx.exception))
 
 
 class LineageMismatchTests(unittest.TestCase):
@@ -552,7 +699,7 @@ class CompilationTamperTests(unittest.TestCase):
         )
 
     def _recompute_id(self, comp):
-        from quant_engine.proof.stage5_intent_compiler import _compilation_payload, canonical_sha256
+        from quant_engine.proof.stage5_intent_compiler import _compilation_payload
         object.__setattr__(comp, "compilation_id", canonical_sha256(_compilation_payload(comp)))
 
     def test_tamper_max_holding_rejected(self):
@@ -634,13 +781,18 @@ class VerifyExtendedTests(unittest.TestCase):
 
 
 class TransitiveImportTests(unittest.TestCase):
-    def test_transitive_import_chain_no_forbidden(self):
-        import ast, importlib.util, os, sys
+    def test_transitive_no_forbidden_modules(self):
+        import ast, importlib.util, os
         forbidden = {"strategy_adapter", "stage5_harness", "stage5r1_replay",
                      "stage5r1_protective_replay", "numpy", "pandas",
                      "stage5r1_capital", "stage5r1_metrics", "indicators"}
+        required = {"quant_engine.proof.stage5_intent_compiler",
+                    "quant_engine.proof.stage5_lifecycle_plan",
+                    "quant_engine.proof.stage5_evaluation"}
         visited = set()
+        parsed = set()
         queue = ["quant_engine.proof.stage5_intent_compiler"]
+
         while queue:
             mod_name = queue.pop(0)
             if mod_name in visited:
@@ -648,18 +800,21 @@ class TransitiveImportTests(unittest.TestCase):
             visited.add(mod_name)
             try:
                 spec = importlib.util.find_spec(mod_name)
-            except Exception:
-                continue
+            except Exception as e:
+                self.fail(f"find_spec failed for {mod_name}: {e}")
             if spec is None or spec.origin is None:
-                continue
+                self.fail(f"No spec/origin for {mod_name}")
             path = os.path.realpath(spec.origin)
-            if not path.startswith(os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))):
+            proj_root = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+            if not path.startswith(proj_root):
                 continue
             try:
                 with open(path) as f:
                     tree = ast.parse(f.read())
             except Exception as e:
-                self.fail(f"parse error in {path}: {e}")
+                self.fail(f"Parse error in {path}: {e}")
+            parsed.add(mod_name)
+
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     for alias in node.names:
@@ -668,29 +823,37 @@ class TransitiveImportTests(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom):
                     if node.module and node.module.startswith("quant_engine"):
                         queue.append(node.module)
-        # Must include at least these
-        for required in ["quant_engine.proof.stage5_intent_compiler",
-                         "quant_engine.proof.stage5_lifecycle_plan",
-                         "quant_engine.proof.stage5_evaluation"]:
-            self.assertIn(required, visited, f"Missing required module: {required}")
-        found = {m for fbd in forbidden for m in visited if fbd in m}
-        self.assertEqual(found, set(), f"Transitive forbidden imports: {found}")
 
-        # Direct AST: no filesystem/data/network calls
-        dangerous = {"open", "os", "subprocess", "socket", "requests", "urlopen", "Path",
-                     "StrategyAdapter", "stage5_harness", "stage5r1_replay", "indicators"}
-        impl_path = os.path.join(os.path.dirname(__file__), "..", "proof", "stage5_intent_compiler.py")
-        with open(impl_path) as f:
+        for req in required:
+            self.assertIn(req, parsed, f"Required module not parsed: {req}")
+        found = {m for fbd in forbidden for m in visited if fbd in m}
+        self.assertEqual(found, set(), f"Forbidden in transitive: {found}")
+
+    def test_direct_ast_no_dangerous_ops(self):
+        import ast, os
+        dangerous_imports = {"strategy_adapter", "stage5_harness", "stage5r1_replay",
+                             "stage5r1_protective_replay", "numpy", "pandas", "indicators"}
+        dangerous_calls = {"open", "subprocess", "socket", "requests", "urlopen",
+                           "StrategyAdapter", "Path", "os"}
+        impl = os.path.join(os.path.dirname(__file__), "..", "proof", "stage5_intent_compiler.py")
+        with open(impl) as f:
             tree = ast.parse(f.read())
+        imports = set()
         call_names = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
+            if isinstance(node, ast.Import):
+                imports.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module)
+            elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name):
                     call_names.add(node.func.id)
                 elif isinstance(node.func, ast.Attribute):
                     call_names.add(node.func.attr)
-        dangerous_calls = dangerous & call_names
-        self.assertEqual(dangerous_calls, set(), f"Dangerous calls in compiler: {dangerous_calls}")
+        hit_imports = dangerous_imports & imports
+        hit_calls = dangerous_calls & call_names
+        self.assertEqual(hit_imports, set(), f"Dangerous imports: {hit_imports}")
+        self.assertEqual(hit_calls, set(), f"Dangerous calls: {hit_calls}")
 
 
 if __name__ == "__main__":
