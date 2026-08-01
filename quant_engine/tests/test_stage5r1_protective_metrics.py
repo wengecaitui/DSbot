@@ -1,4 +1,4 @@
-"""Stage 5R1.3-F — hardened adversarial test suite (expanded red-gate)."""
+"""Stage 5R1.3-F — hardened adversarial test suite (Level 2C expansion)."""
 
 import math
 import unittest
@@ -15,7 +15,6 @@ from quant_engine.proof.stage5r1_protective_replay import (
 )
 from quant_engine.proof.stage5r1_protective_excursion import (
     run_stage5r1_protective_excursion,
-    _excursion_payload,
 )
 from quant_engine.proof.stage5r1_protective_metrics import (
     build_stage5r1_protective_metrics,
@@ -104,7 +103,7 @@ def _two_trade_setup():
 
 
 # ==========================================================================
-# A. Risk arithmetic (existing, retained)
+# A. Risk arithmetic (existing)
 # ==========================================================================
 
 class RiskArithmeticTests(unittest.TestCase):
@@ -149,7 +148,7 @@ class ForgedRiskRelationTests(unittest.TestCase):
 
 
 # ==========================================================================
-# C. Zero trades (existing, expanded)
+# C. Zero trades (existing)
 # ==========================================================================
 
 class ZeroTradeReportTests(unittest.TestCase):
@@ -187,7 +186,7 @@ class ZeroTradeReportTests(unittest.TestCase):
 
 
 # ==========================================================================
-# D. Aggregate math (existing, expanded)
+# D. Aggregate math (existing)
 # ==========================================================================
 
 class AggregateMathTests(unittest.TestCase):
@@ -357,7 +356,7 @@ class DeterministicReproductionTests(unittest.TestCase):
 
 
 # ==========================================================================
-# H. Binding validation (expanded)
+# H. Binding validation (existing, expanded)
 # ==========================================================================
 
 class BindingValidationTests(unittest.TestCase):
@@ -410,14 +409,14 @@ class BindingValidationTests(unittest.TestCase):
 
     def test_plan_stop_mutated_identity_forgery_rejected(self):
         b, insts, p, bindings, r = _one_trade_setup(stop=250.0)
-        object.__setattr__(p, "stop_price", 240.0)  # still valid long (240 < 300)
+        object.__setattr__(p, "stop_price", 240.0)
         with self.assertRaises(ValueError) as ctx:
             build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         self.assertIn("IDENTITY", str(ctx.exception))
 
 
 # ==========================================================================
-# I. Report forgery (expanded)
+# I. Report forgery (existing)
 # ==========================================================================
 
 class ForgedReportTests(unittest.TestCase):
@@ -431,7 +430,7 @@ class ForgedReportTests(unittest.TestCase):
 
 
 # ==========================================================================
-# K. Type rejection (expanded)
+# K. Type rejection (existing, expanded)
 # ==========================================================================
 
 class TypeRejectionTests(unittest.TestCase):
@@ -465,7 +464,7 @@ class TypeRejectionTests(unittest.TestCase):
 
 
 # ==========================================================================
-# L. Input immutability (expanded)
+# L. Input immutability (existing, expanded)
 # ==========================================================================
 
 class InputImmutabilityTests(unittest.TestCase):
@@ -483,7 +482,7 @@ class InputImmutabilityTests(unittest.TestCase):
 
 
 # ==========================================================================
-# M. Verify API (expanded)
+# M. Verify API (existing, expanded)
 # ==========================================================================
 
 class VerifyAPITests(unittest.TestCase):
@@ -500,7 +499,7 @@ class VerifyAPITests(unittest.TestCase):
 
 
 # ==========================================================================
-# N. Additional adversarial tests (requirements 7-35)
+# N. Additional adversarial tests
 # ==========================================================================
 
 class BuildGraphRevalidationTests(unittest.TestCase):
@@ -541,6 +540,107 @@ class VerifyEdgeCaseTests(unittest.TestCase):
         object.__setattr__(r, "symbol", "FORGED")
         with self.assertRaises(ValueError):
             verify_stage5r1_protective_metrics(report=report, result=r, bars=b, instructions=insts, protective_bindings=bindings, config=_cfg(), capital=_CM, cost=_ZC)
+
+
+# ==========================================================================
+# O. Level 2C adversarial expansion — nested invariant guards
+# ==========================================================================
+
+class NestedForgeryTests(unittest.TestCase):
+    def test_forged_explicit_cost_with_recomputed_total_rejected(self):
+        """Forged ProtectiveCostMetrics explicit_cost_amount is rejected."""
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveCostMetrics(
+                schema_version="stage-5r1.protective-cost-metrics.v1",
+                spread_cost_amount=1.0, slippage_cost_amount=2.0, market_impact_cost_amount=3.0,
+                fee_amount=1.0, funding_amount=0.0, explicit_cost_amount=999.0,
+                total_cost_amount=1002.0,
+                cost_as_initial_equity_fraction=0.0, cost_as_average_entry_equity_fraction=0.0,
+                fee_rate_disclosure_sum=0.0, spread_rate_disclosure_sum=0.0,
+                slippage_rate_disclosure_sum=0.0, funding_rate_disclosure_sum=0.0)
+        self.assertIn("COST", str(ctx.exception))
+
+    def test_forged_nested_metric_field_with_recomputed_id_rejected(self):
+        """Forged trade metric field with recomputed report_id is rejected."""
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        tm = report.trade_metrics[0]
+        object.__setattr__(tm, "realized_net_r", 999.0)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": "0"*64})
+
+    def test_forged_nested_counts_with_recomputed_id_rejected(self):
+        """Forged counts with recomputed report_id is rejected."""
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        counts = report.counts
+        object.__setattr__(counts, "long_count", 999)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": "0"*64})
+        self.assertIn("COUNTS", str(ctx.exception))
+
+    def test_counts_total_not_equal_trade_count_rejected(self):
+        """Counts total != trade_count is rejected."""
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        counts = report.counts
+        # forge: long=0, short=0 but trade_count=1
+        forged = ProtectiveExcursionMetricCounts(
+            long_count=0, short_count=0, explicit_exit_count=0, protective_exit_count=0,
+            stop_loss_count=0, take_profit_count=0, gap_open_count=0, intrabar_level_count=0,
+            same_bar_collision_count=0, zero_duration_count=0,
+            favorable_full_bar_count=0, favorable_exit_open_count=0, favorable_trigger_open_count=0,
+            favorable_trigger_level_count=0, adverse_full_bar_count=0, adverse_exit_open_count=0,
+            adverse_trigger_open_count=0, adverse_trigger_level_count=0)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "counts": forged, "report_id": "0"*64})
+        self.assertIn("TOTAL", str(ctx.exception))
+
+    def test_forged_accounting_net_pnl_with_retained_id_rejected(self):
+        """Forged TradeAccounting net_pnl_amount with retained accounting_id rejected."""
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        acct = r.trades[0].accounting
+        object.__setattr__(acct, "net_pnl_amount", 999999.0)
+        with self.assertRaises(ValueError):
+            build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+
+    def test_no_trades_return_profit_factor_nonnull_rejected(self):
+        """NO_TRADES with non-null return_profit_factor is rejected."""
+        b = bars(200)
+        r = run_stage5r1_protective_excursion(bars=b, instructions=(), protective_bindings=(), config=_cfg(), capital=_CM, cost=_ZC)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=())
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "return_profit_factor": 1.5, "report_id": "0"*64})
+        self.assertIn("RPF", str(ctx.exception))
+
+    def test_measured_return_profit_factor_null_rejected(self):
+        """MEASURED with null return_profit_factor is rejected."""
+        b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "return_profit_factor": None, "report_id": "0"*64})
+        self.assertIn("RPF", str(ctx.exception))
+
+    def test_shuffled_bindings_with_set_unchanged_rejected(self):
+        """Shuffled bindings where the set is unchanged but order differs."""
+        b, insts, bindings, r = _two_trade_setup()
+        shuffled = (bindings[1], bindings[0])
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5r1_protective_metrics(result=r, protective_bindings=shuffled)
+        self.assertIn("BINDING_SET_ID", str(ctx.exception))
+
+    def test_cost_total_mismatch_rejected(self):
+        """CostMetrics with total != market_impact + explicit rejected."""
+        with self.assertRaises(ValueError) as ctx:
+            ProtectiveCostMetrics(
+                schema_version="stage-5r1.protective-cost-metrics.v1",
+                spread_cost_amount=1.0, slippage_cost_amount=2.0, market_impact_cost_amount=3.0,
+                fee_amount=1.0, funding_amount=0.0, explicit_cost_amount=1.0,
+                total_cost_amount=999.0,
+                cost_as_initial_equity_fraction=0.0, cost_as_average_entry_equity_fraction=0.0,
+                fee_rate_disclosure_sum=0.0, spread_rate_disclosure_sum=0.0,
+                slippage_rate_disclosure_sum=0.0, funding_rate_disclosure_sum=0.0)
+        self.assertIn("TOTAL", str(ctx.exception))
 
 
 if __name__ == "__main__":

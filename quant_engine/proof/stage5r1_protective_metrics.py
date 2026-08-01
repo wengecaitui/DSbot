@@ -132,11 +132,12 @@ class ProtectiveCostMetrics:
                   "fee_rate_disclosure_sum", "spread_rate_disclosure_sum",
                   "slippage_rate_disclosure_sum", "funding_rate_disclosure_sum"):
             _vnonneg_finite(getattr(self, n), f"COST_{n.upper()}")
-        if self.market_impact_cost_amount + self.explicit_cost_amount != self.total_cost_amount:
-            raise ValueError("COST_TOTAL_MISMATCH")
-        if (self.spread_cost_amount + self.slippage_cost_amount !=
-                self.market_impact_cost_amount):
+        if self.market_impact_cost_amount != self.spread_cost_amount + self.slippage_cost_amount:
             raise ValueError("COST_MARKET_IMPACT_MISMATCH")
+        if self.explicit_cost_amount != self.fee_amount + self.funding_amount:
+            raise ValueError("COST_EXPLICIT_MISMATCH")
+        if self.total_cost_amount != self.market_impact_cost_amount + self.explicit_cost_amount:
+            raise ValueError("COST_TOTAL_MISMATCH")
 
 
 def _build_cost_metrics(d: dict) -> ProtectiveCostMetrics:
@@ -442,6 +443,12 @@ class ProtectiveExcursionMetricsReport:
 
         if type(self.counts) is not ProtectiveExcursionMetricCounts:
             raise ValueError("REPORT_COUNTS_TYPE_INVALID")
+        if self.counts.long_count + self.counts.short_count != self.trade_count:
+            raise ValueError("REPORT_COUNTS_TOTAL_MISMATCH")
+        if self.counts.same_bar_collision_count > self.trade_count:
+            raise ValueError("REPORT_COLLISION_EXCEEDS_TRADE_COUNT")
+        if self.counts.zero_duration_count > self.trade_count:
+            raise ValueError("REPORT_ZERO_DURATION_EXCEEDS_TRADE_COUNT")
 
         if self.evaluation_status == EVAL_NO_TRADES:
             if self.trade_count != 0:
@@ -458,6 +465,8 @@ class ProtectiveExcursionMetricsReport:
                     raise ValueError(f"REPORT_NO_TRADES_{agg.upper()}_NOT_NULL")
             if self.standard_profit_factor is not None:
                 raise ValueError("REPORT_NO_TRADES_PF_NOT_NULL")
+            if self.return_profit_factor is not None:
+                raise ValueError("REPORT_NO_TRADES_RPF_NOT_NULL")
             if self.cost_metrics is not None:
                 raise ValueError("REPORT_NO_TRADES_COST_NOT_NULL")
         else:
@@ -482,6 +491,9 @@ class ProtectiveExcursionMetricsReport:
             if self.standard_profit_factor is None:
                 raise ValueError("REPORT_MEASURED_PF_NULL")
             _vnonneg_finite(self.standard_profit_factor, "REPORT_PF")
+            if self.return_profit_factor is None:
+                raise ValueError("REPORT_MEASURED_RPF_NULL")
+            _vnonneg_finite(self.return_profit_factor, "REPORT_RPF")
             if self.cost_metrics is None:
                 raise ValueError("REPORT_MEASURED_COST_NULL")
             if type(self.cost_metrics) is not ProtectiveCostMetrics:
@@ -493,6 +505,25 @@ class ProtectiveExcursionMetricsReport:
 
 
 # --- build_stage5r1_protective_metrics ---
+
+
+def _validate_trade_accounting(acct: TradeAccounting) -> None:
+    """Fail-closed validator for Stage D TradeAccounting derived fields."""
+    if acct.trade_accounting_schema_version != "stage-5r1.trade-accounting.v1":
+        raise ValueError("ACCT_SCHEMA_INVALID")
+    if type(acct.side) is not PositionSide:
+        raise ValueError("ACCT_SIDE_INVALID")
+    if acct.gross_pnl_amount != acct.execution_pnl_amount:
+        raise ValueError("ACCT_GROSS_PNL_MISMATCH")
+    if acct.market_impact_cost_amount != acct.spread_cost_amount + acct.slippage_cost_amount:
+        raise ValueError("ACCT_MARKET_IMPACT_MISMATCH")
+    if acct.explicit_cost_amount != acct.fee_amount + acct.funding_amount:
+        raise ValueError("ACCT_EXPLICIT_MISMATCH")
+    if acct.total_cost_amount != acct.market_impact_cost_amount + acct.explicit_cost_amount:
+        raise ValueError("ACCT_TOTAL_COST_MISMATCH")
+    if acct.net_pnl_amount != acct.execution_pnl_amount - acct.explicit_cost_amount:
+        raise ValueError("ACCT_NET_PNL_MISMATCH")
+
 
 def build_stage5r1_protective_metrics(
     *, result, protective_bindings,
@@ -585,7 +616,7 @@ def build_stage5r1_protective_metrics(
             raise ValueError(f"PLAN_ID_MISMATCH_{i}")
         if bind.plan.side is not ct.excursion.side:
             raise ValueError(f"SIDE_MISMATCH_{i}")
-        if bind.binding_id != result.trades[i].excursion.binding_id:
+        if bind.binding_id != protective_bindings[i].binding_id:
             raise ValueError(f"ORDERED_BINDING_MISMATCH_{i}")
 
         exc = ct.excursion
@@ -659,6 +690,7 @@ def build_stage5r1_protective_metrics(
         )
         trade_metrics.append(tm)
         accounting_list.append(acct)
+        _validate_trade_accounting(acct)
 
         # Counts
         if side is PositionSide.LONG: lc += 1
