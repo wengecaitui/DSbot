@@ -172,7 +172,8 @@ class ProtectiveReplayTrade:
 # --- ProtectiveReplayResult ---
 
 def _result_payload(r):
-    return {"schemaVersion": r.schema_version, "datasetId": r.dataset_id, "instructionSetId": r.instruction_set_id,
+    return {"schemaVersion": r.schema_version, "symbol": r.symbol, "timeframeMs": r.timeframe_ms,
+        "datasetId": r.dataset_id, "instructionSetId": r.instruction_set_id,
         "bindingSetId": r.binding_set_id, "replayConfigId": r.replay_config_id, "capitalModelId": r.capital_model_id,
         "costModelId": r.cost_model_id, "initialEquity": float(r.initial_equity), "finalEquity": float(r.final_equity),
         "tradeCount": r.trade_count, "tradeIds": [t.trade_id for t in r.trades]}
@@ -370,6 +371,7 @@ def run_stage5r1_protective_replay(*, bars, instructions, protective_bindings, c
     rc_id = _replay_config_id(config)
     cm_id, co_id = capital_model_id(capital), cost_model_id(cost)
     rid = canonical_sha256({"schemaVersion": PROTECTIVE_REPLAY_RESULT_SCHEMA,
+        "symbol": config.symbol, "timeframeMs": config.timeframe_ms,
         "datasetId": ds_id, "instructionSetId": is_id, "bindingSetId": bs_id,
         "replayConfigId": rc_id, "capitalModelId": cm_id, "costModelId": co_id,
         "initialEquity": float(capital.initial_equity), "finalEquity": float(current_eq),

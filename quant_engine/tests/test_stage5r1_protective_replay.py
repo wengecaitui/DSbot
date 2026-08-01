@@ -399,5 +399,200 @@ class MoreFailClosedTests(unittest.TestCase):
         self.assertNotEqual(r1.replay_id, r2.replay_id)
 
 
+# ======== STAGE GATE TESTS (17 new) ========
+
+class ResultSymbolGateTests(unittest.TestCase):
+    def test_symbol_mutation_rejects(self):
+        b = bars(200); r = _run(b, _insts(b), _p_long(stop=100, tp=999))
+        with self.assertRaisesRegex(ValueError, "RES_ID_MISMATCH"):
+            ProtectiveReplayResult(schema_version=r.schema_version, symbol="ETH/USDT",
+                timeframe_ms=r.timeframe_ms, dataset_id=r.dataset_id,
+                instruction_set_id=r.instruction_set_id, binding_set_id=r.binding_set_id,
+                replay_config_id=r.replay_config_id, capital_model_id=r.capital_model_id,
+                cost_model_id=r.cost_model_id, initial_equity=r.initial_equity,
+                final_equity=r.final_equity, trade_count=r.trade_count,
+                trades=r.trades, selections=r.selections, replay_id=r.replay_id)
+
+    def test_symbol_change_binds_replay_id(self):
+        b = bars(200); insts = _insts(b); p = _p_long(stop=100, tp=999)
+        bind = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[99].open_time_ms, plan=p),)
+        r1 = run_stage5r1_protective_replay(bars=b, instructions=insts, protective_bindings=bind,
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+        r2 = run_stage5r1_protective_replay(bars=b, instructions=insts, protective_bindings=bind,
+            config=ReplayConfig(symbol="ETH/USDT"), capital=_CM, cost=_ZC)
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+
+class ExecutionBarGateTests(unittest.TestCase):
+    def test_gap_stop_below_open_289_stop_290(self):
+        b = list(bars(200))
+        b[111] = bar(b[111].open_time_ms, 289, 300, 285, 295)
+        p = _p_long(stop=100, tp=999)  # no trigger through signal bar
+        self.assertLessEqual(b[111].open, 290)
+        r = _run(b, _insts(b), p)
+        self.assertEqual(r.selections[0].source, "EXPLICIT_NEXT_OPEN")
+        self.assertEqual(r.selections[0].raw_exit_price, 289.0)
+
+    def test_intrabar_stop_below_open_300_low_289_stop_290(self):
+        b = list(bars(200))
+        b[111] = bar(b[111].open_time_ms, 300, 350, 289, 319)
+        p = _p_long(stop=100, tp=999)  # no trigger through signal bar
+        self.assertLessEqual(b[111].low, 290)
+        r = _run(b, _insts(b), p)
+        self.assertEqual(r.selections[0].source, "EXPLICIT_NEXT_OPEN")
+        self.assertEqual(r.selections[0].raw_exit_price, 300.0)
+
+
+class NestedLineageGateTests(unittest.TestCase):
+    def _make_r(self):
+        return _run(bars(200), _insts(bars(200)), _p_long(stop=100, tp=999))
+
+    def test_bid_mismatch_via_selection(self):
+        r = self._make_r(); t = r.trades[0]; s = r.selections[0]
+        pl_d = {"schemaVersion": s.schema_version, "arbitrationPolicy": s.arbitration_policy,
+            "accountingTimePolicy": s.accounting_time_policy, "source": s.source, "reason": s.reason,
+            "explicitOutcome": s.explicit_outcome,
+            "entrySignalBarOpenTimeMs": s.entry_signal_bar_open_time_ms,
+            "entryExecutionTimeMs": s.entry_execution_time_ms,
+            "pairedExitSignalBarOpenTimeMs": s.paired_exit_signal_bar_open_time_ms,
+            "explicitExitExecutionTimeMs": s.explicit_exit_execution_time_ms,
+            "selectedExitBarIndex": s.selected_exit_bar_index,
+            "selectedExitBarOpenTimeMs": s.selected_exit_bar_open_time_ms,
+            "rawEntryPrice": float(s.raw_entry_price), "rawExitPrice": float(s.raw_exit_price),
+            "bindingId": "c"*64, "planId": s.plan_id,
+            "protectiveResolutionId": s.protective_resolution_id,
+            "protectiveEventId": s.protective_event_id}
+        sid = canonical_sha256(pl_d)
+        s2 = ReplayExitSelection(schema_version=s.schema_version, arbitration_policy=s.arbitration_policy,
+            accounting_time_policy=s.accounting_time_policy, source=s.source, reason=s.reason,
+            explicit_outcome=s.explicit_outcome, entry_signal_bar_open_time_ms=s.entry_signal_bar_open_time_ms,
+            entry_execution_time_ms=s.entry_execution_time_ms,
+            paired_exit_signal_bar_open_time_ms=s.paired_exit_signal_bar_open_time_ms,
+            explicit_exit_execution_time_ms=s.explicit_exit_execution_time_ms,
+            selected_exit_bar_index=s.selected_exit_bar_index,
+            selected_exit_bar_open_time_ms=s.selected_exit_bar_open_time_ms,
+            raw_entry_price=s.raw_entry_price, raw_exit_price=s.raw_exit_price,
+            binding_id="c"*64, plan_id=s.plan_id,
+            protective_resolution_id=s.protective_resolution_id,
+            protective_event_id=s.protective_event_id, selection_id=sid)
+        rpl = {"schemaVersion": r.schema_version, "symbol": r.symbol, "timeframeMs": r.timeframe_ms,
+            "datasetId": r.dataset_id, "instructionSetId": r.instruction_set_id,
+            "bindingSetId": r.binding_set_id, "replayConfigId": r.replay_config_id,
+            "capitalModelId": r.capital_model_id, "costModelId": r.cost_model_id,
+            "initialEquity": float(r.initial_equity), "finalEquity": float(r.final_equity),
+            "tradeCount": 1, "tradeIds": [t.trade_id]}
+        rid = canonical_sha256(rpl)
+        with self.assertRaisesRegex(ValueError, "RES_SID_MISMATCH_0"):
+            ProtectiveReplayResult(schema_version=r.schema_version, symbol=r.symbol,
+                timeframe_ms=r.timeframe_ms, dataset_id=r.dataset_id,
+                instruction_set_id=r.instruction_set_id, binding_set_id=r.binding_set_id,
+                replay_config_id=r.replay_config_id, capital_model_id=r.capital_model_id,
+                cost_model_id=r.cost_model_id, initial_equity=r.initial_equity,
+                final_equity=r.final_equity, trade_count=1,
+                trades=(t,), selections=(s2,), replay_id=rid)
+
+
+class NoLookaheadGateTests(unittest.TestCase):
+    def test_post_trigger_ohlc_no_effect_on_ids(self):
+        b1 = list(bars(200)); b1[105] = bar(b1[105].open_time_ms, 305, 306, 289, 305.5)
+        insts = _insts(b1); b2 = list(b1)
+        b2[106] = bar(b2[106].open_time_ms, 999, 1000, 998, 999.5)
+        p = _p_long()
+        bind = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b1[99].open_time_ms, plan=p),)
+        r1 = run_stage5r1_protective_replay(bars=b1, instructions=insts, protective_bindings=bind,
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+        r2 = run_stage5r1_protective_replay(bars=b2, instructions=_insts(b2), protective_bindings=bind,
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+        self.assertEqual(r1.selections[0].protective_resolution_id, r2.selections[0].protective_resolution_id)
+        self.assertEqual(r1.trades[0].selection_id, r2.trades[0].selection_id)
+        self.assertEqual(r1.trades[0].accounting_id, r2.trades[0].accounting_id)
+        self.assertEqual(r1.trades[0].trade_id, r2.trades[0].trade_id)
+        self.assertNotEqual(r1.dataset_id, r2.dataset_id)
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+    def test_pre_trigger_volume_no_effect_on_ids(self):
+        b1 = list(bars(200)); b1[105] = bar(b1[105].open_time_ms, 305, 306, 289, 305.5)
+        insts = _insts(b1); b2 = list(b1)
+        b2[100] = bar(b2[100].open_time_ms, b2[100].open, b2[100].high, b2[100].low, b2[100].close, v=9999)
+        p = _p_long()
+        bind = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b1[99].open_time_ms, plan=p),)
+        r1 = run_stage5r1_protective_replay(bars=b1, instructions=insts, protective_bindings=bind,
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+        r2 = run_stage5r1_protective_replay(bars=b2, instructions=_insts(b2), protective_bindings=bind,
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+        self.assertEqual(r1.selections[0].protective_resolution_id, r2.selections[0].protective_resolution_id)
+        self.assertEqual(r1.trades[0].selection_id, r2.trades[0].selection_id)
+        self.assertEqual(r1.trades[0].trade_id, r2.trades[0].trade_id)
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+    def test_post_explicit_ohlc_no_effect_on_selection(self):
+        b1 = list(bars(200))
+        b1[111] = bar(b1[111].open_time_ms, 310, 320, 305, 315)
+        b2 = list(b1)
+        b2[112] = bar(b2[112].open_time_ms, 999, 1000, 998, 999.5)
+        p = _p_long(stop=100, tp=999)
+        bind = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b1[99].open_time_ms, plan=p),)
+        r1 = run_stage5r1_protective_replay(bars=b1, instructions=_insts(b1), protective_bindings=bind,
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+        r2 = run_stage5r1_protective_replay(bars=b2, instructions=_insts(b2), protective_bindings=bind,
+            config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+        self.assertEqual(r1.trades[0].selection_id, r2.trades[0].selection_id)
+        self.assertNotEqual(r1.replay_id, r2.replay_id)
+
+
+class FailClosedGateTests(unittest.TestCase):
+    def test_binding_id_forged_rejects(self):
+        b = bars(200); p = _p_long()
+        real = ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[99].open_time_ms, plan=p)
+        fb = ProtectiveReplayBinding.__new__(ProtectiveReplayBinding)
+        for k, v in [("schema_version", real.schema_version),
+                      ("entry_signal_bar_open_time_ms", real.entry_signal_bar_open_time_ms),
+                      ("plan", real.plan), ("binding_id", "a"*64)]:
+            object.__setattr__(fb, k, v)
+        with self.assertRaisesRegex(ValueError, "BINDING_ID_MISMATCH"):
+            run_stage5r1_protective_replay(bars=b, instructions=_insts(b), protective_bindings=[fb],
+                config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+
+    def test_result_schema_forged_rejects(self):
+        with self.assertRaisesRegex(ValueError, "RES_SCHEMA_INVALID"):
+            ProtectiveReplayResult(schema_version="wrong", symbol="X", timeframe_ms=300000,
+                dataset_id="a"*64, instruction_set_id="a"*64, binding_set_id="a"*64,
+                replay_config_id="a"*64, capital_model_id="a"*64, cost_model_id="a"*64,
+                initial_equity=100.0, final_equity=100.0, trade_count=0,
+                trades=(), selections=(), replay_id="a"*64)
+
+    def test_final_eq_nan_rejects(self):
+        with self.assertRaisesRegex(ValueError, "RES_FEQ_INVALID"):
+            ProtectiveReplayResult(schema_version=PROTECTIVE_REPLAY_RESULT_SCHEMA, symbol="X",
+                timeframe_ms=300000, dataset_id="a"*64, instruction_set_id="a"*64,
+                binding_set_id="a"*64, replay_config_id="a"*64, capital_model_id="a"*64,
+                cost_model_id="a"*64, initial_equity=100.0, final_equity=float("nan"),
+                trade_count=0, trades=(), selections=(), replay_id="a"*64)
+
+    def test_unsorted_bindings_rejects_with_exact_error(self):
+        b = bars(300); p = _p_long(stop=100, tp=999)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT),
+                 ReplayInstruction(signal_bar_open_time_ms=b[150].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[170].open_time_ms, action=ReplayAction.EXIT))
+        bind = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[150].open_time_ms, plan=p),
+                ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[99].open_time_ms, plan=p))
+        with self.assertRaisesRegex(ValueError, "BINDING_TIME_MISMATCH_AT_0"):
+            run_stage5r1_protective_replay(bars=b, instructions=insts, protective_bindings=bind,
+                config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+
+    def test_consecutive_exit_rejects_with_exact_error(self):
+        b = bars(300)
+        insts = (ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
+                 ReplayInstruction(signal_bar_open_time_ms=b[110].open_time_ms, action=ReplayAction.EXIT),
+                 ReplayInstruction(signal_bar_open_time_ms=b[150].open_time_ms, action=ReplayAction.EXIT),
+                 ReplayInstruction(signal_bar_open_time_ms=b[170].open_time_ms, action=ReplayAction.ENTER_LONG))
+        bind = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[99].open_time_ms, plan=_p_long(stop=100, tp=999)),
+                ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[170].open_time_ms, plan=_p_long(stop=100, tp=999)))
+        with self.assertRaisesRegex(ValueError, "PAIRING_FIRST_NOT_ENTER: index=2"):
+            run_stage5r1_protective_replay(bars=b, instructions=insts, protective_bindings=bind,
+                config=ReplayConfig(symbol="BTC/USDT"), capital=_CM, cost=_ZC)
+
+
 if __name__ == "__main__":
     unittest.main()
