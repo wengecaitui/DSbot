@@ -595,7 +595,7 @@ def produce_observations(*, spec: Stage5FrozenRuleSpec, snapshots: tuple, datase
         if snap.dataset_id!=dataset_id: raise ValueError(f"PROD_SNAP_DATASET_{i}")
         if snap.symbol!=symbol: raise ValueError(f"PROD_SNAP_SYMBOL_{i}")
         if snap.has_outputs:
-            if tuple(sorted(_thaw(snap.components).keys()))!=spec.components:
+            if tuple(sorted(_thaw(snap.components).keys()))!=tuple(sorted(spec.components)):
                 raise ValueError(f"PROD_SNAP_COMPS_{i}")
             outputs = snap._comp_dict()
             for rules in (spec.entry_rules,spec.exit_rules):

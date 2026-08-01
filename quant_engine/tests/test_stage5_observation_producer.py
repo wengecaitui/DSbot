@@ -701,6 +701,141 @@ class ProducerTests(unittest.TestCase):
         from quant_engine.proof.stage5_observation_producer import _safe_compare
         self.assertTrue(_safe_compare(0.7,"gte",0.5))
 
+    # --- 2B.2: authoritative four-candidate matrix ---
+    @staticmethod
+    def _load_manifest():
+        import json,os
+        path = os.path.join(os.path.dirname(__file__),"..","..","docs","releases","stage-4a12-candidate-manifest.json")
+        with open(path) as f: return json.load(f)
+
+    def test_manifest_candidate_count_and_spec_ids(self):
+        m = self._load_manifest()
+        self.assertEqual(m["candidateCount"], 4)
+        self.assertEqual(len(m["specs"]), 4)
+        expected = [
+            "derived-trend-stochastic-confirmation-ca529176d8c82a01",
+            "derived-stc-trend-filter-5682c752bef50a0c",
+            "derived-mean-reversion-trend-guard-262ffac08c1acf35",
+            "derived-support-resistance-risk-entry-01ef09c554af0da8",
+        ]
+        self.assertEqual(set(s["strategyId"] for s in m["specs"]), set(expected))
+        self.assertTrue(all(len(s["parameters"]["candidateSets"]) == 3 for s in m["specs"]))
+        for s in m["specs"]:
+            self.assertIn("specId", s)
+            self.assertTrue(len(s["specId"]) == 64)
+            # Every component has sourceAssetDigests with SHA fields
+            for c in s["components"]:
+                dig = s["sourceAssetDigests"].get(c["assetId"])
+                self.assertIsNotNone(dig, f"missing digest for {c['assetId']}")
+                for k in ["pineSha256","pythonSymbolSha256","registryEntrySha256"]:
+                    self.assertIn(k, dig)
+
+    def test_spec_id_matches_canonical_payload(self):
+        m = self._load_manifest()
+        for s in m["specs"]:
+            payload = {k:v for k,v in s.items() if k != "specId"}
+            self.assertEqual(canonical_sha256(payload), s["specId"],
+                f"specId mismatch for {s['strategyId']}")
+
+    def test_all_12_parameter_bindings(self):
+        m = self._load_manifest()
+        bindings = set()
+        for s in m["specs"]:
+            payload = {k:v for k,v in s.items() if k != "specId"}
+            for ps in s["parameters"]["candidateSets"]:
+                spec = create_frozen_rule_spec(dict(payload), s["specId"], dict(ps))
+                self.assertEqual(spec.strategy_id, s["strategyId"])
+                self.assertEqual(spec.spec_id, s["specId"])
+                self.assertEqual(spec.parameter_id, canonical_sha256(ps))
+                # Deterministic frozen ID
+                spec2 = create_frozen_rule_spec(dict(payload), s["specId"], dict(ps))
+                self.assertEqual(spec.frozen_id, spec2.frozen_id)
+                bindings.add((spec.strategy_id, spec.parameter_id))
+                self.assertEqual(len(spec.components), len(s["components"]),
+                    f"component count mismatch for {s['strategyId']}")
+        self.assertEqual(len(bindings), 12)
+
+    def _real_fixture(self, spec_index, param_index, components):
+        m = self._load_manifest()
+        s = m["specs"][spec_index]
+        payload = {k:v for k,v in s.items() if k != "specId"}
+        ps = list(s["parameters"]["candidateSets"])[param_index]
+        spec = create_frozen_rule_spec(dict(payload), s["specId"], dict(ps))
+        snap = _snap(spec, 0, components=components)
+        batch = self._produce(spec, (snap,))
+        verified = verify_observation_batch(batch=batch, spec=spec, snapshots=(snap,),
+            dataset_id=_DID, symbol=_SYM, scored_start_open_time_ms=0,
+            scored_end_exclusive_open_time_ms=F*2)
+        self.assertIs(verified, batch)
+        return batch.observations[0]
+
+    def test_trend_stochastic_real_output(self):
+        o = self._real_fixture(0, 0, {
+            "TrendImpulse": {"signal": "BULL", "name": "TI"},
+            "StochasticOverlay": {"signal": "BUY", "name": "SO"},
+        })
+        self.assertTrue(o.long_entry); self.assertFalse(o.short_entry)
+        self.assertFalse(o.long_exit); self.assertTrue(o.short_exit)
+
+    def test_stc_trend_real_output(self):
+        o = self._real_fixture(1, 0, {
+            "STC": {"signal": "BUY", "trend": "BEAR", "name": "STC"},
+            "TrendImpulse": {"signal": "BULL", "name": "TI"},
+        })
+        self.assertTrue(o.long_entry); self.assertFalse(o.short_entry)
+        self.assertTrue(o.long_exit); self.assertFalse(o.short_exit)
+
+    def test_mean_reversion_real_output(self):
+        o = self._real_fixture(2, 0, {
+            "MeanReversion": {"signal": "BUY", "probability": 0.5, "name": "MR"},
+            "TrendImpulse": {"signal": "BULL", "name": "TI"},
+        })
+        self.assertTrue(o.long_entry); self.assertFalse(o.short_entry)
+        self.assertTrue(o.long_exit); self.assertTrue(o.short_exit)
+
+    def test_support_resistance_real_output(self):
+        o = self._real_fixture(3, 0, {
+            "SRRange": {"signal": "BULLISH", "position": "LONG", "name": "SR"},
+            "TrendImpulse": {"signal": "BULL", "name": "TI"},
+        })
+        self.assertTrue(o.long_entry); self.assertFalse(o.short_entry)
+        self.assertFalse(o.long_exit); self.assertTrue(o.short_exit)
+
+    def test_all_mode_one_false_rejects_entry(self):
+        m = self._load_manifest()
+        s = m["specs"][0]; payload = {k:v for k,v in s.items() if k != "specId"}
+        ps = list(s["parameters"]["candidateSets"])[0]
+        spec = create_frozen_rule_spec(dict(payload), s["specId"], dict(ps))
+        snap = _snap(spec, 0, components={
+            "TrendImpulse": {"signal": "BULL", "name": "TI"},
+            "StochasticOverlay": {"signal": "WATCH", "name": "SO"},
+        })
+        b = self._produce(spec, (snap,))
+        self.assertFalse(b.observations[0].long_entry)
+        self.assertTrue(b.observations[0].short_exit)
+
+    def test_any_mode_real_exit_true(self):
+        m = self._load_manifest()
+        s = m["specs"][2]; payload = {k:v for k,v in s.items() if k != "specId"}
+        ps = list(s["parameters"]["candidateSets"])[0]
+        spec = create_frozen_rule_spec(dict(payload), s["specId"], dict(ps))
+        snap = _snap(spec, 0, components={
+            "MeanReversion": {"signal": "BUY", "probability": 0.6, "name": "MR"},
+            "TrendImpulse": {"signal": "BULL", "name": "TI"},
+        })
+        b = self._produce(spec, (snap,))
+        self.assertTrue(b.observations[0].long_exit)
+
+    def test_tampered_digest_rejects_spec_id(self):
+        m = self._load_manifest()
+        s = m["specs"][0]; payload = {k:v for k,v in s.items() if k != "specId"}
+        original = dict(payload)
+        payload["sourceAssetDigests"] = dict(payload["sourceAssetDigests"])
+        payload["sourceAssetDigests"]["TrendImpulse"] = {"fake":"not-a-sha"}
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(payload, s["specId"], dict(list(s["parameters"]["candidateSets"])[0]))
+        self.assertEqual({k:v for k,v in s.items() if k != "specId"}, original)
+
 
 if __name__=="__main__":
     unittest.main()
