@@ -191,17 +191,6 @@ class ProducerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._produce(spec,tuple(_snap(spec,i*F,components={"TrendImpulse":{"signal":"BULL"}}) for i in range(10)),scored_end=F*10)
 
-    def test_forbidden_imports(self):
-        import ast,os
-        path = os.path.join(os.path.dirname(__file__),"..","proof","stage5_observation_producer.py")
-        with open(path) as f: tree = ast.parse(f.read())
-        imports = set()
-        for node in ast.walk(tree):
-            if isinstance(node,ast.Import): imports.update(a.name for a in node.names)
-            elif isinstance(node,ast.ImportFrom) and node.module: imports.add(node.module)
-        for fbd in {"strategy_spec","strategy_adapter","stage5_harness","stage5r1_replay","stage5r1_protective_replay","numpy","pandas","indicators"}:
-            self.assertFalse(any(fbd in i for i in imports),f"Forbidden:{fbd}")
-
     def test_hostile_spec_factory_plain_obj(self):
         class H:
             def __bool__(self): raise RuntimeError("X")
@@ -359,33 +348,6 @@ class ProducerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._produce(_trend_spec(),(_snap(_trend_spec(),0,components={"TrendImpulse":{}}),))
 
-    def test_transitive_no_forbidden(self):
-        import ast,importlib.util,os
-        forbidden = {"strategy_spec","strategy_adapter","stage5_harness","stage5r1_replay","stage5r1_protective_replay","numpy","pandas","indicators"}
-        required = {"quant_engine.proof.stage5_observation_producer","quant_engine.proof.stage5_intent_compiler","quant_engine.proof.stage5_evaluation"}
-        visited,parsed,queue = set(),set(),["quant_engine.proof.stage5_observation_producer"]
-        proj = os.path.realpath(os.path.join(os.path.dirname(__file__),".."))
-        while queue:
-            mn = queue.pop(0)
-            if mn in visited: continue
-            visited.add(mn)
-            try: spec = importlib.util.find_spec(mn)
-            except: self.fail(f"find_spec:{mn}")
-            if not spec or not spec.origin: self.fail(f"no_origin:{mn}")
-            p = os.path.realpath(spec.origin)
-            if not p.startswith(proj): continue
-            with open(p) as f: tree = ast.parse(f.read())
-            parsed.add(mn)
-            for n in ast.walk(tree):
-                if isinstance(n,ast.Import):
-                    for a in n.names:
-                        if a.name.startswith("quant_engine"): queue.append(a.name)
-                elif isinstance(n,ast.ImportFrom) and n.module and n.module.startswith("quant_engine"):
-                    queue.append(n.module)
-        for r in required: self.assertIn(r,parsed,f"Missing:{r}")
-        found = {m for f in forbidden for m in visited if f in m}
-        self.assertEqual(found,set(),f"Forbidden transitive:{found}")
-
     # --- RED: exact-patch regression ---
     def test_freeze_tuple_input_rejected(self):
         with self.assertRaises(ValueError): _freeze((1,2))
@@ -503,6 +465,95 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(s.strategy_id, spec.strategy_id)
         self.assertEqual(s.spec_id, spec.spec_id)
         self.assertEqual(s.parameter_id, spec.parameter_id)
+
+    # --- Revision 2B tests ---
+    def test_eq_strict_type_bool_int_float_str(self):
+        self.assertNotEqual(_freeze(True),_freeze(1)); self.assertNotEqual(_freeze(1),_freeze(1.0))
+
+    def test_gte_lte_reject_non_numeric(self):
+        from quant_engine.proof.stage5_observation_producer import _safe_compare
+        for bad in [(True,0),("0",0),([1],0),({},0)]:
+            with self.subTest(v=bad):
+                with self.assertRaises(ValueError):_safe_compare(bad[0],"gte",bad[1])
+                with self.assertRaises(ValueError):_safe_compare(bad[0],"lte",bad[1])
+
+    def test_gte_numeric_boundary(self):
+        from quant_engine.proof.stage5_observation_producer import _safe_compare
+        self.assertTrue(_safe_compare(0.5,"gte",0.5)); self.assertFalse(_safe_compare(0.499,"gte",0.5))
+
+    def test_lte_numeric_boundary(self):
+        from quant_engine.proof.stage5_observation_producer import _safe_compare
+        self.assertTrue(_safe_compare(0.5,"lte",0.5)); self.assertFalse(_safe_compare(0.501,"lte",0.5))
+
+    def test_direct_tamper_fields_fail_closed(self):
+        for field in ["strategy_id","spec_payload","warmup_bars","symbols","components","entry_rules"]:
+            t = _trend_spec(); object.__setattr__(t,field,{"x":"y"})
+            with self.subTest(f=field), self.assertRaises(ValueError):
+                Stage5FrozenRuleSpec.__post_init__(t)
+
+    def test_caller_spec_payload_unchanged(self):
+        p=_trend_impulse_payload(); orig=dict(p)
+        create_frozen_rule_spec(p,_spec_id(p),{"tp":21,"tm":2.0,"max_holding_bars":96})
+        self.assertEqual(p,orig)
+
+    def test_caller_param_set_unchanged(self):
+        p=_trend_impulse_payload(); ps={"tp":21,"tm":2.0,"max_holding_bars":96}; orig=dict(ps)
+        create_frozen_rule_spec(p,_spec_id(p),ps); self.assertEqual(ps,orig)
+
+    def test_caller_outputs_unchanged(self):
+        spec=_trend_spec(); out={"TrendImpulse":{"signal":"BULL"}}; orig=dict(out)
+        _snap(spec,0,components=out); self.assertEqual(out,orig)
+
+    def test_caller_snapshots_tuple_unchanged(self):
+        spec=_trend_spec(); ss=(_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}}),)
+        ids=tuple(t.snapshot_id for t in ss); self._produce(spec,ss)
+        self.assertEqual(tuple(t.snapshot_id for t in ss),ids)
+
+    def test_batch_id_sensitive_to_frozen_spec_id(self):
+        spec=_trend_spec(); snaps=(_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}}),)
+        b=produce_observations(spec=spec,snapshots=snaps,dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
+        object.__setattr__(b,"frozen_spec_id","x"*64)
+        with self.assertRaises(ValueError): Stage5ObservationBatch.__post_init__(b)
+
+    def test_transitive_no_forbidden_via_exact_roots(self):
+        import ast,importlib.util,os
+        fbd=["quant_engine.strategy_spec","quant_engine.strategy_adapter","quant_engine.stage5_harness",
+             "quant_engine.stage5r1_replay","quant_engine.stage5r1_protective_replay","pandas","numpy","quant_engine.indicators"]
+        required=["quant_engine.proof.stage5_observation_producer","quant_engine.proof.stage5_intent_compiler","quant_engine.proof.stage5_evaluation"]
+        visited,parsed,queue=set(),set(),["quant_engine.proof.stage5_observation_producer"]
+        proj=os.path.realpath(os.path.join(os.path.dirname(__file__),".."))
+        while queue:
+            mn=queue.pop(0)
+            if mn in visited: continue
+            visited.add(mn)
+            try:ms=importlib.util.find_spec(mn)
+            except:self.fail(f"find_spec:{mn}")
+            if not ms or not ms.origin:self.fail(f"no_origin:{mn}")
+            fp=os.path.realpath(ms.origin)
+            if not fp.startswith(proj):continue
+            with open(fp) as f:tree=ast.parse(f.read())
+            parsed.add(mn)
+            for n in ast.walk(tree):
+                if isinstance(n,ast.Import):
+                    for a in n.names:queue.append(a.name)
+                elif isinstance(n,ast.ImportFrom) and n.module:
+                    if n.level==0:queue.append(n.module)
+                    else:
+                        base=mn.rsplit(".",n.level)[0] if n.level>0 else mn
+                        queue.append(f"{base}.{n.module}" if n.module else base)
+        for r in required:self.assertIn(r,parsed,f"missing:{r}")
+        for f in fbd:self.assertFalse(any(m==f or m.startswith(f+".") for m in visited),f"Forbidden:{f}")
+        self.assertTrue(any("stage5_intent" in m for m in visited),"self-test")
+
+    def test_all_mode_all_clauses_needed(self):
+        from quant_engine.proof.stage5_observation_producer import _safe_compare
+        self.assertTrue(_safe_compare("BULL","eq","BULL"))
+        self.assertFalse(_safe_compare("BULL","eq","BEAR"))
+
+    def test_any_mode_one_sufficient(self):
+        from quant_engine.proof.stage5_observation_producer import _safe_compare
+        self.assertTrue(_safe_compare(0.7,"gte",0.5))
 
 
 if __name__=="__main__":
