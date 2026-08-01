@@ -6,9 +6,11 @@ from quant_engine.proof.stage5_observation_producer import (
     Stage5FrozenRuleSpec, Stage5ComponentSnapshot, Stage5ObservationBatch,
     create_frozen_rule_spec, create_component_snapshot,
     produce_observations, verify_observation_batch,
-    _freeze, _thaw,
+    _freeze, _thaw, SNAPSHOT_SCHEMA,
 )
-from quant_engine.proof.stage5_intent_compiler import Stage5StrategyIntentObservation
+from quant_engine.proof.stage5_intent_compiler import (
+    Stage5StrategyIntentObservation, create_stage5_strategy_intent_observation,
+)
 from quant_engine.proof.stage5_evaluation import canonical_sha256
 
 F = 300_000
@@ -420,6 +422,19 @@ class ProducerTests(unittest.TestCase):
     def _recompute_id(self, spec):
         from quant_engine.proof.stage5_observation_producer import _frozen_spec_identity_payload
         object.__setattr__(spec, "frozen_id", canonical_sha256(_frozen_spec_identity_payload(spec)))
+
+    def _recompute_snapshot_id(self, snap):
+        payload = {"schemaVersion":SNAPSHOT_SCHEMA,"strategyId":snap.strategy_id,
+            "specId":snap.spec_id,"parameterId":snap.parameter_id,
+            "datasetId":snap.dataset_id,"symbol":snap.symbol,
+            "barOpenTimeMs":snap.bar_open_time_ms,"hasOutputs":snap.has_outputs,
+            "components":_thaw(snap.components)}
+        object.__setattr__(snap, "snapshot_id", canonical_sha256(payload))
+        Stage5ComponentSnapshot.__post_init__(snap)
+
+    def _recompute_batch_id(self, batch):
+        object.__setattr__(batch, "batch_id", canonical_sha256(batch._batch_payload()))
+        Stage5ObservationBatch.__post_init__(batch)
 
     def test_direct_spec_candidate_membership_rejected(self):
         spec = _trend_spec()
@@ -852,10 +867,138 @@ class ProducerTests(unittest.TestCase):
             create_frozen_rule_spec(payload, s["specId"], ps)
         self.assertEqual(m, orig)
 
-    # --- 2C: direct-construction adversarial closure ---
+    # --- 2C.1: authoritative field route tables ---
     def _fresh_spec(self):
         return _trend_spec()
 
+    SPEC_FIELDS = {"schema_version","spec_payload","param_payload","strategy_id","version",
+        "spec_id","parameter_id","components","symbols","entry_rules","exit_rules","warmup_bars","frozen_id"}
+    SNAP_FIELDS = {"schema_version","strategy_id","spec_id","parameter_id","dataset_id",
+        "symbol","bar_open_time_ms","has_outputs","components","snapshot_id"}
+    BATCH_FIELDS = {"schema_version","strategy_id","frozen_spec_id","spec_id","parameter_id",
+        "dataset_id","symbol","scored_start_open_time_ms","scored_end_exclusive_open_time_ms",
+        "observations","snapshot_ids","batch_id"}
+
+    def test_authoritative_spec_field_table(self):
+        spec=self._fresh_spec(); fid=spec.frozen_id
+        # schema_version
+        s=self._fresh_spec(); object.__setattr__(s,"schema_version","bad")
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # strategy_id
+        s=self._fresh_spec(); object.__setattr__(s,"strategy_id","bad")
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # version
+        s=self._fresh_spec(); object.__setattr__(s,"version","")
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # spec_id
+        s=self._fresh_spec(); object.__setattr__(s,"spec_id","0"*64); self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # parameter_id
+        s=self._fresh_spec(); object.__setattr__(s,"parameter_id","0"*64); self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # components
+        s=self._fresh_spec(); object.__setattr__(s,"components",("X",)); self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # symbols
+        s=self._fresh_spec(); object.__setattr__(s,"symbols",("X",)); self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # entry_rules — reversed order, valid structure, recomputed frozen_id
+        s=self._fresh_spec(); er=list(s.entry_rules); object.__setattr__(s,"entry_rules",tuple(reversed(er)))
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # exit_rules
+        s=self._fresh_spec(); xr=list(s.exit_rules); object.__setattr__(s,"exit_rules",tuple(reversed(xr)))
+        self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # warmup_bars
+        s=self._fresh_spec(); object.__setattr__(s,"warmup_bars",1); self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # spec_payload — malformed tagged dict
+        s=self._fresh_spec(); object.__setattr__(s,"spec_payload",("list",)); self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # param_payload
+        s=self._fresh_spec(); object.__setattr__(s,"param_payload",("list",)); self._recompute_id(s)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+        # frozen_id
+        s=self._fresh_spec(); object.__setattr__(s,"frozen_id","0"*64)
+        with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
+
+    def test_authoritative_snapshot_route_table(self):
+        import copy
+        spec=self._fresh_spec(); snap=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        # schema_version → post_init reject
+        s=copy.deepcopy(snap); object.__setattr__(s,"schema_version","bad")
+        with self.assertRaises(ValueError):Stage5ComponentSnapshot.__post_init__(s)
+        # has_outputs + components inconsistent → post_init reject
+        s=copy.deepcopy(snap); object.__setattr__(s,"has_outputs",False)
+        with self.assertRaises(ValueError):Stage5ComponentSnapshot.__post_init__(s)
+        # strategy_id → external reject
+        s=copy.deepcopy(snap); object.__setattr__(s,"strategy_id","derived-bad"); self._recompute_snapshot_id(s)
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+        # spec_id → external reject
+        s=copy.deepcopy(snap); object.__setattr__(s,"spec_id","0"*64); self._recompute_snapshot_id(s)
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+        # parameter_id → external reject
+        s=copy.deepcopy(snap); object.__setattr__(s,"parameter_id","0"*64); self._recompute_snapshot_id(s)
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+        # dataset_id → external reject
+        s=copy.deepcopy(snap); object.__setattr__(s,"dataset_id","0"*64); self._recompute_snapshot_id(s)
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+        # symbol → external reject
+        s=copy.deepcopy(snap); object.__setattr__(s,"symbol","ETH/USDT"); self._recompute_snapshot_id(s)
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+        # bar_open_time_ms aligned alternate → external reject (time mismatch)
+        s=copy.deepcopy(snap); object.__setattr__(s,"bar_open_time_ms",F); self._recompute_snapshot_id(s)
+        with self.assertRaises(ValueError):self._produce(spec,(s,))
+        # components value changed → external reject via verifier
+        s=copy.deepcopy(snap); s2=_snap(spec,0,components={"TrendImpulse":{"signal":"BEAR"}})
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=self._produce(spec,(snap,)),spec=spec,snapshots=(s2,),
+                dataset_id=_DID,symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+
+    def test_authoritative_batch_route_table(self):
+        import copy
+        spec=self._fresh_spec(); snap=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        b=produce_observations(spec=spec,snapshots=(snap,),dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        # schema_version, strategy_id, spec_id, parameter_id, dataset_id, symbol, start, end → post_init reject
+        for field,val in [("schema_version","bad"),("strategy_id","bad"),
+            ("spec_id","0"*64),("parameter_id","0"*64),("dataset_id","0"*64),
+            ("symbol","ETH/USDT"),("scored_start_open_time_ms",F),
+            ("scored_end_exclusive_open_time_ms",4*F)]:
+            b2=copy.deepcopy(b); object.__setattr__(b2,field,val)
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):Stage5ObservationBatch.__post_init__(b2)
+                # After recompute, post_init still fails due to nested observation/window binding
+                object.__setattr__(b2,"batch_id",canonical_sha256(b2._batch_payload()))
+                with self.assertRaises(ValueError):Stage5ObservationBatch.__post_init__(b2)
+        # frozen_spec_id → external reject
+        b2=copy.deepcopy(b); object.__setattr__(b2,"frozen_spec_id","0"*64); self._recompute_batch_id(b2)
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=b2,spec=spec,snapshots=(snap,),dataset_id=_DID,
+                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        # observations — one boolean changed, proper observation_id
+        obs0=b.observations[0]
+        alt_obs=create_stage5_strategy_intent_observation(strategy_id=obs0.strategy_id,
+            spec_id=obs0.spec_id,parameter_id=obs0.parameter_id,dataset_id=obs0.dataset_id,
+            symbol=obs0.symbol,signal_bar_open_time_ms=obs0.signal_bar_open_time_ms,
+            has_outputs=obs0.has_outputs,long_entry=not obs0.long_entry,short_entry=obs0.short_entry,
+            long_exit=obs0.long_exit,short_exit=obs0.short_exit)
+        b2=copy.deepcopy(b); object.__setattr__(b2,"observations",(alt_obs,))
+        self._recompute_batch_id(b2)
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=b2,spec=spec,snapshots=(snap,),dataset_id=_DID,
+                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        # snapshot_ids — valid SHA replacement → external reject
+        b2=copy.deepcopy(b); object.__setattr__(b2,"snapshot_ids",("0"*64,)); self._recompute_batch_id(b2)
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=b2,spec=spec,snapshots=(snap,),dataset_id=_DID,
+                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        # batch_id — tamper
+        b2=copy.deepcopy(b); object.__setattr__(b2,"batch_id","0"*64)
+        with self.assertRaises(ValueError):Stage5ObservationBatch.__post_init__(b2)
+
+    # --- preserved 2C names with proper SHA ---
     def test_direct_spec_schema_rejected(self):
         s=self._fresh_spec(); object.__setattr__(s,"schema_version","bad")
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
@@ -869,89 +1012,80 @@ class ProducerTests(unittest.TestCase):
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_direct_spec_spec_id_mismatch_rejected(self):
-        s=self._fresh_spec(); object.__setattr__(s,"spec_id","x"*64)
-        self._recompute_id(s)
+        s=self._fresh_spec(); object.__setattr__(s,"spec_id","0"*64); self._recompute_id(s)
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_direct_spec_parameter_id_mismatch_rejected(self):
-        s=self._fresh_spec(); object.__setattr__(s,"parameter_id","x"*64)
-        self._recompute_id(s)
+        s=self._fresh_spec(); object.__setattr__(s,"parameter_id","0"*64); self._recompute_id(s)
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_direct_spec_components_rejected(self):
-        s=self._fresh_spec(); object.__setattr__(s,"components",("X",))
-        self._recompute_id(s)
+        s=self._fresh_spec(); object.__setattr__(s,"components",("X",)); self._recompute_id(s)
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_direct_spec_symbols_rejected(self):
-        s=self._fresh_spec(); object.__setattr__(s,"symbols",("X",))
-        self._recompute_id(s)
+        s=self._fresh_spec(); object.__setattr__(s,"symbols",("X",)); self._recompute_id(s)
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_direct_spec_entry_rules_empty_rejected(self):
         s=self._fresh_spec(); object.__setattr__(s,"entry_rules",())
-        self._recompute_id(s)
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_direct_spec_exit_rules_empty_rejected(self):
         s=self._fresh_spec(); object.__setattr__(s,"exit_rules",())
-        self._recompute_id(s)
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_direct_spec_warmup_rejected(self):
         s=self._fresh_spec(); object.__setattr__(s,"warmup_bars",1)
-        self._recompute_id(s)
         with self.assertRaises(ValueError):Stage5FrozenRuleSpec.__post_init__(s)
 
     def test_direct_snap_schema_rejected(self):
-        spec=self._fresh_spec(); snap=_snap(spec,0,has_outputs=False)
-        object.__setattr__(snap,"schema_version","bad")
-        with self.assertRaises(ValueError):Stage5ComponentSnapshot.__post_init__(snap)
+        s=_snap(self._fresh_spec(),0,has_outputs=False)
+        object.__setattr__(s,"schema_version","bad")
+        with self.assertRaises(ValueError):Stage5ComponentSnapshot.__post_init__(s)
 
     def test_direct_snap_spec_id_rejected(self):
         spec=self._fresh_spec(); s=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
-        object.__setattr__(s,"spec_id","x"*64)
-        # Self-consistent snapshot may pass post_init; must fail produce_observations
+        object.__setattr__(s,"spec_id","0"*64); self._recompute_snapshot_id(s)
         with self.assertRaises(ValueError):self._produce(spec,(s,))
 
     def test_direct_snap_symbol_lineage_rejected(self):
-        spec=self._fresh_spec(); s=_snap(spec,0,has_outputs=False)
-        object.__setattr__(s,"symbol","ETH/USDT")
+        spec=self._fresh_spec(); s=_snap(spec,0,has_outputs=True,components={"TrendImpulse":{"signal":"BULL"}})
+        object.__setattr__(s,"symbol","ETH/USDT"); self._recompute_snapshot_id(s)
         with self.assertRaises(ValueError):self._produce(spec,(s,))
 
     def test_direct_snap_time_not_aligned_rejected(self):
         spec=self._fresh_spec(); s=_snap(spec,0,has_outputs=False)
-        object.__setattr__(s,"bar_open_time_ms",150000)
-        # Recomputed snapshot_id makes it self-consistent; post_init may accept; produce must reject
+        object.__setattr__(s,"bar_open_time_ms",F); self._recompute_snapshot_id(s)
         with self.assertRaises(ValueError):self._produce(spec,(s,))
 
     def test_direct_snap_components_tamper_rejected(self):
-        spec=self._fresh_spec(); s=_snap(spec,0,has_outputs=False)
-        object.__setattr__(s,"components",("dict",("TrendImpulse",("dict",("signal",("str","BULL"))))))
-        object.__setattr__(s,"has_outputs",True)
-        # Snapshot is now self-consistent; produce must reject component set
-        with self.assertRaises(ValueError):self._produce(spec,(s,))
+        spec=self._fresh_spec(); s=_snap(spec,0,has_outputs=True,components={"TrendImpulse":{"signal":"BULL"}})
+        s2=_snap(spec,0,components={"TrendImpulse":{"signal":"BEAR"}})
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=self._produce(spec,(s,)),spec=spec,snapshots=(s2,),
+                dataset_id=_DID,symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
 
     def test_direct_batch_frozen_id_rejected(self):
-        spec=self._fresh_spec(); snaps=(_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}}),)
-        b=produce_observations(spec=spec,snapshots=snaps,dataset_id=_DID,symbol=_SYM,
-            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
-        object.__setattr__(b,"frozen_spec_id","x"*64)
-        with self.assertRaises(ValueError):Stage5ObservationBatch.__post_init__(b)
+        spec=self._fresh_spec(); snap=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        b=produce_observations(spec=spec,snapshots=(snap,),dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        object.__setattr__(b,"frozen_spec_id","0"*64); self._recompute_batch_id(b)
+        with self.assertRaises(ValueError):
+            verify_observation_batch(batch=b,spec=spec,snapshots=(snap,),dataset_id=_DID,
+                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
 
     def test_direct_batch_dataset_rejected(self):
-        spec=self._fresh_spec(); snaps=(_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}}),)
-        b=produce_observations(spec=spec,snapshots=snaps,dataset_id=_DID,symbol=_SYM,
-            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
-        object.__setattr__(b,"dataset_id","e"*64)
-        # Self-consistent batch passes post_init; must fail verifier
+        spec=self._fresh_spec(); snap=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        b=produce_observations(spec=spec,snapshots=(snap,),dataset_id=_DID,symbol=_SYM,
+            scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
+        object.__setattr__(b,"dataset_id","0"*64)
         with self.assertRaises(ValueError):
-            verify_observation_batch(batch=b,spec=spec,snapshots=snaps,dataset_id=_DID,symbol=_SYM,
-                scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=F*2)
+            verify_observation_batch(batch=b,spec=spec,snapshots=(snap,),dataset_id=_DID,
+                symbol=_SYM,scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=2*F)
 
     def test_direct_batch_observation_order_rejected(self):
-        spec=self._fresh_spec()
-        s1=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        spec=self._fresh_spec(); s1=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
         s2=_snap(spec,F,components={"TrendImpulse":{"signal":"BULL"}})
         b=produce_observations(spec=spec,snapshots=(s1,s2),dataset_id=_DID,symbol=_SYM,
             scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=3*F)
@@ -961,24 +1095,18 @@ class ProducerTests(unittest.TestCase):
 
     def test_batch_identity_sensitivity_table(self):
         import copy
-        spec=self._fresh_spec()
-        s1=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
+        spec=self._fresh_spec(); s1=_snap(spec,0,components={"TrendImpulse":{"signal":"BULL"}})
         s2=_snap(spec,F,components={"TrendImpulse":{"signal":"BULL"}})
         b=produce_observations(spec=spec,snapshots=(s1,s2),dataset_id=_DID,symbol=_SYM,
             scored_start_open_time_ms=0,scored_end_exclusive_open_time_ms=3*F)
         payload=b._batch_payload(); bid0=b.batch_id
-        mut=copy.deepcopy(payload)
-        mut["frozenSpecId"]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["specId"]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["parameterId"]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["datasetId"]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["symbol"]="X"; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["scoredStartOpenTimeMs"]=F; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["scoredEndExclusiveOpenTimeMs"]=4*F; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["observationIds"][0]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["observationIds"][1]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["snapshotIds"][0]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
-        mut=copy.deepcopy(payload); mut["snapshotIds"][1]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+        for mut_val in [{"frozenSpecId":"0"*64},{"specId":"0"*64},{"parameterId":"0"*64},
+            {"datasetId":"0"*64},{"symbol":"X"},{"scoredStartOpenTimeMs":F},
+            {"scoredEndExclusiveOpenTimeMs":4*F}]:
+            mut=copy.deepcopy(payload); mut.update(mut_val); self.assertNotEqual(canonical_sha256(mut),bid0)
+        for i in [0,1]:
+            mut=copy.deepcopy(payload); mut["observationIds"][i]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
+            mut=copy.deepcopy(payload); mut["snapshotIds"][i]="0"*64; self.assertNotEqual(canonical_sha256(mut),bid0)
         mut=copy.deepcopy(payload); mut["observationIds"].reverse(); self.assertNotEqual(canonical_sha256(mut),bid0)
         mut=copy.deepcopy(payload); mut["snapshotIds"].reverse(); self.assertNotEqual(canonical_sha256(mut),bid0)
 
