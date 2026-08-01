@@ -520,5 +520,99 @@ class ForgedNestedTests(unittest.TestCase):
             )
 
 
+class FactoryTypeBoundaryTests(unittest.TestCase):
+    def test_factory_rejects_wrong_action_string(self):
+        with self.assertRaises(ValueError) as ctx:
+            create_stage5_lifecycle_instruction(0, "enter-long", Stage5LifecycleOrigin.STRATEGY)
+        self.assertIn("ACTION_INVALID", str(ctx.exception))
+
+    def test_factory_rejects_wrong_origin_string(self):
+        with self.assertRaises(ValueError) as ctx:
+            create_stage5_lifecycle_instruction(0, Stage5LifecycleAction.ENTER_LONG, "strategy")
+        self.assertIn("ORIGIN_INVALID", str(ctx.exception))
+
+    def test_factory_rejects_none_action(self):
+        with self.assertRaises(ValueError) as ctx:
+            create_stage5_lifecycle_instruction(0, None, Stage5LifecycleOrigin.STRATEGY)
+        self.assertIn("ACTION_INVALID", str(ctx.exception))
+
+    def test_factory_rejects_bool_as_signal(self):
+        with self.assertRaises(ValueError) as ctx:
+            create_stage5_lifecycle_instruction(True, Stage5LifecycleAction.ENTER_LONG, Stage5LifecycleOrigin.STRATEGY)
+        self.assertIn("SIGNAL_TYPE", str(ctx.exception))
+
+
+class TimeAlignmentTests(unittest.TestCase):
+    _SID = "a" * 64
+    _SPID = "b" * 64
+    _PID = "c" * 64
+    _DID = "d" * 64
+    _SCHEMA = None
+
+    @classmethod
+    def setUpClass(cls):
+        from quant_engine.proof.stage5_lifecycle_plan import SCHEMA
+        cls._SCHEMA = SCHEMA
+
+    def _inst(self, signal_ms, action, origin):
+        """Direct construction with recomputed instruction_id at unaligned times."""
+        from quant_engine.proof.stage5_lifecycle_plan import _instruction_payload, TIMEFRAME
+        execution_ms = signal_ms + TIMEFRAME
+        p = {
+            "schemaVersion": self._SCHEMA,
+            "signalBarOpenTimeMs": signal_ms,
+            "executionBarOpenTimeMs": execution_ms,
+            "action": action.value,
+            "origin": origin.value,
+        }
+        return Stage5LifecycleInstruction(
+            schema_version=self._SCHEMA,
+            signal_bar_open_time_ms=signal_ms,
+            execution_bar_open_time_ms=execution_ms,
+            action=action,
+            origin=origin,
+            instruction_id=canonical_sha256(p),
+        )
+
+    def test_unaligned_signal_rejected(self):
+        inst = self._inst(150_000, Stage5LifecycleAction.ENTER_LONG, Stage5LifecycleOrigin.STRATEGY)
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5_lifecycle_plan(
+                strategy_id=self._SID, spec_id=self._SPID, parameter_id=self._PID,
+                dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+                scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+                terminal_execution_bar_open_time_ms=F * 10, instructions=(inst,),
+            )
+        self.assertIn("SIGNAL_NOT_ALIGNED", str(ctx.exception))
+
+
+class TerminalCountClosureTests(unittest.TestCase):
+    _SID = "a" * 64
+    _SPID = "b" * 64
+    _PID = "c" * 64
+    _DID = "d" * 64
+
+    def test_forged_terminal_count_rejected(self):
+        """Mutate terminal_exit_count, recompute plan_id, prove TERMINAL_COUNT_MISMATCH before PLAN_ID."""
+        from quant_engine.proof.stage5_lifecycle_plan import _plan_payload
+        insts = (
+            create_stage5_lifecycle_instruction(0, Stage5LifecycleAction.ENTER_LONG, Stage5LifecycleOrigin.STRATEGY),
+            create_stage5_lifecycle_instruction(F * 9, Stage5LifecycleAction.TERMINAL_EXIT, Stage5LifecycleOrigin.TERMINAL_POLICY),
+        )
+        plan = build_stage5_lifecycle_plan(
+            strategy_id=self._SID, spec_id=self._SPID, parameter_id=self._PID,
+            dataset_id=self._DID, symbol="BTC/USDT", warmup_bars=30,
+            scored_start_open_time_ms=0, scored_end_exclusive_open_time_ms=F * 10,
+            terminal_execution_bar_open_time_ms=F * 10, instructions=insts,
+        )
+        # actual terminal count is 1, forge to 0
+        object.__setattr__(plan, "terminal_exit_count", 0)
+        new_id = canonical_sha256(_plan_payload(plan))
+        object.__setattr__(plan, "plan_id", new_id)
+        with self.assertRaises(ValueError) as ctx:
+            Stage5LifecyclePlan.__post_init__(plan)
+        self.assertIn("TERMINAL_COUNT_MISMATCH", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

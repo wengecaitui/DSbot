@@ -87,6 +87,15 @@ def create_stage5_lifecycle_instruction(
     action: Stage5LifecycleAction,
     origin: Stage5LifecycleOrigin,
 ) -> Stage5LifecycleInstruction:
+    """Deterministic factory. Caller cannot supply the ID."""
+    if isinstance(signal_bar_open_time_ms, bool) or not isinstance(signal_bar_open_time_ms, (int, float)):
+        raise ValueError("FACTORY_SIGNAL_TYPE_INVALID")
+    if signal_bar_open_time_ms != signal_bar_open_time_ms or signal_bar_open_time_ms < 0:
+        raise ValueError("FACTORY_SIGNAL_INVALID")
+    if type(action) is not Stage5LifecycleAction:
+        raise ValueError("FACTORY_ACTION_INVALID")
+    if type(origin) is not Stage5LifecycleOrigin:
+        raise ValueError("FACTORY_ORIGIN_INVALID")
     p = {
         "schemaVersion": SCHEMA,
         "signalBarOpenTimeMs": signal_bar_open_time_ms,
@@ -210,6 +219,10 @@ class Stage5LifecyclePlan:
                 raise ValueError(f"PLAN_SIGNAL_AFTER_END_{i}")
             if inst.execution_bar_open_time_ms > self.terminal_execution_bar_open_time_ms:
                 raise ValueError(f"PLAN_EXEC_BEYOND_TERMINAL_{i}")
+            if inst.signal_bar_open_time_ms % self.timeframe_ms != 0:
+                raise ValueError(f"PLAN_SIGNAL_NOT_ALIGNED_{i}")
+            if inst.execution_bar_open_time_ms % self.timeframe_ms != 0:
+                raise ValueError(f"PLAN_EXEC_NOT_ALIGNED_{i}")
 
         state = "FLAT"
         rev_count = 0
@@ -249,6 +262,11 @@ class Stage5LifecyclePlan:
             raise ValueError("PLAN_NOT_FLAT_AT_END")
         if rev_count != self.reversal_count:
             raise ValueError("PLAN_REVERSAL_COUNT_MISMATCH")
+
+        # Recompute actual terminal count from instructions
+        actual_term = sum(1 for i in self.instructions if i.action == Stage5LifecycleAction.TERMINAL_EXIT)
+        if actual_term != self.terminal_exit_count:
+            raise ValueError("PLAN_TERMINAL_COUNT_MISMATCH")
 
         expected = canonical_sha256(_plan_payload(self))
         if self.plan_id != expected:
