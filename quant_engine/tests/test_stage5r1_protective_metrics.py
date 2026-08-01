@@ -566,8 +566,11 @@ class NestedForgeryTests(unittest.TestCase):
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         tm = report.trade_metrics[0]
         object.__setattr__(tm, "realized_net_r", 999.0)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
         with self.assertRaises(ValueError) as ctx:
-            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": "0"*64})
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        self.assertIn("METRIC", str(ctx.exception))
 
     def test_forged_nested_counts_with_recomputed_id_rejected(self):
         """Forged counts with recomputed report_id is rejected."""
@@ -575,16 +578,18 @@ class NestedForgeryTests(unittest.TestCase):
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         counts = report.counts
         object.__setattr__(counts, "long_count", 999)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
         with self.assertRaises(ValueError) as ctx:
-            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": "0"*64})
-        self.assertIn("COUNTS", str(ctx.exception))
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        e = str(ctx.exception)
+        self.assertIn("COUNTS", e)
+        self.assertNotIn("REPORT_ID", e)
 
     def test_counts_total_not_equal_trade_count_rejected(self):
         """Counts total != trade_count is rejected."""
         b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
-        counts = report.counts
-        # forge: long=0, short=0 but trade_count=1
         forged = ProtectiveExcursionMetricCounts(
             long_count=0, short_count=0, explicit_exit_count=0, protective_exit_count=0,
             stop_loss_count=0, take_profit_count=0, gap_open_count=0, intrabar_level_count=0,
@@ -592,9 +597,14 @@ class NestedForgeryTests(unittest.TestCase):
             favorable_full_bar_count=0, favorable_exit_open_count=0, favorable_trigger_open_count=0,
             favorable_trigger_level_count=0, adverse_full_bar_count=0, adverse_exit_open_count=0,
             adverse_trigger_open_count=0, adverse_trigger_level_count=0)
+        object.__setattr__(report, "counts", forged)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
         with self.assertRaises(ValueError) as ctx:
-            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "counts": forged, "report_id": "0"*64})
-        self.assertIn("TOTAL", str(ctx.exception))
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        e = str(ctx.exception)
+        self.assertIn("COUNTS_TOTAL_MISMATCH", e)
+        self.assertNotIn("REPORT_ID", e)
 
     def test_forged_accounting_net_pnl_with_retained_id_rejected(self):
         """Forged TradeAccounting net_pnl_amount with retained accounting_id rejected."""
@@ -610,17 +620,27 @@ class NestedForgeryTests(unittest.TestCase):
         b = bars(200)
         r = run_stage5r1_protective_excursion(bars=b, instructions=(), protective_bindings=(), config=_cfg(), capital=_CM, cost=_ZC)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=())
+        object.__setattr__(report, "return_profit_factor", 1.5)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
         with self.assertRaises(ValueError) as ctx:
-            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "return_profit_factor": 1.5, "report_id": "0"*64})
-        self.assertIn("RPF", str(ctx.exception))
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        e = str(ctx.exception)
+        self.assertIn("RPF_NOT_NULL", e)
+        self.assertNotIn("REPORT_ID", e)
 
     def test_measured_return_profit_factor_null_rejected(self):
         """MEASURED with null return_profit_factor is rejected."""
         b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        object.__setattr__(report, "return_profit_factor", None)
+        from quant_engine.proof.stage5r1_protective_metrics import _report_payload, canonical_sha256
+        new_id = canonical_sha256(_report_payload(report))
         with self.assertRaises(ValueError) as ctx:
-            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "return_profit_factor": None, "report_id": "0"*64})
-        self.assertIn("RPF", str(ctx.exception))
+            ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "report_id": new_id})
+        e = str(ctx.exception)
+        self.assertIn("RPF_NULL", e)
+        self.assertNotIn("REPORT_ID", e)
 
     def test_shuffled_bindings_with_set_unchanged_rejected(self):
         """Shuffled bindings where the set is unchanged but order differs."""
@@ -693,11 +713,15 @@ class Level3GenuineTests(unittest.TestCase):
         self.assertIn("COLLISION", str(ctx.exception))
 
     def test_measured_rpf_nan_rejected(self):
+        # NaN is not canonical-hashable, so no recomputed ID is possible.
+        # RPF validation precedes hashing, so this reaches the guard.
         b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         with self.assertRaises(ValueError) as ctx:
             ProtectiveExcursionMetricsReport(**{**{k: getattr(report, k) for k in report.__dataclass_fields__}, "return_profit_factor": float("nan"), "report_id": "0"*64})
-        self.assertIn("RPF", str(ctx.exception).upper())
+        e = str(ctx.exception)
+        self.assertIn("RPF", e.upper())
+        self.assertIn("NON_FINITE", e.upper())
 
     def test_measured_rpf_negative_rejected(self):
         b, insts, p, bindings, r = _one_trade_setup(stop=1.0)
