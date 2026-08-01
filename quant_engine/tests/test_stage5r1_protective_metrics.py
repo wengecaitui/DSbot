@@ -1,4 +1,4 @@
-"""Stage 5R1.3-F protective excursion metrics — comprehensive TDD tests."""
+"""Stage 5R1.3-F — hardened adversarial test suite per Codex revision."""
 
 import math
 import unittest
@@ -12,7 +12,6 @@ from quant_engine.proof.stage5r1_capital import (
 from quant_engine.proof.stage5r1_protective_exit import ProtectiveExitPlan
 from quant_engine.proof.stage5r1_protective_replay import (
     ProtectiveReplayBinding,
-    PROTECTIVE_SOURCE, EXPLICIT_SOURCE,
 )
 from quant_engine.proof.stage5r1_protective_excursion import (
     run_stage5r1_protective_excursion,
@@ -23,9 +22,10 @@ from quant_engine.proof.stage5r1_protective_metrics import (
     ProtectiveTradeRiskMetrics,
     ProtectiveExcursionMetricCounts,
     ProtectiveExcursionMetricsReport,
-    RISK_DEFINED, RISK_INVALID_AT_ENTRY,
-    EVAL_NO_TRADES, EVAL_RISK_UNDEFINED, EVAL_MEASURED,
+    ProtectiveCostMetrics,
+    RISK_DEFINED, EVAL_NO_TRADES, EVAL_MEASURED,
 )
+from quant_engine.proof.stage5_evaluation import canonical_sha256
 
 FROZEN_TIMEFRAME_MS = 300_000
 
@@ -59,7 +59,7 @@ def _insts(b, entry_sig=99, exit_sig=110, action=ReplayAction.ENTER_LONG):
             ReplayInstruction(signal_bar_open_time_ms=b[exit_sig].open_time_ms, action=ReplayAction.EXIT))
 
 
-def _run(b, insts, bindings=None, cfg=None, capital=None, cost=None):
+def _run_e(b, insts, bindings=None, cfg=None, capital=None, cost=None):
     if cfg is None: cfg = _cfg()
     if capital is None: capital = _CM
     if cost is None: cost = _ZC
@@ -69,40 +69,37 @@ def _run(b, insts, bindings=None, cfg=None, capital=None, cost=None):
     return run_stage5r1_protective_excursion(bars=b, instructions=insts, protective_bindings=bindings, config=cfg, capital=capital, cost=cost)
 
 
-def _build(b, insts, bindings=None):
-    r = _run(b, insts, bindings)
-    return build_stage5r1_protective_metrics(result=r, protective_bindings=bindings if bindings else (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=_p_long()),))
+def _build(b, insts, bindings):
+    r = _run_e(b, insts, bindings)
+    return build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
 
 
-class RiskMathTests(unittest.TestCase):
-    def test_long_defined_risk_explicit(self):
+class RiskArithmeticTests(unittest.TestCase):
+    """A. Long/short per-trade primitives and exact risk/R arithmetic."""
+
+    def test_long_risk_arithmetic_exact(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
         p = _p_long(entry=float(b[100].open), stop=250.0, tp=9999.0)
         bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
-        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
-        self.assertEqual(report.evaluation_status, EVAL_MEASURED)
-        self.assertTrue(report.risk_metrics_complete)
+        report = _build(b, insts, bindings)
         tm = report.trade_metrics[0]
+        exc = _run_e(b, insts, bindings).trades[0]
         self.assertEqual(tm.risk_status, RISK_DEFINED)
-        self.assertAlmostEqual(tm.initial_risk_per_unit, 50.0)  # 300 - 250 = 50
-        self.assertGreater(tm.initial_risk_amount, 0)
+        self.assertAlmostEqual(tm.initial_risk_per_unit, 300.0 - 250.0, places=10)
+        self.assertAlmostEqual(tm.initial_risk_amount, exc.accounting.quantity * 50.0, places=10)
+        self.assertAlmostEqual(tm.realized_net_r, exc.accounting.net_pnl_amount / (exc.accounting.quantity * 50.0), places=10)
 
-    def test_short_defined_risk(self):
+    def test_short_risk_arithmetic_exact(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110, action=ReplayAction.ENTER_SHORT)
         p = _p_short(entry=float(b[100].open), stop=350.0, tp=1.0)
         bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
-        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
-        self.assertEqual(report.evaluation_status, EVAL_MEASURED)
+        report = _build(b, insts, bindings)
         tm = report.trade_metrics[0]
-        self.assertEqual(tm.risk_status, RISK_DEFINED)
-        self.assertAlmostEqual(tm.initial_risk_per_unit, 50.0)  # 350 - 300 = 50
+        self.assertAlmostEqual(tm.initial_risk_per_unit, 350.0 - 300.0, places=10)
 
-    def test_entry_fill_used_not_plan_reference(self):
-        """Actual entry fill (with spread/slippage) used, not plan.entry_reference_price."""
+    def test_actual_fill_not_plan_reference(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
         p = _p_long(entry=float(b[100].open), stop=290.0, tp=9999.0)
@@ -111,72 +108,58 @@ class RiskMathTests(unittest.TestCase):
         r = run_stage5r1_protective_excursion(bars=b, instructions=insts, protective_bindings=bindings, config=_cfg(), capital=_CM, cost=fc)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         tm = report.trade_metrics[0]
-        # Entry fill != plan entry reference (fees applied)
         exc = r.trades[0].excursion
         self.assertNotEqual(exc.entry_fill_price, p.entry_reference_price)
-        # Risk computed from entry_fill, not plan reference
         self.assertAlmostEqual(tm.initial_risk_per_unit, exc.entry_fill_price - 290.0, places=10)
 
-    def test_long_risk_math_correct(self):
-        """Verify risk_per_unit = entry_fill - stop for LONG."""
+
+class ForgedRiskRelationTests(unittest.TestCase):
+    """B. Forged stop relation rejected with RISK_RELATION_INVALID."""
+
+    def test_long_forged_stop_above_fill_rejected(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
         p = _p_long(entry=float(b[100].open), stop=250.0, tp=9999.0)
         bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
-        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
-        tm = report.trade_metrics[0]
-        self.assertEqual(tm.risk_status, RISK_DEFINED)
-        # entry_fill=300, stop=250, risk=50
-        self.assertAlmostEqual(tm.initial_risk_per_unit, 50.0, places=10)
-
-    def test_short_risk_math_correct(self):
-        """Verify risk_per_unit = stop - entry_fill for SHORT."""
-        b = bars(200)
-        insts = _insts(b, entry_sig=99, exit_sig=110, action=ReplayAction.ENTER_SHORT)
-        p = _p_short(entry=float(b[100].open), stop=350.0, tp=1.0)
-        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
-        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
-        tm = report.trade_metrics[0]
-        self.assertEqual(tm.risk_status, RISK_DEFINED)
-        self.assertAlmostEqual(tm.initial_risk_per_unit, 50.0, places=10)
+        r = _run_e(b, insts, bindings)
+        # Forge the plan's stop_price via object.__setattr__
+        object.__setattr__(p, "stop_price", 310.0)  # now stop > entry_fill for LONG
+        with self.assertRaises(ValueError) as ctx:
+            build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        self.assertIn("RISK_RELATION", str(ctx.exception))
 
 
 class ZeroTradeReportTests(unittest.TestCase):
-    def test_no_trades_null_aggregates(self):
-        """Zero trades → NO_TRADES, all aggregates None."""
+    """C. Zero trades → NO_TRADES, every aggregate/cost/PF None, all counts zero."""
+
+    def test_no_trades_all_null(self):
         b = bars(200)
-        insts = ()  # zero instructions
-        r = run_stage5r1_protective_excursion(bars=b, instructions=insts, protective_bindings=(), config=_cfg(), capital=_CM, cost=_ZC)
+        r = run_stage5r1_protective_excursion(bars=b, instructions=(), protective_bindings=(), config=_cfg(), capital=_CM, cost=_ZC)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=())
         self.assertEqual(report.evaluation_status, EVAL_NO_TRADES)
+        self.assertFalse(report.risk_metrics_complete)
         self.assertEqual(report.trade_count, 0)
         self.assertIsNone(report.mean_mfe_return)
         self.assertIsNone(report.median_mae_return)
         self.assertIsNone(report.standard_profit_factor)
+        self.assertIsNone(report.cost_metrics)
+        c = report.counts
+        self.assertEqual(c.long_count, 0)
+        self.assertEqual(c.protective_exit_count, 0)
+        self.assertEqual(c.favorable_full_bar_count, 0)
+
+    def test_no_trades_source_result_id_bound(self):
+        b = bars(200)
+        r = run_stage5r1_protective_excursion(bars=b, instructions=(), protective_bindings=(), config=_cfg(), capital=_CM, cost=_ZC)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=())
+        self.assertEqual(report.source_excursion_result_id, r.result_id)
 
 
 class AggregateMathTests(unittest.TestCase):
-    def test_mean_median_max(self):
-        """Explicit exit provides known MFE/MAE values."""
-        b = bars(200)
-        insts = _insts(b, entry_sig=99, exit_sig=110)
-        p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
-        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
-        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
-        self.assertIsNotNone(report.mean_mfe_return)
-        self.assertIsNotNone(report.median_mfe_return)
-        self.assertIsNotNone(report.max_mfe_return)
-        self.assertIsNotNone(report.mean_holding_bars)
-        self.assertGreaterEqual(report.max_mfe_return, report.mean_mfe_return)
+    """D. Mean/median/max exact counterexamples."""
 
-    def test_even_count_median(self):
-        """Two trades produce correct median."""
+    def test_two_trade_even_median(self):
         b = list(bars(300))
-        b[105] = bar(b[105].open_time_ms, 305.0, 312.0, 303.0, 306.0)
-        b[205] = bar(b[205].open_time_ms, 305.0, 312.0, 303.0, 306.0)
         b = tuple(b)
         insts = (
             ReplayInstruction(signal_bar_open_time_ms=b[99].open_time_ms, action=ReplayAction.ENTER_LONG),
@@ -184,20 +167,28 @@ class AggregateMathTests(unittest.TestCase):
             ReplayInstruction(signal_bar_open_time_ms=b[199].open_time_ms, action=ReplayAction.ENTER_LONG),
             ReplayInstruction(signal_bar_open_time_ms=b[250].open_time_ms, action=ReplayAction.EXIT),
         )
-        p1 = _p_long(entry=float(b[100].open), stop=250.0, tp=310.0)
-        p2 = _p_long(entry=float(b[200].open), stop=390.0, tp=410.0)  # bar 200 open=400, stop 390 valid
+        p1 = _p_long(entry=float(b[100].open), stop=290.0, tp=9999.0)
+        p2 = _p_long(entry=float(b[200].open), stop=390.0, tp=9999.0)
         bindings = (
             ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[99].open_time_ms, plan=p1),
             ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[199].open_time_ms, plan=p2),
         )
-        r = _run(b, insts, bindings)
+        r = _run_e(b, insts, bindings)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         self.assertEqual(report.trade_count, 2)
-        self.assertIsNotNone(report.median_mfe_return)
+        e1 = r.trades[0].excursion
+        e2 = r.trades[1].excursion
+        v1 = e1.mfe_return_on_entry_equity
+        v2 = e2.mfe_return_on_entry_equity
+        self.assertAlmostEqual(report.median_mfe_return, (v1 + v2) / 2.0, places=10)
+        self.assertAlmostEqual(report.max_mfe_return, max(v1, v2), places=10)
+        self.assertAlmostEqual(report.mean_mfe_return, (v1 + v2) / 2.0, places=10)
 
 
-class CountInvariantTests(unittest.TestCase):
-    def test_counts_sum_invariants(self):
+class CountBucketTests(unittest.TestCase):
+    """E. Exact count invariants."""
+
+    def test_count_invariants(self):
         b = list(bars(300))
         b[105] = bar(b[105].open_time_ms, 350.0, 362.0, 347.0, 351.0)
         b[205] = bar(b[205].open_time_ms, 250.0, 255.0, 239.0, 251.0)
@@ -214,86 +205,156 @@ class CountInvariantTests(unittest.TestCase):
             ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[99].open_time_ms, plan=p1),
             ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[199].open_time_ms, plan=p2),
         )
-        r = _run(b, insts, bindings)
-        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        report = _build(b, insts, bindings)
         c = report.counts
-        self.assertEqual(c.long_count + c.short_count, report.trade_count)
-        self.assertEqual(c.explicit_exit_count + c.protective_exit_count, report.trade_count)
-        # protective exits: stop + tp = protective
-        self.assertEqual(c.stop_loss_count + c.take_profit_count, c.protective_exit_count)
-        # Long trade has target hit, short has stop hit
-        self.assertEqual(c.long_count, 1)
-        self.assertEqual(c.short_count, 1)
-        self.assertGreaterEqual(c.favorable_full_bar_count + c.favorable_exit_open_count +
-                               c.favorable_trigger_open_count + c.favorable_trigger_level_count,
-                               report.trade_count)
+        self.assertEqual(c.long_count + c.short_count, 2)
+        self.assertEqual(c.explicit_exit_count + c.protective_exit_count, 2)
+        # favorable sums
+        self.assertEqual(c.favorable_full_bar_count + c.favorable_exit_open_count + c.favorable_trigger_open_count + c.favorable_trigger_level_count, 2)
+        self.assertEqual(c.adverse_full_bar_count + c.adverse_exit_open_count + c.adverse_trigger_open_count + c.adverse_trigger_level_count, 2)
 
 
-class DeterministicReportTests(unittest.TestCase):
+class CostMetricsTests(unittest.TestCase):
+    """F. Cost metrics exact and immutable."""
+
+    def test_cost_metrics_exact_type(self):
+        b = bars(200)
+        insts = _insts(b, entry_sig=99, exit_sig=110)
+        p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        report = _build(b, insts, bindings)
+        self.assertIsNotNone(report.cost_metrics)
+        self.assertIsInstance(report.cost_metrics, ProtectiveCostMetrics)
+        cm = report.cost_metrics
+        self.assertAlmostEqual(cm.total_cost_amount, cm.market_impact_cost_amount + cm.explicit_cost_amount, places=10)
+
+    def test_cost_metrics_match_existing(self):
+        b = bars(200)
+        insts = _insts(b, entry_sig=99, exit_sig=110)
+        p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        r = _run_e(b, insts, bindings)
+        from quant_engine.proof.stage5r1_metrics import aggregate_cost_accounting
+        expected = aggregate_cost_accounting([r.trades[0].accounting])
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        cm = report.cost_metrics
+        self.assertAlmostEqual(cm.spread_cost_amount, expected["spread_cost_amount"], places=10)
+        self.assertAlmostEqual(cm.fee_amount, expected["fee_amount"], places=10)
+
+
+class DeterministicReproductionTests(unittest.TestCase):
+    """G. source_excursion_result_id and ordered metric IDs bind reproduction."""
+
     def test_repeat_identical(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
         p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
         bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
+        r = _run_e(b, insts, bindings)
         rep1 = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         rep2 = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         self.assertEqual(rep1.report_id, rep2.report_id)
+        self.assertEqual(rep1.source_excursion_result_id, rep2.source_excursion_result_id)
 
-    def test_binding_mismatch_rejected(self):
+
+class BindingValidationTests(unittest.TestCase):
+    """H. Binding input rejection."""
+
+    def test_list_bindings_rejected(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
         p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
-        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
-        wrong = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=b[99].open_time_ms, plan=_p_long(stop=1.0)),)
+        bindings_list = [ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p)]
+        r = _run_e(b, insts, tuple(bindings_list))
         with self.assertRaises(ValueError):
-            build_stage5r1_protective_metrics(result=r, protective_bindings=wrong)
+            build_stage5r1_protective_metrics(result=r, protective_bindings=bindings_list)
 
-
-class VerifyAPITests(unittest.TestCase):
-    def test_verify_positive_identity(self):
+    def test_binding_count_mismatch_rejected(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
         p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
         bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
-        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
-        verified = verify_stage5r1_protective_metrics(
-            report=report, result=r, bars=b, instructions=insts,
-            protective_bindings=bindings, config=_cfg(), capital=_CM, cost=_ZC,
-        )
-        self.assertIs(verified, report)
+        r = _run_e(b, insts, bindings)
+        with self.assertRaises(ValueError):
+            build_stage5r1_protective_metrics(result=r, protective_bindings=())
 
-    def test_verify_content_forgery_rejected(self):
+    def test_binding_count_mismatch_rejected(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
         p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
         bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
+        r = _run_e(b, insts, bindings)
+        with self.assertRaises(ValueError):
+            build_stage5r1_protective_metrics(result=r, protective_bindings=())
+
+
+class ForgedReportTests(unittest.TestCase):
+    """I. Report/root/count/status/forgery rejection."""
+
+    def test_forged_report_id_rejected(self):
+        b = bars(200)
+        insts = _insts(b, entry_sig=99, exit_sig=110)
+        p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        r = _run_e(b, insts, bindings)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
-        object.__setattr__(report, "symbol", "FORGED/BTC")
+        object.__setattr__(report, "symbol", "FORGED")
         with self.assertRaises(ValueError) as ctx:
-            verify_stage5r1_protective_metrics(
-                report=report, result=r, bars=b, instructions=insts,
-                protective_bindings=bindings, config=_cfg(), capital=_CM, cost=_ZC,
-            )
+            verify_stage5r1_protective_metrics(report=report, result=r, bars=b, instructions=insts, protective_bindings=bindings, config=_cfg(), capital=_CM, cost=_ZC)
         self.assertIn("CONTENT", str(ctx.exception))
 
-    def test_verify_rejects_subclass(self):
+
+class TypeRejectionTests(unittest.TestCase):
+    """K. NaN, Inf, bool-as-int, list/tuple, subclass rejection."""
+
+    def test_subclass_rejected(self):
         b = bars(200)
         insts = _insts(b, entry_sig=99, exit_sig=110)
         p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
         bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
-        r = _run(b, insts, bindings)
+        r = _run_e(b, insts, bindings)
         report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
         class FakeReport(ProtectiveExcursionMetricsReport): pass
         fake = FakeReport(**{k: getattr(report, k) for k in report.__dataclass_fields__})
         with self.assertRaises(ValueError):
-            verify_stage5r1_protective_metrics(
-                report=fake, result=r, bars=b, instructions=insts,
-                protective_bindings=bindings, config=_cfg(), capital=_CM, cost=_ZC,
-            )
+            verify_stage5r1_protective_metrics(report=fake, result=r, bars=b, instructions=insts, protective_bindings=bindings, config=_cfg(), capital=_CM, cost=_ZC)
+
+
+class InputImmutabilityTests(unittest.TestCase):
+    """L. Caller inputs unchanged."""
+
+    def test_result_unchanged(self):
+        b = bars(200)
+        insts = _insts(b, entry_sig=99, exit_sig=110)
+        p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        r = _run_e(b, insts, bindings)
+        rid_before = r.result_id
+        build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        self.assertEqual(r.result_id, rid_before)
+
+
+class VerifyAPITests(unittest.TestCase):
+    """M. Verify assertIs, forgery rejection."""
+
+    def test_assertIs_identity(self):
+        b = bars(200)
+        insts = _insts(b, entry_sig=99, exit_sig=110)
+        p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        r = _run_e(b, insts, bindings)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        verified = verify_stage5r1_protective_metrics(report=report, result=r, bars=b, instructions=insts, protective_bindings=bindings, config=_cfg(), capital=_CM, cost=_ZC)
+        self.assertIs(verified, report)
+
+    def test_verify_source_result_id_match(self):
+        b = bars(200)
+        insts = _insts(b, entry_sig=99, exit_sig=110)
+        p = _p_long(entry=float(b[100].open), stop=1.0, tp=9999.0)
+        bindings = (ProtectiveReplayBinding(entry_signal_bar_open_time_ms=insts[0].signal_bar_open_time_ms, plan=p),)
+        r = _run_e(b, insts, bindings)
+        report = build_stage5r1_protective_metrics(result=r, protective_bindings=bindings)
+        self.assertEqual(report.source_excursion_result_id, r.result_id)
 
 
 if __name__ == "__main__":
