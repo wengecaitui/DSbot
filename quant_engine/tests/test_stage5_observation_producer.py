@@ -485,9 +485,21 @@ class ProducerTests(unittest.TestCase):
     # --- hostile boundary tables ---
     HOSTILE_VALUES = {"list":[[]], "dict":[{}], "bool":[True], "int":[1], "empty_str":[""]}
 
-    def _hostile_spec_table(self, field_path, hostile_values=None):
-        if hostile_values is None: hostile_values = self.HOSTILE_VALUES
-        for label, values in hostile_values.items():
+    def _hostile_item_table(self, field_path):
+        """Test field as a list container: p[field] = [val] for each hostile value."""
+        for label, values in self.HOSTILE_VALUES.items():
+            for val in values:
+                with self.subTest(field=field_path, hostile=label):
+                    p = _trend_impulse_payload()
+                    target = p; parts = field_path.split(".")
+                    for seg in parts[:-1]: target = target[seg]
+                    target[parts[-1]] = [val]
+                    with self.assertRaises(ValueError):
+                        create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def _hostile_scalar_table(self, field_path):
+        """Test field as a scalar: p[field] = val for each hostile value."""
+        for label, values in self.HOSTILE_VALUES.items():
             for val in values:
                 with self.subTest(field=field_path, hostile=label):
                     p = _trend_impulse_payload()
@@ -498,22 +510,22 @@ class ProducerTests(unittest.TestCase):
                         create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
 
     def test_timeframe_item_hostile_table(self):
-        self._hostile_spec_table("timeframe")
+        self._hostile_item_table("timeframe")
 
     def test_symbol_item_hostile_table(self):
-        self._hostile_spec_table("symbols")
+        self._hostile_item_table("symbols")
 
     def test_lifecycle_flatEntry_hostile_table(self):
-        self._hostile_spec_table("positionLifecycle.flatEntry")
+        self._hostile_scalar_table("positionLifecycle.flatEntry")
 
     def test_lifecycle_reversal_hostile_table(self):
-        self._hostile_spec_table("positionLifecycle.reversal")
+        self._hostile_scalar_table("positionLifecycle.reversal")
 
     def test_risk_stopLoss_hostile_table(self):
-        self._hostile_spec_table("riskRules.stopLoss")
+        self._hostile_scalar_table("riskRules.stopLoss")
 
     def test_risk_takeProfit_hostile_table(self):
-        self._hostile_spec_table("riskRules.takeProfit")
+        self._hostile_scalar_table("riskRules.takeProfit")
 
     def test_warmup_hostile_extended(self):
         for val, label in [(True,"bool"),(1.5,"float"),("30","str")]:
@@ -521,6 +533,47 @@ class ProducerTests(unittest.TestCase):
                 p = _trend_impulse_payload(); p["warmupBars"] = val
                 with self.assertRaises(ValueError):
                     create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    # --- restored 8 exact names from 354d4ad ---
+    def test_timeframe_list_item_rejected(self):
+        p = _trend_impulse_payload(); p["timeframe"] = [["5m"]]
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_timeframe_dict_item_rejected(self):
+        p = _trend_impulse_payload(); p["timeframe"] = [{"x":"5m"}]
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_symbol_list_item_rejected(self):
+        p = _trend_impulse_payload(); p["symbols"] = [[_SYM]]
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_lifecycle_flatEntry_hostile_rejected(self):
+        p = _trend_impulse_payload(); p["positionLifecycle"]["flatEntry"] = True
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_lifecycle_reversal_hostile_rejected(self):
+        p = _trend_impulse_payload(); p["positionLifecycle"]["reversal"] = 1
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_risk_stopLoss_hostile_rejected(self):
+        p = _trend_impulse_payload(); p["riskRules"]["stopLoss"] = []
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_risk_takeProfit_hostile_rejected(self):
+        p = _trend_impulse_payload(); p["riskRules"]["takeProfit"] = {}
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_warmup_bool_rejected(self):
+        p = _trend_impulse_payload(); p["warmupBars"] = True
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
 
     # --- restored tests from previous revision ---
     def test_eq_strict_type_bool_int_float_str(self):
@@ -633,13 +686,11 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(self._resolve_relative("a.b.c", 1, ""), "a.b")
 
     def test_hostile_field_total_subcase_count(self):
-        # Verify the table covers all 5 hostile values across all 6 fields
-        count = 0
+        self.assertEqual(len(self.HOSTILE_VALUES), 5, "5 hostile labels")
         for label, values in self.HOSTILE_VALUES.items():
-            for _ in values:
-                # each value tested per field — but we count subcases here
-                count += 1
-        self.assertGreaterEqual(count, 5)
+            self.assertEqual(len(values), 1, f"1 value for {label}")
+        # 6 protected field tables × 5 hostile labels = 30 declared subcases
+        self.assertEqual(len(self.HOSTILE_VALUES) * 6, 30)
 
     def test_all_mode_all_clauses_needed(self):
         from quant_engine.proof.stage5_observation_producer import _safe_compare
