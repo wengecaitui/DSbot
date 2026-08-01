@@ -712,23 +712,23 @@ class ProducerTests(unittest.TestCase):
         m = self._load_manifest()
         self.assertEqual(m["candidateCount"], 4)
         self.assertEqual(len(m["specs"]), 4)
-        expected = [
-            "derived-trend-stochastic-confirmation-ca529176d8c82a01",
-            "derived-stc-trend-filter-5682c752bef50a0c",
-            "derived-mean-reversion-trend-guard-262ffac08c1acf35",
-            "derived-support-resistance-risk-entry-01ef09c554af0da8",
-        ]
-        self.assertEqual(set(s["strategyId"] for s in m["specs"]), set(expected))
+        expected = {
+            ("derived-trend-stochastic-confirmation-ca529176d8c82a01",
+             "9c77fe6bb80c79481707e4820ad1493c28cec61c41e156073fe28e9e78eafec6"),
+            ("derived-stc-trend-filter-5682c752bef50a0c",
+             "139bf050c03982325ab4450a022744f342520b35e1e8971f44e861b11cf4d527"),
+            ("derived-mean-reversion-trend-guard-262ffac08c1acf35",
+             "58156d6fd0c244449e58bb362c28732688615fa68a4771e4d26b2187ced1babe"),
+            ("derived-support-resistance-risk-entry-01ef09c554af0da8",
+             "4acc61095aa516bfb5757a5ff615e0fd2560ee07c30028ff4d2fd6b5b6032750"),
+        }
+        actual = {(s["strategyId"], s["specId"]) for s in m["specs"]}
+        self.assertEqual(actual, expected)
         self.assertTrue(all(len(s["parameters"]["candidateSets"]) == 3 for s in m["specs"]))
         for s in m["specs"]:
-            self.assertIn("specId", s)
-            self.assertTrue(len(s["specId"]) == 64)
-            # Every component has sourceAssetDigests with SHA fields
             for c in s["components"]:
                 dig = s["sourceAssetDigests"].get(c["assetId"])
                 self.assertIsNotNone(dig, f"missing digest for {c['assetId']}")
-                for k in ["pineSha256","pythonSymbolSha256","registryEntrySha256"]:
-                    self.assertIn(k, dig)
 
     def test_spec_id_matches_canonical_payload(self):
         m = self._load_manifest()
@@ -738,22 +738,32 @@ class ProducerTests(unittest.TestCase):
                 f"specId mismatch for {s['strategyId']}")
 
     def test_all_12_parameter_bindings(self):
-        m = self._load_manifest()
-        bindings = set()
+        m = self._load_manifest(); bindings = set(); frozen_ids = set()
         for s in m["specs"]:
             payload = {k:v for k,v in s.items() if k != "specId"}
+            expected_comps = tuple(c["assetId"] for c in s["components"])
+            expected_symbols = tuple(sorted(s["symbols"]))
+            expected_warmup = s["warmupBars"]
             for ps in s["parameters"]["candidateSets"]:
                 spec = create_frozen_rule_spec(dict(payload), s["specId"], dict(ps))
                 self.assertEqual(spec.strategy_id, s["strategyId"])
                 self.assertEqual(spec.spec_id, s["specId"])
                 self.assertEqual(spec.parameter_id, canonical_sha256(ps))
-                # Deterministic frozen ID
                 spec2 = create_frozen_rule_spec(dict(payload), s["specId"], dict(ps))
                 self.assertEqual(spec.frozen_id, spec2.frozen_id)
+                self.assertEqual(spec.components, expected_comps)
+                self.assertEqual(spec.symbols, expected_symbols)
+                self.assertEqual(spec.warmup_bars, expected_warmup)
+                self.assertEqual(_thaw(spec.spec_payload), payload)
+                self.assertEqual(_thaw(spec.param_payload), ps)
+                self.assertTrue(len(spec.entry_rules) > 0)
+                self.assertTrue(len(spec.exit_rules) > 0)
+                self.assertEqual(spec.entry_rules, spec2.entry_rules)
+                self.assertEqual(spec.exit_rules, spec2.exit_rules)
                 bindings.add((spec.strategy_id, spec.parameter_id))
-                self.assertEqual(len(spec.components), len(s["components"]),
-                    f"component count mismatch for {s['strategyId']}")
+                frozen_ids.add(spec.frozen_id)
         self.assertEqual(len(bindings), 12)
+        self.assertEqual(len(frozen_ids), 12)
 
     def _real_fixture(self, spec_index, param_index, components):
         m = self._load_manifest()
@@ -762,7 +772,12 @@ class ProducerTests(unittest.TestCase):
         ps = list(s["parameters"]["candidateSets"])[param_index]
         spec = create_frozen_rule_spec(dict(payload), s["specId"], dict(ps))
         snap = _snap(spec, 0, components=components)
+        # Determinism: produce twice, verify identical IDs
         batch = self._produce(spec, (snap,))
+        batch2 = self._produce(spec, (snap,))
+        self.assertEqual(batch.batch_id, batch2.batch_id)
+        self.assertEqual(batch.observations[0].observation_id, batch2.observations[0].observation_id)
+        self.assertEqual(snap.snapshot_id, _snap(spec, 0, components=components).snapshot_id)
         verified = verify_observation_batch(batch=batch, spec=spec, snapshots=(snap,),
             dataset_id=_DID, symbol=_SYM, scored_start_open_time_ms=0,
             scored_end_exclusive_open_time_ms=F*2)
@@ -827,14 +842,15 @@ class ProducerTests(unittest.TestCase):
         self.assertTrue(b.observations[0].long_exit)
 
     def test_tampered_digest_rejects_spec_id(self):
-        m = self._load_manifest()
+        import copy
+        m = self._load_manifest(); orig = copy.deepcopy(m)
         s = m["specs"][0]; payload = {k:v for k,v in s.items() if k != "specId"}
-        original = dict(payload)
-        payload["sourceAssetDigests"] = dict(payload["sourceAssetDigests"])
-        payload["sourceAssetDigests"]["TrendImpulse"] = {"fake":"not-a-sha"}
-        with self.assertRaises(ValueError):
-            create_frozen_rule_spec(payload, s["specId"], dict(list(s["parameters"]["candidateSets"])[0]))
-        self.assertEqual({k:v for k,v in s.items() if k != "specId"}, original)
+        payload["sourceAssetDigests"] = copy.deepcopy(payload["sourceAssetDigests"])
+        payload["sourceAssetDigests"]["TrendImpulse"]["pineSha256"] = "0"*64
+        ps = dict(list(s["parameters"]["candidateSets"])[0])
+        with self.assertRaisesRegex(ValueError, "FACTORY_SPEC_ID_MISMATCH"):
+            create_frozen_rule_spec(payload, s["specId"], ps)
+        self.assertEqual(m, orig)
 
 
 if __name__=="__main__":
