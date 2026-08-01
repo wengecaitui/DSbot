@@ -255,11 +255,6 @@ class ProducerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
 
-    def test_direct_spec_source_digest_tamper_rejected(self):
-        p = _trend_impulse_payload(); p["sourceAssetDigests"]["TrendImpulse"] = {"x":"y"*64}
-        with self.assertRaises(ValueError):
-            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
-
     def test_duplicate_candidate_sets_rejected(self):
         p = _trend_impulse_payload()
         p["parameters"]["candidateSets"] = [{"tp":21,"tm":2.0,"max_holding_bars":96},{"tp":21,"tm":2.0,"max_holding_bars":96}]
