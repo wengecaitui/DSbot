@@ -42,6 +42,11 @@ def _vbool(v, label):
 def _obs_payload(obs) -> dict:
     return {
         "schemaVersion": obs.schema_version,
+        "strategyId": obs.strategy_id,
+        "specId": obs.spec_id,
+        "parameterId": obs.parameter_id,
+        "datasetId": obs.dataset_id,
+        "symbol": obs.symbol,
         "signalBarOpenTimeMs": obs.signal_bar_open_time_ms,
         "hasOutputs": obs.has_outputs,
         "longEntry": obs.long_entry,
@@ -54,6 +59,11 @@ def _obs_payload(obs) -> dict:
 @dataclass(frozen=True)
 class Stage5StrategyIntentObservation:
     schema_version: str
+    strategy_id: str
+    spec_id: str
+    parameter_id: str
+    dataset_id: str
+    symbol: str
     signal_bar_open_time_ms: int
     has_outputs: bool
     long_entry: bool
@@ -65,6 +75,17 @@ class Stage5StrategyIntentObservation:
     def __post_init__(self):
         if self.schema_version != OBS_SCHEMA:
             raise ValueError("OBS_SCHEMA_INVALID")
+        if type(self.strategy_id) is not str:
+            raise ValueError("OBS_STRATEGY_NOT_STRING")
+        if not self.strategy_id:
+            raise ValueError("OBS_STRATEGY_EMPTY")
+        _vsha(self.spec_id, "OBS_SPEC_ID")
+        _vsha(self.parameter_id, "OBS_PARAM_ID")
+        _vsha(self.dataset_id, "OBS_DATASET_ID")
+        if type(self.symbol) is not str:
+            raise ValueError("OBS_SYMBOL_NOT_STRING")
+        if not self.symbol:
+            raise ValueError("OBS_SYMBOL_EMPTY")
         _vint(self.signal_bar_open_time_ms, "OBS_TIME")
         if self.signal_bar_open_time_ms % TIMEFRAME != 0:
             raise ValueError("OBS_TIME_NOT_ALIGNED")
@@ -82,13 +103,21 @@ class Stage5StrategyIntentObservation:
 
 
 def create_stage5_strategy_intent_observation(
-    signal_bar_open_time_ms: int,
-    has_outputs: bool,
-    long_entry: bool,
-    short_entry: bool,
-    long_exit: bool,
-    short_exit: bool,
+    *, strategy_id, spec_id, parameter_id, dataset_id, symbol,
+    signal_bar_open_time_ms, has_outputs,
+    long_entry, short_entry, long_exit, short_exit,
 ) -> Stage5StrategyIntentObservation:
+    if type(strategy_id) is not str:
+        raise ValueError("OBS_FACTORY_STRATEGY_NOT_STRING")
+    if not strategy_id:
+        raise ValueError("OBS_FACTORY_STRATEGY_EMPTY")
+    _vsha(spec_id, "OBS_FACTORY_SPEC_ID")
+    _vsha(parameter_id, "OBS_FACTORY_PARAM_ID")
+    _vsha(dataset_id, "OBS_FACTORY_DATASET_ID")
+    if type(symbol) is not str:
+        raise ValueError("OBS_FACTORY_SYMBOL_NOT_STRING")
+    if not symbol:
+        raise ValueError("OBS_FACTORY_SYMBOL_EMPTY")
     _vint(signal_bar_open_time_ms, "OBS_FACTORY_TIME")
     _vbool(has_outputs, "OBS_FACTORY_HAS")
     _vbool(long_entry, "OBS_FACTORY_LE")
@@ -97,6 +126,9 @@ def create_stage5_strategy_intent_observation(
     _vbool(short_exit, "OBS_FACTORY_SX")
     p = {
         "schemaVersion": OBS_SCHEMA,
+        "strategyId": strategy_id, "specId": spec_id,
+        "parameterId": parameter_id, "datasetId": dataset_id,
+        "symbol": symbol,
         "signalBarOpenTimeMs": signal_bar_open_time_ms,
         "hasOutputs": has_outputs,
         "longEntry": long_entry, "shortEntry": short_entry,
@@ -104,6 +136,9 @@ def create_stage5_strategy_intent_observation(
     }
     return Stage5StrategyIntentObservation(
         schema_version=OBS_SCHEMA,
+        strategy_id=strategy_id, spec_id=spec_id,
+        parameter_id=parameter_id, dataset_id=dataset_id,
+        symbol=symbol,
         signal_bar_open_time_ms=signal_bar_open_time_ms,
         has_outputs=has_outputs,
         long_entry=long_entry, short_entry=short_entry,
@@ -118,6 +153,7 @@ def _compilation_payload(comp) -> dict:
         "scope": comp.scope,
         "planId": comp.plan.plan_id,
         "observationIds": list(comp.observation_ids),
+        "maxHoldingBars": comp.max_holding_bars,
         "protectiveExecutionIncluded": comp.protective_execution_included,
         "replayCompatible": comp.replay_compatible,
         "requiresProtectiveStateBridge": comp.requires_protective_state_bridge,
@@ -130,6 +166,7 @@ class Stage5IntentCompilation:
     scope: str
     plan: Stage5LifecyclePlan
     observation_ids: tuple[str, ...]
+    max_holding_bars: int
     protective_execution_included: bool
     replay_compatible: bool
     requires_protective_state_bridge: bool
@@ -145,9 +182,17 @@ class Stage5IntentCompilation:
         Stage5LifecyclePlan.__post_init__(self.plan)
         if type(self.observation_ids) is not tuple:
             raise ValueError("COMPILATION_OBS_IDS_NOT_TUPLE")
+        seen_ids = set()
         for i, oid in enumerate(self.observation_ids):
             if type(oid) is not str or not _SHA.fullmatch(oid):
                 raise ValueError(f"COMPILATION_OBS_ID_MALFORMED_{i}")
+            if oid in seen_ids:
+                raise ValueError(f"COMPILATION_DUPLICATE_OBS_ID_{i}")
+            seen_ids.add(oid)
+        if type(self.max_holding_bars) is not int:
+            raise ValueError("COMPILATION_MAX_HOLD_NOT_INT")
+        if self.max_holding_bars <= 0:
+            raise ValueError("COMPILATION_MAX_HOLD_INVALID")
         if self.protective_execution_included is not False:
             raise ValueError("COMPILATION_PROTECTIVE_NOT_FALSE")
         if self.replay_compatible is not False:
@@ -204,7 +249,7 @@ def compile_stage5_strategy_intent(
         raise ValueError("COMPILE_OBS_NOT_TUPLE")
     obs_count = max(0, (scored_end_exclusive_open_time_ms - scored_start_open_time_ms) // TIMEFRAME - 1)
     if len(observations) != obs_count:
-        raise ValueError(f"COMPILE_OBS_COUNT_MISMATCH")
+        raise ValueError("COMPILE_OBS_COUNT_MISMATCH")
     for i, obs in enumerate(observations):
         if type(obs) is not Stage5StrategyIntentObservation:
             raise ValueError(f"COMPILE_OBS_TYPE_{i}")
@@ -212,6 +257,16 @@ def compile_stage5_strategy_intent(
         expected_time = scored_start_open_time_ms + i * TIMEFRAME
         if obs.signal_bar_open_time_ms != expected_time:
             raise ValueError(f"COMPILE_OBS_TIME_MISMATCH_{i}")
+        if obs.strategy_id != strategy_id:
+            raise ValueError(f"COMPILE_OBS_STRATEGY_MISMATCH_{i}")
+        if obs.spec_id != spec_id:
+            raise ValueError(f"COMPILE_OBS_SPEC_MISMATCH_{i}")
+        if obs.parameter_id != parameter_id:
+            raise ValueError(f"COMPILE_OBS_PARAM_MISMATCH_{i}")
+        if obs.dataset_id != dataset_id:
+            raise ValueError(f"COMPILE_OBS_DATASET_MISMATCH_{i}")
+        if obs.symbol != symbol:
+            raise ValueError(f"COMPILE_OBS_SYMBOL_MISMATCH_{i}")
 
     terminal_bar_time = scored_end_exclusive_open_time_ms - TIMEFRAME
     instructions = []
@@ -282,12 +337,14 @@ def compile_stage5_strategy_intent(
     p = {
         "schemaVersion": COMPILATION_SCHEMA, "scope": COMPILATION_SCOPE,
         "planId": plan.plan_id, "observationIds": list(obs_ids),
+        "maxHoldingBars": max_holding_bars,
         "protectiveExecutionIncluded": False, "replayCompatible": False,
         "requiresProtectiveStateBridge": True,
     }
     return Stage5IntentCompilation(
         schema_version=COMPILATION_SCHEMA, scope=COMPILATION_SCOPE,
         plan=plan, observation_ids=obs_ids,
+        max_holding_bars=max_holding_bars,
         protective_execution_included=False, replay_compatible=False,
         requires_protective_state_bridge=True,
         compilation_id=canonical_sha256(p),
