@@ -467,6 +467,55 @@ class ProducerTests(unittest.TestCase):
         self.assertEqual(s.parameter_id, spec.parameter_id)
 
     # --- Revision 2B tests ---
+    def test_forbidden_imports(self):
+        self._check_imports(["quant_engine.strategy_spec","quant_engine.strategy_adapter",
+            "quant_engine.proof.stage5_harness","quant_engine.proof.stage5r1_replay",
+            "quant_engine.proof.stage5r1_protective_replay","pandas","numpy","quant_engine.indicators"])
+
+    def test_transitive_no_forbidden(self):
+        import ast,importlib.util,os
+        forbidden_root_prefixes = ["quant_engine.strategy_spec","quant_engine.strategy_adapter",
+            "quant_engine.proof.stage5_harness","quant_engine.proof.stage5r1_replay",
+            "quant_engine.proof.stage5r1_protective_replay","pandas","numpy","quant_engine.indicators"]
+        required = ["quant_engine.proof.stage5_observation_producer","quant_engine.proof.stage5_intent_compiler",
+                     "quant_engine.proof.stage5_evaluation"]
+        visited,parsed,queue = set(),set(),["quant_engine.proof.stage5_observation_producer"]
+        proj = os.path.realpath(os.path.join(os.path.dirname(__file__),".."))
+        while queue:
+            mn = queue.pop(0)
+            if mn in visited: continue
+            visited.add(mn)
+            try: ms = importlib.util.find_spec(mn)
+            except: self.fail(f"find_spec:{mn}")
+            if not ms or not ms.origin: self.fail(f"no_origin:{mn}")
+            fp = os.path.realpath(ms.origin)
+            if not fp.startswith(proj): continue
+            with open(fp) as f: tree = ast.parse(f.read())
+            parsed.add(mn)
+            for n in ast.walk(tree):
+                if isinstance(n,ast.Import):
+                    for a in n.names: queue.append(a.name)
+                elif isinstance(n,ast.ImportFrom) and n.module:
+                    if n.level == 0: queue.append(n.module)
+                    else:
+                        base = mn.rsplit(".",n.level)[0] if n.level>0 else mn
+                        queue.append(f"{base}.{n.module}" if n.module else base)
+        for r in required: self.assertIn(r, parsed, f"missing:{r}")
+        for root in forbidden_root_prefixes:
+            self.assertFalse(any(m == root or m.startswith(root+".") for m in visited), f"Forbidden:{root}")
+        self.assertTrue(any("stage5_intent" in m for m in visited), "self-test")
+
+    def _check_imports(self, forbidden_roots):
+        import ast,os
+        path = os.path.join(os.path.dirname(__file__),"..","proof","stage5_observation_producer.py")
+        with open(path) as f: tree = ast.parse(f.read())
+        imports = set()
+        for node in ast.walk(tree):
+            if isinstance(node,ast.Import): imports.update(a.name for a in node.names)
+            elif isinstance(node,ast.ImportFrom) and node.module: imports.add(node.module)
+        for root in forbidden_roots:
+            self.assertFalse(any(m == root or m.startswith(root+".") for m in imports), f"Forbidden:{root}")
+
     def test_eq_strict_type_bool_int_float_str(self):
         self.assertNotEqual(_freeze(True),_freeze(1)); self.assertNotEqual(_freeze(1),_freeze(1.0))
 
@@ -516,35 +565,23 @@ class ProducerTests(unittest.TestCase):
         object.__setattr__(b,"frozen_spec_id","x"*64)
         with self.assertRaises(ValueError): Stage5ObservationBatch.__post_init__(b)
 
-    def test_transitive_no_forbidden_via_exact_roots(self):
-        import ast,importlib.util,os
-        fbd=["quant_engine.strategy_spec","quant_engine.strategy_adapter","quant_engine.stage5_harness",
-             "quant_engine.stage5r1_replay","quant_engine.stage5r1_protective_replay","pandas","numpy","quant_engine.indicators"]
-        required=["quant_engine.proof.stage5_observation_producer","quant_engine.proof.stage5_intent_compiler","quant_engine.proof.stage5_evaluation"]
-        visited,parsed,queue=set(),set(),["quant_engine.proof.stage5_observation_producer"]
-        proj=os.path.realpath(os.path.join(os.path.dirname(__file__),".."))
-        while queue:
-            mn=queue.pop(0)
-            if mn in visited: continue
-            visited.add(mn)
-            try:ms=importlib.util.find_spec(mn)
-            except:self.fail(f"find_spec:{mn}")
-            if not ms or not ms.origin:self.fail(f"no_origin:{mn}")
-            fp=os.path.realpath(ms.origin)
-            if not fp.startswith(proj):continue
-            with open(fp) as f:tree=ast.parse(f.read())
-            parsed.add(mn)
-            for n in ast.walk(tree):
-                if isinstance(n,ast.Import):
-                    for a in n.names:queue.append(a.name)
-                elif isinstance(n,ast.ImportFrom) and n.module:
-                    if n.level==0:queue.append(n.module)
-                    else:
-                        base=mn.rsplit(".",n.level)[0] if n.level>0 else mn
-                        queue.append(f"{base}.{n.module}" if n.module else base)
-        for r in required:self.assertIn(r,parsed,f"missing:{r}")
-        for f in fbd:self.assertFalse(any(m==f or m.startswith(f+".") for m in visited),f"Forbidden:{f}")
-        self.assertTrue(any("stage5_intent" in m for m in visited),"self-test")
+    def test_forbidden_root_prefix_matching(self):
+        roots = ["quant_engine.strategy_spec","quant_engine.strategy_adapter",
+            "quant_engine.proof.stage5_harness","quant_engine.proof.stage5r1_replay",
+            "quant_engine.proof.stage5r1_protective_replay","pandas","numpy","quant_engine.indicators"]
+        # Exact match
+        for r in roots: self.assertIn(r, roots)
+        # Sub-module matches
+        self.assertTrue("quant_engine.strategy_spec.core".startswith("quant_engine.strategy_spec."))
+        # Near-match: substring but not prefix-with-dot
+        self.assertFalse("quant_engine.strategy_specX".startswith("quant_engine.strategy_spec."))
+        self.assertFalse("quant_engine.strategy_specX" == "quant_engine.strategy_spec")
+        # Verify: near-match does NOT equal root
+        for root in roots:
+            if "quant_engine.strategy_specX" == root: self.fail("near-match should not equal root")
+        # But sub-module of a rooted module IS matched
+        self.assertTrue(any("quant_engine.strategy_spec.core" == r or
+            "quant_engine.strategy_spec.core".startswith(r+".") for r in roots))
 
     def test_all_mode_all_clauses_needed(self):
         from quant_engine.proof.stage5_observation_producer import _safe_compare
@@ -554,6 +591,47 @@ class ProducerTests(unittest.TestCase):
     def test_any_mode_one_sufficient(self):
         from quant_engine.proof.stage5_observation_producer import _safe_compare
         self.assertTrue(_safe_compare(0.7,"gte",0.5))
+
+    # --- 2B.1: hostile boundary RED tests ---
+    def test_timeframe_list_item_rejected(self):
+        p = _trend_impulse_payload(); p["timeframe"] = [["5m"]]
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_timeframe_dict_item_rejected(self):
+        p = _trend_impulse_payload(); p["timeframe"] = [{"x":"5m"}]
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_symbol_list_item_rejected(self):
+        p = _trend_impulse_payload(); p["symbols"] = [[_SYM]]
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_lifecycle_flatEntry_hostile_rejected(self):
+        p = _trend_impulse_payload(); p["positionLifecycle"]["flatEntry"] = True
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_lifecycle_reversal_hostile_rejected(self):
+        p = _trend_impulse_payload(); p["positionLifecycle"]["reversal"] = 1
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_risk_stopLoss_hostile_rejected(self):
+        p = _trend_impulse_payload(); p["riskRules"]["stopLoss"] = []
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_risk_takeProfit_hostile_rejected(self):
+        p = _trend_impulse_payload(); p["riskRules"]["takeProfit"] = {}
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
+
+    def test_warmup_bool_rejected(self):
+        p = _trend_impulse_payload(); p["warmupBars"] = True
+        with self.assertRaises(ValueError):
+            create_frozen_rule_spec(p, _spec_id(p), {"tp":21,"tm":2.0,"max_holding_bars":96})
 
 
 if __name__=="__main__":

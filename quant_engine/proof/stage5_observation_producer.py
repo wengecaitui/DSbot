@@ -191,27 +191,28 @@ def _validate_and_extract_spec(spec_dict, param_dict):
     if type(ver) is not str or not ver: raise ValueError("SPEC_VER_INVALID")
 
     # Execution timing
-    if spec_dict["executionTiming"] != SUPPORTED_EXECUTION:
+    et = spec_dict["executionTiming"]
+    if type(et) is not str or et != SUPPORTED_EXECUTION:
         raise ValueError("SPEC_EXEC_INVALID")
 
     # Timeframe
     tf = spec_dict["timeframe"]
     if type(tf) is not list or not tf: raise ValueError("SPEC_TIMEFRAME_INVALID")
-    if len(set(tf)) != len(tf): raise ValueError("SPEC_TIMEFRAME_DUPLICATE")
     for item in tf:
-        if type(item) is not str: raise ValueError("SPEC_TIMEFRAME_ITEM_TYPE")
+        if type(item) is not str or not item: raise ValueError("SPEC_TIMEFRAME_ITEM_TYPE")
+    if len(set(tf)) != len(tf): raise ValueError("SPEC_TIMEFRAME_DUPLICATE")
     if "5m" not in tf: raise ValueError("SPEC_NO_5M")
 
     # Symbols
     symbols = spec_dict["symbols"]
     if type(symbols) is not list or not symbols: raise ValueError("SPEC_SYMBOLS_INVALID")
-    if len(set(symbols)) != len(symbols): raise ValueError("SPEC_SYMBOLS_DUPLICATE")
     for item in symbols:
-        if type(item) is not str: raise ValueError("SPEC_SYMBOL_ITEM_TYPE")
+        if type(item) is not str or not item: raise ValueError("SPEC_SYMBOL_ITEM_TYPE")
+    if len(set(symbols)) != len(symbols): raise ValueError("SPEC_SYMBOLS_DUPLICATE")
 
     # Warmup
     warmup = spec_dict["warmupBars"]
-    if type(warmup) is not int or warmup < 2: raise ValueError("SPEC_WARMUP_INVALID")
+    if isinstance(warmup, bool) or type(warmup) is not int or warmup < 2: raise ValueError("SPEC_WARMUP_INVALID")
 
     # Components
     comps_raw = spec_dict["components"]
@@ -246,13 +247,17 @@ def _validate_and_extract_spec(spec_dict, param_dict):
 
     # Position lifecycle
     plc = spec_dict["positionLifecycle"]
-    if type(plc) is not dict or not plc.get("flatEntry") or not plc.get("reversal"):
-        raise ValueError("SPEC_LIFECYCLE_INVALID")
+    if type(plc) is not dict: raise ValueError("SPEC_LIFECYCLE_NOT_DICT")
+    fe = plc.get("flatEntry"); rv = plc.get("reversal")
+    if type(fe) is not str or not fe: raise ValueError("SPEC_LIFECYCLE_FLATENTRY_INVALID")
+    if type(rv) is not str or not rv: raise ValueError("SPEC_LIFECYCLE_REVERSAL_INVALID")
 
     # Risk rules
     risk = spec_dict["riskRules"]
-    if type(risk) is not dict or not risk.get("stopLoss") or not risk.get("takeProfit"):
-        raise ValueError("SPEC_RISK_INVALID")
+    if type(risk) is not dict: raise ValueError("SPEC_RISK_NOT_DICT")
+    sl = risk.get("stopLoss"); tp = risk.get("takeProfit")
+    if type(sl) is not str or not sl: raise ValueError("SPEC_RISK_STOPLOSS_INVALID")
+    if type(tp) is not str or not tp: raise ValueError("SPEC_RISK_TAKEPROFIT_INVALID")
 
     # Cost model
     if type(spec_dict["costModel"]) is not dict: raise ValueError("SPEC_COST_INVALID")
