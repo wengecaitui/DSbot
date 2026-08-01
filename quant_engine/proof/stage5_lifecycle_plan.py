@@ -1,4 +1,13 @@
-"""Stage 5.4-A — Atomic lifecycle instruction contract."""
+"""Stage 5.4-A — Atomic lifecycle instruction contract.
+
+Deterministic, versioned instruction-plan contract that represents
+closed-bar-next-open STRATEGY INTENT ONLY. This plan does NOT encode
+protective stop/take-profit execution, fills, trade replay, or
+replay-ready instruction conversion. Strategy intent is asserted at
+bar boundaries; actual protective execution may flatten positions
+before later strategy entries, and the resulting execution state may
+diverge from the intent state modelled here.
+"""
 
 from __future__ import annotations
 
