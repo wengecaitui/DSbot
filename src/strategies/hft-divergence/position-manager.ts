@@ -159,9 +159,11 @@ export function createDivPositionManager(
           continue;
         }
 
-        // 3. Stop loss — uses value FROZEN AT ENTRY (fixed or adaptive),
-        // never recomputed from live config.
-        const effectiveSlPct = pos.effectiveStopLossPct;
+        // 3. Stop loss — preserve the legacy live-config fixed stop while the
+        // feature is off; adaptive stops stay frozen at entry.
+        const effectiveSlPct = pos.adaptiveStopEnabledAtEntry
+          ? pos.effectiveStopLossPct
+          : config.stopLossPct;
         if (pnlPct <= -effectiveSlPct) {
           exits.push({ positionId: pos.id, reason: 'stop_loss', exitPrice: price });
           continue;

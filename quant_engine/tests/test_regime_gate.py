@@ -12,6 +12,7 @@ import unittest
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from quant_engine.indicators.regime_gate import (
+    calculate,
     classify,
     entry_policy,
     SCHEMA_VERSION,
@@ -29,6 +30,14 @@ GOLDEN_PATH = os.path.join(
     "fixtures",
     "regime-gate-golden-vectors.json",
 )
+SNAPSHOT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "..",
+    "tests",
+    "fixtures",
+    "regime-gate-snapshot-parity.json",
+)
 
 
 class TestRegimeGateGoldenVectors(unittest.TestCase):
@@ -40,6 +49,8 @@ class TestRegimeGateGoldenVectors(unittest.TestCase):
             raise unittest.SkipTest(f"Golden vectors not found: {GOLDEN_PATH}")
         with open(GOLDEN_PATH) as f:
             cls.vectors = json.load(f)
+        with open(SNAPSHOT_PATH) as f:
+            cls.expected_snapshots = json.load(f)
 
     def test_golden_vectors(self):
         failures = []
@@ -53,6 +64,7 @@ class TestRegimeGateGoldenVectors(unittest.TestCase):
                     f'{vec["id"]}: expected {vec["expectedRegime"]}, got {snapshot["regime"]} (reason={snapshot["reasonCode"]})',
                 )
                 self.assertEqual(snapshot["valid"], vec["expectedValid"])
+                self.assertEqual(snapshot, self.expected_snapshots[vec["id"]])
                 decision = entry_policy(snapshot)
                 self.assertEqual(
                     decision["allow"],
@@ -70,6 +82,25 @@ class TestRegimeGateGoldenVectors(unittest.TestCase):
 
 
 class TestRegimeGatePython(unittest.TestCase):
+
+    def test_dataframe_without_timestamp_fails_closed(self):
+        import pandas as pd
+
+        snapshot = calculate(pd.DataFrame({"close": [100.0] * 30}), {})
+        self.assertFalse(snapshot["valid"])
+        self.assertEqual(snapshot["reasonCode"], "invalid_config")
+
+    def test_unsupported_or_malformed_window_fails_closed(self):
+        obs = {
+            "prices": [100.0] * 30,
+            "closeTimesMs": [i * 1000 for i in range(30)],
+            "decisionTimeMs": 29000,
+        }
+        for window in (10, 21, "bad", None):
+            with self.subTest(window=window):
+                snapshot = calculate(obs, {"window": window})
+                self.assertFalse(snapshot["valid"])
+                self.assertEqual(snapshot["reasonCode"], "invalid_config")
 
     def test_schema_version_matches_ts(self):
         self.assertEqual(SCHEMA_VERSION, "regime-snapshot-v1")
@@ -135,8 +166,7 @@ class TestRegimeGatePython(unittest.TestCase):
         flat = [100.0 + (0.001 if i % 2 == 0 else -0.001) for i in range(30)]
         times = [i * 1000 for i in range(30)]
         s = classify(flat, times, 29000)
-        # With tight range, should be calm or recovery (not stress/onset)
-        self.assertIn(s["regime"], ("calm", "recovery"))
+        self.assertEqual(s["regime"], "calm")
 
 
 class TestRegimeGateValidation(unittest.TestCase):

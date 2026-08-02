@@ -180,6 +180,29 @@ function validateRiskConfig(c: CryptoHftConfig): string[] {
   ];
 }
 
+export interface RegimeGateTick {
+  price: number;
+  ts: number;
+}
+
+/**
+ * Evaluate newest-first closed ticks through the shared fail-closed regime
+ * contract. Empty and warm-up buffers classify as UNKNOWN and block entries.
+ */
+export function evaluateRegimeGateTicks(ticks: readonly RegimeGateTick[]): boolean {
+  const prices: number[] = [];
+  const closeTimesMs: number[] = [];
+  for (let i = ticks.length - 1; i >= 0; i--) {
+    prices.push(ticks[i].price);
+    closeTimesMs.push(ticks[i].ts);
+  }
+  const decisionTimeMs = closeTimesMs.length > 0
+    ? closeTimesMs[closeTimesMs.length - 1]
+    : Number.NaN;
+  const snapshot = classifyRegime({ prices, closeTimesMs, decisionTimeMs });
+  return evaluateRegimeEntryPolicy(snapshot).allow;
+}
+
 export function createCryptoHftEngine(
   cryptoFeed: CryptoFeed,
   execution: ExecutionService | null,
@@ -192,6 +215,10 @@ export function createCryptoHftEngine(
   }
 ): CryptoHftEngine {
   let config: CryptoHftConfig = { ...DEFAULT_CONFIG, ...initialConfig };
+  const initialRiskErrors = validateRiskConfig(config);
+  if (initialRiskErrors.length > 0) {
+    throw new TypeError(`Invalid crypto HFT risk config: ${initialRiskErrors.join('; ')}`);
+  }
   const getConfig = () => config;
   const positionMgr: PositionManager = createPositionManager(getConfig);
   const scanner: MarketScanner = createMarketScanner(getConfig);
@@ -282,18 +309,21 @@ export function createCryptoHftEngine(
     );
 
     if (config.dryRun) {
-      positionMgr.open({
-        strategy: signal.strategy,
-        asset: signal.asset,
-        direction: signal.direction,
-        tokenId: signal.tokenId,
-        conditionId: market.conditionId,
-        entryPrice: signal.price,
-        shares,
-        expiresAt: market.expiresAt,
-        wasMaker: isMaker,
-      });
-      orderInFlight = false;
+      try {
+        positionMgr.open({
+          strategy: signal.strategy,
+          asset: signal.asset,
+          direction: signal.direction,
+          tokenId: signal.tokenId,
+          conditionId: market.conditionId,
+          entryPrice: signal.price,
+          shares,
+          expiresAt: market.expiresAt,
+          wasMaker: isMaker,
+        });
+      } finally {
+        orderInFlight = false;
+      }
       return;
     }
 
@@ -453,7 +483,7 @@ export function createCryptoHftEngine(
 
   function applyRegimeGate(buffer: PriceBuffer): boolean {
     const ticks = buffer.prices;
-    if (ticks.length < 2) return true; // not enough data yet — not enabled path
+    if (ticks.length < 2) return evaluateRegimeGateTicks(ticks);
 
     // Build observation in chronological order (oldest → newest). The buffer
     // stores newest-first, so reverse it. Decision time = latest tick time.

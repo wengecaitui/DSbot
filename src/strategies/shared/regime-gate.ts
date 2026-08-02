@@ -82,9 +82,22 @@ export const REGIME_MAX_BAR_GAP_MS = 5 * 60_000;
 export const REGIME_STRESS_DD_THRESHOLD = -0.10;
 /** Drawdown above this with high vol = onset (trend starting). */
 export const REGIME_ONSET_DD_THRESHOLD = -0.05;
+/** Calm vol-of-vol ceiling as a fraction of the independently derived low-vol threshold. */
+export const REGIME_CALM_VOV_TO_LOW_VOL_RATIO = 0.03;
+
+const REGIME_FEATURE_PRECISION = Object.freeze({
+  vol: 10,
+  quarticity: 12,
+  drawdown: 10,
+  volOfVol: 10,
+});
 
 export function isFiniteNumber(v: number): boolean {
   return typeof v === 'number' && Number.isFinite(v);
+}
+
+function canonicalFeature(value: number, decimals: number): number {
+  return Number(value.toFixed(decimals));
 }
 
 /**
@@ -165,7 +178,7 @@ export function classifyRegime(obs: RegimeObservation): RegimeSnapshot {
   const volLow = sortedVol.length >= 5
     ? sortedVol[Math.floor(sortedVol.length * 0.30)]
     : vol * 0.5;
-  const vovHigh = volOfVol * 1.5;
+  const vovLow = volLow * REGIME_CALM_VOV_TO_LOW_VOL_RATIO;
 
   if (![vol, quarticity, jumpCount, drawdown, volOfVol].every(isFiniteNumber)) {
     return unknownSnapshot(obs, 'non_finite_input');
@@ -182,7 +195,7 @@ export function classifyRegime(obs: RegimeObservation): RegimeSnapshot {
     regime = 'onset';
   }
   // 3. calm: low vol + low vol-of-vol (flat market)
-  else if (vol < volLow && volOfVol < vovHigh * 0.3) {
+  else if (vol <= volLow && volOfVol <= vovLow) {
     regime = 'calm';
   }
   // 4. recovery: everything else
@@ -203,11 +216,11 @@ export function classifyRegime(obs: RegimeObservation): RegimeSnapshot {
     observationEndMs,
     decisionTimeMs: obs.decisionTimeMs,
     featureWindowSize,
-    vol,
-    quarticity,
+    vol: canonicalFeature(vol, REGIME_FEATURE_PRECISION.vol),
+    quarticity: canonicalFeature(quarticity, REGIME_FEATURE_PRECISION.quarticity),
     jumpCount,
-    drawdown,
-    volOfVol,
+    drawdown: canonicalFeature(drawdown, REGIME_FEATURE_PRECISION.drawdown),
+    volOfVol: canonicalFeature(volOfVol, REGIME_FEATURE_PRECISION.volOfVol),
     thresholdVersion: REGIME_THRESHOLD_VERSION,
   };
 }

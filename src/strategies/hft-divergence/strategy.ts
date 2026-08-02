@@ -13,6 +13,7 @@
  */
 
 import { logger } from '../../utils/logger.js';
+import { validateAdaptiveStopConfig } from '../shared/risk-config-validation.js';
 import type { CryptoFeed, PriceUpdate } from '../../feeds/crypto/index.js';
 import type { ExecutionService } from '../../execution/index.js';
 import { createDivergenceDetector, type DivergenceDetector } from './detector.js';
@@ -48,6 +49,10 @@ export function createHftDivergenceEngine(
   initialConfig: Partial<HftDivergenceConfig>
 ): HftDivergenceEngine {
   let config: HftDivergenceConfig = { ...DEFAULT_ENGINE_CONFIG, ...initialConfig };
+  const initialRiskErrors = validateAdaptiveStopConfig(config);
+  if (initialRiskErrors.length > 0) {
+    throw new TypeError(`Invalid HFT divergence risk config: ${initialRiskErrors.join('; ')}`);
+  }
   const getConfig = () => config;
 
   const detector: DivergenceDetector = createDivergenceDetector(config);
@@ -121,17 +126,20 @@ export function createHftDivergenceEngine(
     );
 
     if (config.dryRun) {
-      positions.open({
-        asset: signal.asset,
-        direction: signal.direction,
-        tokenId,
-        conditionId: market.conditionId,
-        strategyTag: signal.strategyTag,
-        entryPrice: price,
-        shares,
-        expiresAt: market.expiresAt,
-      });
-      orderInFlight = false;
+      try {
+        positions.open({
+          asset: signal.asset,
+          direction: signal.direction,
+          tokenId,
+          conditionId: market.conditionId,
+          strategyTag: signal.strategyTag,
+          entryPrice: price,
+          shares,
+          expiresAt: market.expiresAt,
+        });
+      } finally {
+        orderInFlight = false;
+      }
       return;
     }
 
@@ -307,7 +315,13 @@ export function createHftDivergenceEngine(
     },
 
     updateConfig(partial) {
-      config = { ...config, ...partial };
+      const merged = { ...config, ...partial };
+      const errors = validateAdaptiveStopConfig(merged);
+      if (errors.length > 0) {
+        logger.error({ errors, updated: Object.keys(partial) }, 'Divergence config update rejected: invalid risk feature config');
+        return;
+      }
+      config = merged;
       logger.info({ updated: Object.keys(partial) }, 'Divergence config updated');
     },
 
@@ -317,7 +331,7 @@ export function createHftDivergenceEngine(
 
 // ── Default Config ──────────────────────────────────────────────────────────
 
-const DEFAULT_ENGINE_CONFIG: HftDivergenceConfig = {
+export const DEFAULT_ENGINE_CONFIG: HftDivergenceConfig = {
   assets: ['BTC', 'ETH', 'SOL', 'XRP'],
   marketDurationSec: 900,
 

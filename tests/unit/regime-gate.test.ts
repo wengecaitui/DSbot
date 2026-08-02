@@ -18,6 +18,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const GOLDEN_PATH = join(__dirname, '..', 'fixtures', 'regime-gate-golden-vectors.json');
+const SNAPSHOT_PATH = join(__dirname, '..', 'fixtures', 'regime-gate-snapshot-parity.json');
 
 interface GoldenVector {
   id: string; description: string;
@@ -26,6 +27,7 @@ interface GoldenVector {
 }
 
 const VECTORS: GoldenVector[] = JSON.parse(readFileSync(GOLDEN_PATH, 'utf-8'));
+const EXPECTED_SNAPSHOTS: Record<string, unknown> = JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf-8'));
 
 describe('Regime Gate — golden vectors (TS)', () => {
   for (const vec of VECTORS) {
@@ -33,6 +35,7 @@ describe('Regime Gate — golden vectors (TS)', () => {
       const snapshot = classifyRegime(vec.obs as RegimeObservation);
       assert.equal(snapshot.regime, vec.expectedRegime);
       assert.equal(snapshot.valid, vec.expectedValid);
+      assert.deepEqual(snapshot, EXPECTED_SNAPSHOTS[vec.id]);
       const d = evaluateRegimeEntryPolicy(snapshot);
       assert.equal(d.allow, vec.expectedAllow);
     });

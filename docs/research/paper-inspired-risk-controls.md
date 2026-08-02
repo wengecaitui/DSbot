@@ -1,8 +1,8 @@
 # Paper-Inspired Risk Controls
 
-> **Classification:** Research Design Document  
-> **Branch:** `agent/p0-paper-inspired-risk-hardening`  
-> **Date:** 2026-08-01  
+> **Classification:** Research Design Document
+> **Branch:** `agent/p0-paper-inspired-risk-hardening`
+> **Date:** 2026-08-01
 
 ## Important Attribution
 
@@ -26,7 +26,7 @@ All three features below are **project-specific engineering adaptations inspired
   - `|dist| > 0.25` → EDGE (k=1.5, tightest)
 - `effectiveStopPct = min(basePct × (k / normalK), basePct × 1.5)`
 - **Frozen at entry**: `OpenPosition` stores `effectiveStopLossPct`, `adaptiveStopPolicyVersion`, `adaptiveStopEntryPrice`, `adaptiveStopEnabledAtEntry`. `checkExits()` only reads the frozen value.
-- `updateConfig()` never moves existing positions' stops.
+- `updateConfig()` never moves an enabled adaptive stop after entry; when the feature is disabled, the legacy fixed stop continues to follow live `stopLossPct` updates.
 - Both `crypto-hft` and `hft-divergence` call the SAME `computeAdaptiveStop()` function.
 - Default: `adaptiveStoplossEnabled=false` → uses fixed `stopLossPct` exactly as before.
 

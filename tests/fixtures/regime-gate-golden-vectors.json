@@ -69,7 +69,7 @@
       ],
       "decisionTimeMs": 29000
     },
-    "expectedRegime": "recovery",
+    "expectedRegime": "calm",
     "expectedValid": true,
     "expectedAllow": true
   },

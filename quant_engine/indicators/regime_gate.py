@@ -34,6 +34,7 @@ WINDOW = 20
 MAX_BAR_GAP_MS = 5 * 60_000
 STRESS_DD_THRESHOLD = -0.10
 ONSET_DD_THRESHOLD = -0.05
+CALM_VOV_TO_LOW_VOL_RATIO = 0.03
 
 # Priority (frozen by parity tests):
 #   INVALID/UNKNOWN -> persistent_stress -> onset -> calm -> recovery
@@ -151,14 +152,14 @@ def classify(prices: List[Any], close_times_ms: List[Any], decision_time_ms: Any
     else:
         vol_high = vol * 2.0
         vol_low = vol * 0.5
-    vov_high = vol_of_vol * 1.5
+    vov_low = vol_low * CALM_VOV_TO_LOW_VOL_RATIO
 
     # ── Deterministic classification with frozen priority ──────────────────
     if vol > vol_high and drawdown < STRESS_DD_THRESHOLD:
         regime = "persistent_stress"
     elif vol > vol_high and drawdown > ONSET_DD_THRESHOLD:
         regime = "onset"
-    elif vol < vol_low and vol_of_vol < vov_high * 0.3:
+    elif vol <= vol_low and vol_of_vol <= vov_low:
         regime = "calm"
     else:
         regime = "recovery"
@@ -203,8 +204,11 @@ def calculate(df, params: Dict) -> Dict[str, Any]:
     Converts OHLC bars into the shared observation contract and returns a
     RegimeSnapshot dict.
     """
-    window = int(params.get("window", WINDOW))
-    if window <= 0:
+    try:
+        window = int(params.get("window", WINDOW))
+    except (TypeError, ValueError):
+        return _unknown_snapshot(0.0, "invalid_config")
+    if window != WINDOW:
         return _unknown_snapshot(0.0, "invalid_config")
 
     # DataFrame path
@@ -217,10 +221,8 @@ def calculate(df, params: Dict) -> Dict[str, Any]:
         elif "timestamp" in df.columns:
             times = df["timestamp"].tolist()
         else:
-            # Synthetic monotonically increasing timestamps (1s apart) —
-            # cannot verify gaps, so treat as valid only if bars are closed
-            # by construction; caller must pass ts for gap detection.
-            times = [float(i) * 1000 for i in range(len(closes))]
+            # Causal proof requires source timestamps; never fabricate them.
+            return _unknown_snapshot(0.0, "invalid_config")
         decision = float(times[-1]) if times else 0.0
         return classify(closes, times, decision)
 

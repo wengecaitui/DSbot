@@ -335,10 +335,11 @@ export function createPositionManager(
         }
 
         // 3. Stop loss — always taker (speed matters when losing)
-        // Uses the value FROZEN AT ENTRY (pos.effectiveStopLossPct), which is
-        // either the fixed stopLossPct (adaptive disabled) or the adaptive
-        // stop computed once at open(). Never recomputed from live config.
-        const effectiveSlPct = pos.effectiveStopLossPct;
+        // Preserve the legacy live-config fixed stop while the feature is off.
+        // Adaptive stops are frozen at entry and never recomputed per tick.
+        const effectiveSlPct = pos.adaptiveStopEnabledAtEntry
+          ? pos.effectiveStopLossPct
+          : config.stopLossPct;
         if (pnlPct <= -effectiveSlPct) {
           exits.push({ position: pos, reason: 'stop_loss', exitPrice: price, useMaker: false });
           continue;
@@ -449,6 +450,21 @@ export function createPositionManager(
       if (pos.id === probePositionId) {
         probePositionId = null;
         costHurdleProbeInFlight = false;
+        const aggregate = aggregateCostSamples(costSamples);
+        const ratio = aggregate.aggregateGrossPnlUsd > 0
+          ? aggregate.aggregateFeeCostUsd / aggregate.aggregateGrossPnlUsd
+          : null;
+        const remainsBlocked = config.costHurdleGateEnabled
+          && costSamples.length >= config.costHurdleMinCompletedTrades
+          && ratio !== null
+          && ratio > config.costHurdleMaxCostRatio;
+        if (remainsBlocked) {
+          costHurdleBlockedAtMs = now;
+          costHurdleNextProbeAtMs = now + config.costHurdleBlockCooldownSec * 1000;
+        } else {
+          costHurdleBlockedAtMs = null;
+          costHurdleNextProbeAtMs = null;
+        }
       }
 
       // Set exit cooldown for this coin+direction
