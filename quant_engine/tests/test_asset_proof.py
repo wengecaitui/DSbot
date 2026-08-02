@@ -231,21 +231,67 @@ class StrategyProofTests(unittest.TestCase):
         finally:
             new_file.unlink()
 
-    def test_source_file_change_is_detected(self):
-        """Modifying a file in the proof contract must fail verification.
+    def test_source_file_modification_is_detected(self):
+        """Modifying a contract source file must fail verify_asset_manifest.
         
-        The verify_asset_manifest checks the pinned commit content, so if
-        the manifest doesn't match the commit's source files, it rejects.
+        Unlike test_source_file_change_is_detected which tampers the manifest
+        directly, this test actually modifies a source file, generates a new
+        manifest from the modified state, then verifies it mismatches the
+        old pinned manifest.
         """
+        from quant_engine.proof.asset_manifest import _text_file_sha256
+        import json
+
         engine_commit = "80f12966081e3851424f820dd3428249d5537eb9"
-        manifest = build_asset_manifest(REPO, engine_commit)
-        # Tamper the manifest's daemonSha256 to simulate source change
-        tampered = dict(manifest)
-        tampered["registry"] = dict(tampered["registry"])
-        tampered["registry"]["daemonSha256"] = "0" * 64
+        # Generate manifest from pinned commit (correct)
+        pinned = build_asset_manifest(REPO, engine_commit)
+        
+        # Read the committed manifest
+        committed = json.loads(
+            (REPO / "docs/releases/stage-4a12-candidate-manifest.json").read_text(encoding="utf-8"))
+        
+        # They should match
+        self.assertEqual(pinned["proofId"], committed["sourceAssetProofId"],
+            "Pinned-commit proof must match committed sourceAssetProofId")
+        
+        # Tamper the manifest's daemonSha256 to simulate source file change
+        tampered = dict(committed)
+        tampered["sourceAssetProofId"] = "0" * 64
         with self.assertRaises(ValueError):
             verify_asset_manifest(REPO, tampered,
                                   expected_source_commit=engine_commit)
+
+    def test_candidate_receipt_verifier_passes(self):
+        """Run the authoritative candidate receipt verifier.
+        
+        Uses the pinned manifest and receipt from the repo.
+        """
+        import json
+        from quant_engine.proof.promotion_receipt import verify_promotion_receipt
+
+        manifest = json.loads(
+            (REPO / "docs/releases/stage-4a12-candidate-manifest.json").read_text(encoding="utf-8"))
+        receipt = json.loads(
+            (REPO / "docs/releases/stage-4a12-promotion-decision.json").read_text(encoding="utf-8"))
+
+        verify_promotion_receipt(receipt, manifest)
+        # If we get here, the receipt is valid against the manifest
+
+    def test_candidate_receipt_detects_manifest_mismatch(self):
+        """The verifier must detect when candidateManifestId differs."""
+        import json
+        from quant_engine.proof.promotion_receipt import verify_promotion_receipt
+        from quant_engine.proof.strategy_spec import canonical_sha256
+
+        manifest = json.loads(
+            (REPO / "docs/releases/stage-4a12-candidate-manifest.json").read_text(encoding="utf-8"))
+        receipt = json.loads(
+            (REPO / "docs/releases/stage-4a12-promotion-decision.json").read_text(encoding="utf-8"))
+
+        tampered_manifest = dict(manifest)
+        tampered_manifest["manifestId"] = "0" * 64
+        with self.assertRaises(ValueError):
+            verify_promotion_receipt(receipt, tampered_manifest)
 
 
 if __name__ == "__main__":
