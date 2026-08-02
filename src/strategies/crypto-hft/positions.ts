@@ -4,17 +4,34 @@
  * Exits (priority order):
  *  1. Force exit (< forceExitSec before expiry)
  *  2. Take profit
- *  3. Stop loss
+ *  3. Stop loss (frozen effective stop — adaptive or fixed)
  *  4. Ratchet floor (progressive giveback from confirmed high)
  *  5. Trailing stop (time-aware: tightens near expiry)
  *  6. Depth collapse (depth -60%, price dropping)
  *  7. Stale profit (up +9%, bid unchanged 7s)
  *  8. Stagnant profit (at +3% for 13s, no progress)
  *  9. Time exit (< minTimeLeftSec)
+ *
+ * Paper-inspired hardening (single authoritative implementations in
+ * src/strategies/shared/):
+ *  - Price-Level Adaptive Initial Stop: adaptive-stop.ts
+ *    (AdaptiveTrend-inspired, arXiv 2602.11708 — project-specific
+ *    binary-market heuristic, NOT an exact reproduction)
+ *  - Realized Cost-Drag Circuit Breaker: inline below (FEES_ONLY)
+ *    (inspired by arXiv 2607.19453 — predictive accuracy != profitability)
  */
 
 import { logger } from '../../utils/logger.js';
 import { takerFeePct } from './types.js';
+import { computeAdaptiveStop, ADAPTIVE_STOP_POLICY_VERSION } from '../shared/adaptive-stop.js';
+import {
+  aggregateCostSamples,
+  computeCostAuditMetrics,
+  validateCostSample,
+  type TradeCostSample,
+  type CostHurdleStatus,
+} from '../shared/cost-drag.js';
+import { COST_MODEL_SCOPE } from '../shared/cost-drag.js';
 import type {
   CryptoHftConfig,
   OpenPosition,
@@ -73,6 +90,11 @@ function getTimeTrailPct(timeLeftSec: number): number {
 
 // ── Position Manager ────────────────────────────────────────────────────────
 
+export interface PositionManagerOptions {
+  /** Injectable clock. Defaults to Date.now. All timestamps use this clock. */
+  nowMs?: () => number;
+}
+
 export interface PositionManager {
   open(params: {
     strategy: string;
@@ -104,15 +126,31 @@ export interface PositionManager {
   getOpen(): OpenPosition[];
   getClosed(): ClosedPosition[];
   getStats(): HftStats;
+  /** Resets daily metrics only. Rolling cost samples / entry times / probe
+   *  state / cost-hurdle cooldown are intentionally NOT cleared (see docs). */
   resetDaily(): void;
 }
 
-export function createPositionManager(getConfig: () => CryptoHftConfig): PositionManager {
+export function createPositionManager(
+  getConfig: () => CryptoHftConfig,
+  options: PositionManagerOptions = {}
+): PositionManager {
+  const nowMs = options.nowMs ?? (() => Date.now());
   const positions = new Map<string, OpenPosition>();
   const closed: ClosedPosition[] = [];
   let dailyPnl = 0;
   let lastStopLossAt = 0;
   let nextId = 1;
+
+  // ── Cost-Drag breaker state (MEMORY_ONLY) ────────────────────────────────
+  // STATE_PERSISTENCE=MEMORY_ONLY — PROCESS_RESTART_RESETS_WINDOW=true.
+  const costSamples: TradeCostSample[] = [];     // capped at costHurdleWindowTrades
+  const entryOpenedAtMs: number[] = [];          // successful OPEN timestamps (60-min rolling)
+  let costHurdleBlockedAtMs: number | null = null;
+  let costHurdleNextProbeAtMs: number | null = null;
+  let costHurdleProbeInFlight = false;
+  let probePositionId: string | null = null;
+  let probeEligible = false;
 
   // Per coin+direction exit cooldowns
   const exitCooldowns = new Map<string, number>();
@@ -125,7 +163,50 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
     open(params) {
       const id = `hft-${nextId++}`;
       const entryFeePct = params.wasMaker ? 0 : takerFeePct(params.entryPrice);
-      const now = Date.now();
+      const now = nowMs();
+      const config = getConfig();
+
+      // ── Freeze effective stop at entry (never recomputed per-tick) ──────
+      // adaptiveStopEnabledAtEntry + policyVersion + entryPrice are frozen so
+      // a later updateConfig() cannot move an already-open position's stop.
+      let effectiveStopLossPct = config.stopLossPct;
+      let adaptiveStopEnabledAtEntry = false;
+      let adaptiveStopEntryPrice = params.entryPrice;
+      let adaptiveStopPolicyVersion = 'fixed-stop';
+
+      if (config.adaptiveStoplossEnabled) {
+        const r = computeAdaptiveStop({
+          entryPrice: params.entryPrice,
+          baseStopLossPct: config.adaptiveSlBasePct,
+          highK: config.adaptiveSlHighK,
+          normalK: config.adaptiveSlNormalK,
+          lowK: config.adaptiveSlLowK,
+          maxMultiplier: config.adaptiveSlMaxMultiplier,
+        });
+        effectiveStopLossPct = r.effectiveStopLossPct;
+        adaptiveStopEnabledAtEntry = true;
+        adaptiveStopEntryPrice = params.entryPrice;
+        adaptiveStopPolicyVersion = r.policyVersion;
+      }
+
+      // ── Cost-drag probe consumption ──────────────────────────────────────
+      // If canOpen() granted a probe entry (cooldown expired while blocked),
+      // this open() consumes it: at most one unsettled probe at any time.
+      if (probeEligible) {
+        probeEligible = false;
+        costHurdleProbeInFlight = true;
+        probePositionId = id;
+      }
+
+      // Rolling 60-min entry count (basis: OPENED positions, not fills/closes)
+      entryOpenedAtMs.push(now);
+      const hourlyCutoff = now - 3_600_000;
+      while (entryOpenedAtMs.length > 0 && entryOpenedAtMs[0] <= hourlyCutoff) {
+        entryOpenedAtMs.shift();
+      }
+      if (entryOpenedAtMs.length > 1000) {
+        entryOpenedAtMs.splice(0, entryOpenedAtMs.length - 1000);
+      }
 
       const pos: OpenPosition = {
         id,
@@ -153,6 +234,11 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         highPnlPct: 0,
         lowPnlPct: 0,
         wasEverPositive: false,
+        // Frozen-at-entry adaptive stop
+        effectiveStopLossPct,
+        adaptiveStopPolicyVersion,
+        adaptiveStopEntryPrice,
+        adaptiveStopEnabledAtEntry,
       };
 
       positions.set(id, pos);
@@ -166,6 +252,8 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
           shares: pos.shares,
           maker: pos.wasMakerEntry,
           fee: entryFeePct.toFixed(2) + '%',
+          effectiveSl: effectiveStopLossPct.toFixed(2) + '%',
+          adaptive: adaptiveStopEnabledAtEntry,
         },
         'Position opened'
       );
@@ -211,18 +299,18 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         }
         if (book.bestBid !== pos.lastBidPrice) {
           pos.lastBidPrice = book.bestBid;
-          pos.bidUnchangedSince = Date.now();
+          pos.bidUnchangedSince = nowMs();
         }
       }
 
       // Stagnant tracking — progress = PnL improved by >1% since last check
       if (Math.abs(pnlPct - pos.lastProgressPct) > 1) {
-        pos.lastProgressAt = Date.now();
+        pos.lastProgressAt = nowMs();
         pos.lastProgressPct = pnlPct;
       }
     },
 
-    checkExits(getBook, now = Date.now()) {
+    checkExits(getBook, now = nowMs()) {
       const config = getConfig();
       const exits: Array<{ position: OpenPosition; reason: ExitReason; exitPrice: number; useMaker: boolean }> = [];
 
@@ -247,7 +335,12 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         }
 
         // 3. Stop loss — always taker (speed matters when losing)
-        if (pnlPct <= -config.stopLossPct) {
+        // Preserve the legacy live-config fixed stop while the feature is off.
+        // Adaptive stops are frozen at entry and never recomputed per tick.
+        const effectiveSlPct = pos.adaptiveStopEnabledAtEntry
+          ? pos.effectiveStopLossPct
+          : config.stopLossPct;
+        if (pnlPct <= -effectiveSlPct) {
           exits.push({ position: pos, reason: 'stop_loss', exitPrice: price, useMaker: false });
           continue;
         }
@@ -326,21 +419,62 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
       const grossPnlUsd = (exitPrice - pos.entryPrice) * pos.shares;
       const entryFeeUsd = (pos.entryFeePct / 100) * pos.entryPrice * pos.shares;
       const exitFeeUsd = (exitFeePct / 100) * exitPrice * pos.shares;
-      const netPnlUsd = grossPnlUsd - entryFeeUsd - exitFeeUsd;
+      const feeCostUsd = entryFeeUsd + exitFeeUsd;
+      const netPnlUsd = grossPnlUsd - feeCostUsd;
       const netPnlPct = pos.costUsd > 0 ? (netPnlUsd / pos.costUsd) * 100 : 0;
-      const holdTimeSec = (Date.now() - pos.enteredAt) / 1000;
+      const now = nowMs();
+      const holdTimeSec = (now - pos.enteredAt) / 1000;
 
       dailyPnl += netPnlUsd;
-      if (reason === 'stop_loss') lastStopLossAt = Date.now();
+      if (reason === 'stop_loss') lastStopLossAt = now;
+
+      // ── Cost-drag sample (structured, FEES_ONLY) ─────────────────────────
+      const config = getConfig();
+      const sample: TradeCostSample = {
+        tradeId: pos.id,
+        openedAtMs: pos.enteredAt,
+        closedAtMs: now,
+        referenceNotionalUsd: pos.costUsd,
+        grossPnlUsd,
+        feeCostUsd,
+        netPnlUsd,
+      };
+      costSamples.push(sample);
+      if (costSamples.length > config.costHurdleWindowTrades) {
+        costSamples.splice(0, costSamples.length - config.costHurdleWindowTrades);
+      }
+
+      // ── Probe settlement ─────────────────────────────────────────────────
+      // If this was the single probe entry, clear probe-in-flight so the
+      // breaker can re-evaluate with the fresh sample.
+      if (pos.id === probePositionId) {
+        probePositionId = null;
+        costHurdleProbeInFlight = false;
+        const aggregate = aggregateCostSamples(costSamples);
+        const ratio = aggregate.aggregateGrossPnlUsd > 0
+          ? aggregate.aggregateFeeCostUsd / aggregate.aggregateGrossPnlUsd
+          : null;
+        const remainsBlocked = config.costHurdleGateEnabled
+          && costSamples.length >= config.costHurdleMinCompletedTrades
+          && ratio !== null
+          && ratio > config.costHurdleMaxCostRatio;
+        if (remainsBlocked) {
+          costHurdleBlockedAtMs = now;
+          costHurdleNextProbeAtMs = now + config.costHurdleBlockCooldownSec * 1000;
+        } else {
+          costHurdleBlockedAtMs = null;
+          costHurdleNextProbeAtMs = null;
+        }
+      }
 
       // Set exit cooldown for this coin+direction
-      exitCooldowns.set(cooldownKey(pos.asset, pos.direction), Date.now());
+      exitCooldowns.set(cooldownKey(pos.asset, pos.direction), now);
 
       const result: ClosedPosition = {
         ...pos,
         exitPrice,
         exitReason: reason,
-        exitedAt: Date.now(),
+        exitedAt: now,
         wasMakerExit: wasMaker,
         exitFeePct,
         pnlUsd: grossPnlUsd,
@@ -375,6 +509,7 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
 
     canOpen(asset, direction) {
       const config = getConfig();
+      const now = nowMs();
       if (positions.size >= config.maxPositions) {
         return { ok: false, reason: `Max positions (${config.maxPositions})` };
       }
@@ -382,8 +517,8 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         return { ok: false, reason: `Daily loss limit ($${config.maxDailyLossUsd})` };
       }
       // Stop loss cooldown
-      if (config.stopLossCooldownSec > 0 && Date.now() - lastStopLossAt < config.stopLossCooldownSec * 1000) {
-        const left = Math.ceil((config.stopLossCooldownSec * 1000 - (Date.now() - lastStopLossAt)) / 1000);
+      if (config.stopLossCooldownSec > 0 && now - lastStopLossAt < config.stopLossCooldownSec * 1000) {
+        const left = Math.ceil((config.stopLossCooldownSec * 1000 - (now - lastStopLossAt)) / 1000);
         return { ok: false, reason: `SL cooldown: ${left}s` };
       }
       // Already have position on this asset?
@@ -398,11 +533,55 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
       if (asset && direction) {
         const key = cooldownKey(asset, direction);
         const lastExit = exitCooldowns.get(key);
-        if (lastExit && Date.now() - lastExit < config.exitCooldownSec * 1000) {
-          const left = Math.ceil((config.exitCooldownSec * 1000 - (Date.now() - lastExit)) / 1000);
+        if (lastExit && now - lastExit < config.exitCooldownSec * 1000) {
+          const left = Math.ceil((config.exitCooldownSec * 1000 - (now - lastExit)) / 1000);
           return { ok: false, reason: `Exit cooldown ${asset} ${direction}: ${left}s` };
         }
       }
+
+      // ── Realized Cost-Drag Circuit Breaker (arXiv 2607.19453-inspired) ──
+      if (config.costHurdleGateEnabled) {
+        // 1. Rolling 60-min entry-count gate (basis: OPENED positions).
+        //    If count >= N, the NEXT entry would exceed the cap → reject.
+        if (config.costHurdleMaxTradesPerHour > 0) {
+          const cutoff = now - 3_600_000;
+          const hourly = entryOpenedAtMs.filter((t) => t > cutoff).length;
+          if (hourly >= config.costHurdleMaxTradesPerHour) {
+            return { ok: false, reason: `Turnover gate: ${hourly}/h >= max ${config.costHurdleMaxTradesPerHour}/h` };
+          }
+        }
+
+        // 2. Cost-ratio breaker with probe recovery (no permanent deadlock).
+        const warmedUp = costSamples.length >= config.costHurdleMinCompletedTrades;
+        if (warmedUp) {
+          const agg = aggregateCostSamples(costSamples);
+          const ratio = agg.aggregateGrossPnlUsd > 0
+            ? agg.aggregateFeeCostUsd / agg.aggregateGrossPnlUsd
+            : null;
+
+          // Trigger / re-trigger the block state.
+          if (ratio !== null && ratio > config.costHurdleMaxCostRatio) {
+            if (costHurdleProbeInFlight) {
+              return { ok: false, reason: 'Cost breaker: probe in flight' };
+            }
+            if (costHurdleBlockedAtMs === null) {
+              costHurdleBlockedAtMs = now;
+              costHurdleNextProbeAtMs = now + config.costHurdleBlockCooldownSec * 1000;
+            }
+            if (now < (costHurdleNextProbeAtMs ?? Infinity)) {
+              const leftSec = Math.ceil(((costHurdleNextProbeAtMs ?? now) - now) / 1000);
+              return { ok: false, reason: `Cost breaker: fees/gross ${ratio.toFixed(3)} > ${config.costHurdleMaxCostRatio.toFixed(2)} (probe in ${leftSec}s)` };
+            }
+            // Cooldown expired → grant exactly one probe entry.
+            probeEligible = true;
+          } else {
+            // Recovered (ratio <= threshold, or gross <= 0): clear block state.
+            costHurdleBlockedAtMs = null;
+            costHurdleNextProbeAtMs = null;
+          }
+        }
+      }
+
       return { ok: true };
     },
 
@@ -415,6 +594,7 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
     },
 
     getStats() {
+      const config = getConfig();
       const wins = closed.filter((c) => c.netPnlUsd > 0);
       const losses = closed.filter((c) => c.netPnlUsd <= 0);
       const grossPnl = closed.reduce((s, c) => s + c.pnlUsd, 0);
@@ -433,6 +613,19 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         exitReasons[c.exitReason] = (exitReasons[c.exitReason] ?? 0) + 1;
       }
 
+      // ── Cost-drag audit: amount-weighted over the rolling window ────────
+      const audit = computeCostAuditMetrics(costSamples, {
+        gateEnabled: config.costHurdleGateEnabled,
+        minCompletedTrades: config.costHurdleMinCompletedTrades,
+        probeInFlight: costHurdleProbeInFlight,
+        blocked: costHurdleBlockedAtMs !== null,
+      });
+      const { grossBps, netBps, costBps, costToGrossRatio, costModelScope, costHurdleStatus } = audit;
+
+      // Rolling 60-min entry count (basis: OPENED positions)
+      const oneHourAgo = nowMs() - 3_600_000;
+      const hourlyCount = entryOpenedAtMs.filter((t) => t > oneHourAgo).length;
+
       return {
         totalTrades: closed.length,
         wins: wins.length,
@@ -449,10 +642,22 @@ export function createPositionManager(getConfig: () => CryptoHftConfig): Positio
         makerEntryRate: closed.length > 0 ? (makerEntries / closed.length) * 100 : 0,
         makerExitRate: closed.length > 0 ? (makerExits / closed.length) * 100 : 0,
         exitReasons,
+        // Cost-drag audit
+        grossBps,
+        netBps,
+        costBps,
+        costToGrossRatio,
+        costModelScope,
+        costHurdleStatus,
+        hourlyTradeCount: hourlyCount,
+        hourlyTradeCountBasis: 'OPENED_POSITIONS',
       };
     },
 
     resetDaily() {
+      // Daily metrics only. Rolling cost samples, entry timestamps, probe
+      // state and cost-hurdle cooldown are intentionally NOT cleared — the
+      // cost-drag breaker is a rolling-window protection, not a daily reset.
       dailyPnl = 0;
       lastStopLossAt = 0;
       exitCooldowns.clear();

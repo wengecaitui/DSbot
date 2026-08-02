@@ -46,6 +46,15 @@ import type {
   ClosedPosition,
   ExitReason,
 } from './types.js';
+import {
+  classifyRegime,
+  evaluateRegimeEntryPolicy,
+} from '../shared/regime-gate.js';
+import {
+  validateAdaptiveStopConfig,
+  validateCostHurdleConfig,
+  validateRegimeGateConfig,
+} from '../shared/risk-config-validation.js';
 
 // ── Default Config (all real thresholds from firstorder.rs) ─────────────────
 
@@ -90,6 +99,17 @@ export const DEFAULT_CONFIG: CryptoHftConfig = {
   takeProfitPct: 15,
   stopLossPct: 12,
 
+  // ── Price-Level Adaptive Initial Stop (AdaptiveTrend-inspired, arXiv 2602.11708) ──
+  // Project-specific binary-market heuristic. NOT an exact reproduction of
+  // AdaptiveTrend. Entry-price distance from 0.50 is an uncertainty proxy,
+  // NOT measured ATR / verified realized volatility.
+  adaptiveStoplossEnabled: false,   // disabled by default — enable per-preset
+  adaptiveSlBasePct: 12,            // matches stopLossPct at normal-k
+  adaptiveSlHighK: 3.0,             // ATM zone (|dist| <= 0.15): wide stop
+  adaptiveSlNormalK: 2.0,           // MID zone (0.15 < |dist| <= 0.25): baseline
+  adaptiveSlLowK: 1.5,              // EDGE zone (|dist| > 0.25): tight stop
+  adaptiveSlMaxMultiplier: 1.5,     // cap effective stop at 1.5x base
+
   // Ratchet
   ratchetEnabled: true,
   ratchetConfirmTicks: 3,
@@ -114,6 +134,19 @@ export const DEFAULT_CONFIG: CryptoHftConfig = {
   exitCooldownSec: 60,
   negRisk: true,
   dryRun: true,
+
+  // ── Realized Cost-Drag Circuit Breaker (arXiv 2607.19453-inspired) ──
+  // FEES_ONLY cost model. Block only when fees/gross STRICTLY exceeds ratio.
+  costHurdleGateEnabled: false,          // disabled by default
+  costHurdleMaxCostRatio: 0.5,           // ratio > 0.50 blocks; == 0.50 allows
+  costHurdleWindowTrades: 50,            // rolling window: last 50 completed trades
+  costHurdleMinCompletedTrades: 20,      // warming-up gate (conservative, not tuned)
+  costHurdleBlockCooldownSec: 300,       // 5 min before a single probe entry
+  costHurdleMaxTradesPerHour: 0,         // 0 = disabled (basis: opened positions)
+
+  // ── Regime Gate (SUSA-inspired, arXiv 2607.22491) ──
+  // Four-state deterministic heuristic — NOT an exact SUSA reproduction.
+  regimeGateEnabled: false,              // disabled by default
 };
 
 // ── Engine Interface ────────────────────────────────────────────────────────
@@ -134,6 +167,42 @@ export interface CryptoHftEngine {
   onOrderbook(tokenId: string, bids: Array<[number, number]>, asks: Array<[number, number]>): void;
 }
 
+/**
+ * Fail-closed validation of all paper-inspired risk feature configs.
+ * Returns a list of error strings (empty = valid). Called at config-update
+ * time so invalid values never reach the hot loop.
+ */
+function validateRiskConfig(c: CryptoHftConfig): string[] {
+  return [
+    ...validateAdaptiveStopConfig(c),
+    ...validateCostHurdleConfig(c),
+    ...validateRegimeGateConfig(c),
+  ];
+}
+
+export interface RegimeGateTick {
+  price: number;
+  ts: number;
+}
+
+/**
+ * Evaluate newest-first closed ticks through the shared fail-closed regime
+ * contract. Empty and warm-up buffers classify as UNKNOWN and block entries.
+ */
+export function evaluateRegimeGateTicks(ticks: readonly RegimeGateTick[]): boolean {
+  const prices: number[] = [];
+  const closeTimesMs: number[] = [];
+  for (let i = ticks.length - 1; i >= 0; i--) {
+    prices.push(ticks[i].price);
+    closeTimesMs.push(ticks[i].ts);
+  }
+  const decisionTimeMs = closeTimesMs.length > 0
+    ? closeTimesMs[closeTimesMs.length - 1]
+    : Number.NaN;
+  const snapshot = classifyRegime({ prices, closeTimesMs, decisionTimeMs });
+  return evaluateRegimeEntryPolicy(snapshot).allow;
+}
+
 export function createCryptoHftEngine(
   cryptoFeed: CryptoFeed,
   execution: ExecutionService | null,
@@ -146,6 +215,10 @@ export function createCryptoHftEngine(
   }
 ): CryptoHftEngine {
   let config: CryptoHftConfig = { ...DEFAULT_CONFIG, ...initialConfig };
+  const initialRiskErrors = validateRiskConfig(config);
+  if (initialRiskErrors.length > 0) {
+    throw new TypeError(`Invalid crypto HFT risk config: ${initialRiskErrors.join('; ')}`);
+  }
   const getConfig = () => config;
   const positionMgr: PositionManager = createPositionManager(getConfig);
   const scanner: MarketScanner = createMarketScanner(getConfig);
@@ -236,18 +309,21 @@ export function createCryptoHftEngine(
     );
 
     if (config.dryRun) {
-      positionMgr.open({
-        strategy: signal.strategy,
-        asset: signal.asset,
-        direction: signal.direction,
-        tokenId: signal.tokenId,
-        conditionId: market.conditionId,
-        entryPrice: signal.price,
-        shares,
-        expiresAt: market.expiresAt,
-        wasMaker: isMaker,
-      });
-      orderInFlight = false;
+      try {
+        positionMgr.open({
+          strategy: signal.strategy,
+          asset: signal.asset,
+          direction: signal.direction,
+          tokenId: signal.tokenId,
+          conditionId: market.conditionId,
+          entryPrice: signal.price,
+          shares,
+          expiresAt: market.expiresAt,
+          wasMaker: isMaker,
+        });
+      } finally {
+        orderInFlight = false;
+      }
       return;
     }
 
@@ -390,6 +466,40 @@ export function createCryptoHftEngine(
     evaluateAll(asset);
   }
 
+  // ── Regime Gate (SUSA-inspired, arXiv 2607.22491) ─────────────────────────
+  //
+  // Uses the shared deterministic classifier + entry policy from
+  // src/strategies/shared/regime-gate.ts. This is a project-specific
+  // four-state heuristic inspired by SUSA's regime-conditioned interpretation
+  // finding — NOT an exact reproduction of the SUSA reservoir architecture.
+  //
+  // Spot-price adaptation: prices come from 1-second tick buffer; the last
+  // tick is treated as a closed observation at decision time (causal: we only
+  // use data available before the decision). No daemon round-trip, no network,
+  // no file I/O — hot-path safe.
+  //
+  // Policy: persistent_stress and UNKNOWN → BLOCK_NEW_ENTRY (fail-closed).
+  // The gate NEVER blocks exits / force exits / stop losses / risk reductions.
+
+  function applyRegimeGate(buffer: PriceBuffer): boolean {
+    const ticks = buffer.prices;
+    if (ticks.length < 2) return evaluateRegimeGateTicks(ticks);
+
+    // Build observation in chronological order (oldest → newest). The buffer
+    // stores newest-first, so reverse it. Decision time = latest tick time.
+    const prices: number[] = [];
+    const closeTimesMs: number[] = [];
+    for (let i = ticks.length - 1; i >= 0; i--) {
+      prices.push(ticks[i].price);
+      closeTimesMs.push(ticks[i].ts);
+    }
+    const decisionTimeMs = closeTimesMs[closeTimesMs.length - 1];
+
+    const snapshot = classifyRegime({ prices, closeTimesMs, decisionTimeMs });
+    const decision = evaluateRegimeEntryPolicy(snapshot);
+    return decision.allow;
+  }
+
   function evaluateAll(asset: string) {
     // Warmup check
     if (Date.now() - startedAt < config.warmupSec * 1000) return;
@@ -404,6 +514,13 @@ export function createCryptoHftEngine(
     // Can we open?
     const spotBuf = getSpotBuffer(asset);
     const polyBuf = getPolyBuffer(asset);
+
+    // ── Regime Gate (SUSA-inspired, arXiv 2607.22491) ──────────────────────
+    // Blocks NEW entries only during persistent_stress or UNKNOWN (fail-closed).
+    // Never blocks exits / stops / position management.
+    if (config.regimeGateEnabled) {
+      if (!applyRegimeGate(spotBuf)) return;
+    }
 
     // Gather context
     const round = scanner.getRound();
@@ -551,7 +668,14 @@ export function createCryptoHftEngine(
     },
 
     updateConfig(partial) {
-      config = { ...config, ...partial };
+      const merged = { ...config, ...partial };
+      // ── Fail-closed config validation (at update time, not in hot loop) ──
+      const errors = validateRiskConfig(merged);
+      if (errors.length > 0) {
+        logger.error({ errors, updated: Object.keys(partial) }, 'Config update rejected: invalid risk feature config');
+        return;
+      }
+      config = merged;
       logger.info({ updated: Object.keys(partial) }, 'Config updated');
     },
 

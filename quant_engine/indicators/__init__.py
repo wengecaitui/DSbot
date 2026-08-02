@@ -45,3 +45,10 @@ P3_INDICATORS: Dict[str, Any] = {
     "CompositeMomentum": calc_composite_momentum,
     "SmartOrderBlock": calc_smart_order_block,
 }
+
+# ─── P4: 论文方法 (arXiv 2607.22491 Regime Gate) ────────────────────────────
+from quant_engine.indicators.regime_gate import calculate as calc_regime_gate
+
+P4_INDICATORS: Dict[str, Any] = {
+    "RegimeGate": calc_regime_gate,
+}
