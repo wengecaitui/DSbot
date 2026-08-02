@@ -4,7 +4,7 @@ Accepts a Stage5IntentCompilation and maps its lifecycle plan to
 the Stage 5R1 deterministic protective replay infrastructure.
 
 Per-trade side (no global inference), TERMINAL_EXIT as EXIT,
-fail-closed on reversals, immutable lineage.
+fail-closed on reversals, immutable lineage, compilation re-validation.
 """
 
 from __future__ import annotations
@@ -80,16 +80,17 @@ def run_protective_strategy_replay(
     take_profit_bps: int = 200,
     capital: CapitalModel,
     cost: CostModel,
-    symbol: str = "DEFAULT",
 ) -> ProtectiveStrategyBridgeResult:
     """Map Stage5IntentCompilation → Protective Replay.
 
-    Per-trade side: each ENTER_LONG/ENTER_SHORT gets its own protective
-    binding with the correct side.  TERMINAL_EXIT maps to Replay EXIT.
-    Reversal actions are fail-closed.
+    Re-executes Stage5IntentCompilation.__post_init__() before use to
+    reject forged or tampered compilation objects.  Symbol is taken from
+    compilation.plan.symbol — no independent symbol input.
     """
     if type(compilation) is not Stage5IntentCompilation:
         raise ValueError("COMPILATION_TYPE_INVALID")
+    # Re-validate compilation: forged/tampered objects fail here
+    Stage5IntentCompilation.__post_init__(compilation)
     if type(capital) is not CapitalModel:
         raise ValueError("CAPITAL_TYPE_INVALID")
     if type(cost) is not CostModel:
@@ -98,12 +99,13 @@ def run_protective_strategy_replay(
         raise ValueError("SL_BPS_INVALID")
     if isinstance(take_profit_bps, bool) or type(take_profit_bps) is not int or take_profit_bps <= 0:
         raise ValueError("TP_BPS_INVALID")
-    if not symbol or not isinstance(symbol, str):
-        raise ValueError("SYMBOL_INVALID")
 
     plan = compilation.plan
     if type(plan) is not Stage5LifecyclePlan:
         raise ValueError("PLAN_TYPE_INVALID")
+
+    # Symbol is bound to the plan
+    symbol = plan.symbol
 
     valid_bars = validate_bar_sequence(bars)
     bar_by_time = {b.open_time_ms: b for b in valid_bars}
