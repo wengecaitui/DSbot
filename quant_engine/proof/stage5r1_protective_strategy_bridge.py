@@ -162,7 +162,7 @@ def run_protective_strategy_replay(
     replay_result = run_stage5r1_protective_replay(
         bars=valid_bars, instructions=tuple(replay_instructions),
         protective_bindings=tuple(protective_bindings),
-        config=ReplayConfig(symbol=symbol), capital=capital, cost=cost)
+        config=ReplayConfig(symbol=symbol, warmup_bars=plan.warmup_bars), capital=capital, cost=cost)
 
     return ProtectiveStrategyBridgeResult(
         compilation_id=compilation.compilation_id,

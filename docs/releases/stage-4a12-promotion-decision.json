@@ -7,7 +7,7 @@
     "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
   ],
   "engineCommit": "80f12966081e3851424f820dd3428249d5537eb9",
-  "candidateManifestId": "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa",
+  "candidateManifestId": "87f2d0a3d608da8add326e1eabcf4818e225824343289b1f133925bc8029b118",
   "developmentId": "c05a8d0947f84d92828d7fed5ff49687f1930d9beba249b8851198dd0476cd47",
   "privateProofId": "0afdcd027566c1030e1a3f5a3459346cf0d393b2027453724457b20ed8f232c7",
   "datasetMatrixId": "b5d904d609de2520b262dbdc17a801e927504b8c4d8cf31122d9929d9b5e9e07",
@@ -392,5 +392,7 @@
     "testnetApproved": false,
     "liveApproved": false
   },
-  "receiptId": "4f8f23a24bd117d21b41872bbcd1788fdf1898d02b42c8a29cab79755a1d149f"
+  "receiptId": "815a2e2236bb092b18598b4157c6a0b9a4947e8f660f291f660ae5a7c8ef6c3d",
+  "receiptCommit": "76fd5006adac4e755d59f042952dd9fdc7290267",
+  "receiptGeneratedAt": "2026-08-02T09:02:15Z"
 }

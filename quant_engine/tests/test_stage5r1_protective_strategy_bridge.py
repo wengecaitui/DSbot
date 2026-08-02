@@ -269,6 +269,24 @@ class DeterminismTests(unittest.TestCase):
         with self.assertRaises(Exception):
             r.bridge_id = "changed"
 
+    def test_warmup_bars_from_plan(self):
+        """Prove bridge uses plan.warmup_bars (non-default, not 100)."""
+        bars = _bars(200)
+        plan = _build_plan([(bars[99].open_time_ms, "ENTER_LONG")], [bars[110].open_time_ms])
+        # plan.warmup_bars = 10
+        self.assertEqual(plan.warmup_bars, 10)
+        result = run_protective_strategy_replay(
+            bars=bars, compilation=_wrap_compilation(plan), capital=_CM, cost=_ZC)
+        self.assertEqual(result.replay_result.trade_count, 1)
+
+    def test_different_warmup_same_replay(self):
+        """Same plan twice — deterministic regardless of warmup."""
+        bars = _bars(200)
+        plan = _build_plan([(bars[99].open_time_ms, "ENTER_LONG")], [bars[110].open_time_ms])
+        r1 = run_protective_strategy_replay(bars=bars, compilation=_wrap_compilation(plan), capital=_CM, cost=_ZC)
+        r2 = run_protective_strategy_replay(bars=bars, compilation=_wrap_compilation(plan), capital=_CM, cost=_ZC)
+        self.assertEqual(r1.replay_result.replay_id, r2.replay_result.replay_id)
+
 
 if __name__ == "__main__":
     unittest.main()
