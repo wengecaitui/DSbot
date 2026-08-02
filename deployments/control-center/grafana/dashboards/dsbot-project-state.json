@@ -35,7 +35,7 @@
           "root_selector": "",
           "source": "url",
           "type": "uql",
-          "uql": "parse-json\n| project \"Status\"=\"status\", \"Capability\"=\"currentCapability\", \"Task\"=\"currentTask\", \"Agent\"=\"activeAgent\", \"Branch\"=\"repository.branch\", \"SHA\"=\"repository.commitSha\", \"CI\"=\"ci.status\", \"Next action\"=\"nextAction\"",
+          "uql": "parse-json\n| project \"Status\"=\"status\", \"Repository\"=\"repository.identity\", \"Capability\"=\"currentCapability\", \"Task\"=\"currentTask\", \"Agent\"=\"activeAgent\", \"Branch\"=\"repository.branch\", \"SHA\"=\"repository.commitSha\", \"CI\"=\"ci.status\", \"Next action\"=\"nextAction\"",
           "url": "http://host.docker.internal:8765/api/project",
           "url_options": { "data": "", "method": "GET" }
         }

@@ -6,6 +6,7 @@ import {
   createProjectControlCenter,
   type ControlCenterConfig,
 } from '../../src/observability/project-control-center';
+import { controlCenterDefinitionSha256, REQUIRED_RUNTIME_SMOKE_CHECK_IDS } from '../../src/observability/control-center-runtime-smoke';
 
 const HEAD = '1'.repeat(40);
 const MERGE = '2'.repeat(40);
@@ -303,6 +304,59 @@ test('Control Center discloses missing remote delivery evidence when a local ref
   await center.refresh();
   assert.equal(center.snapshot().status, 'INTEGRATION_VERIFIED');
   assert.equal(center.snapshot().dataGaps.some(item => item.includes('local ref is identity continuity only')), true);
+});
+
+test('Control Center removes only the runtime blocker for a current integration-bound passing receipt', async () => {
+  const runtimeConfig = config();
+  runtimeConfig.blockers = ['CONTROL_CENTER_RUNTIME_UNVERIFIED: Docker evidence missing', 'UNRELATED_BLOCKER'];
+  const definitions = ['services: {}', '{"panels":[]}', 'datasources: []'];
+  const receiptValue = {
+    schemaVersion: '1.0', kind: 'dsbot.control-center-runtime-smoke', completedAt: '2026-08-02T00:00:00.000Z', status: 'PASS',
+    repository: { identity: 'wengecaitui/dsbot', commitSha: HEAD, integrationBranch: 'feature/orangeai-split', integrationHead: HEAD, cleanBefore: true, cleanAfter: true },
+    composeDefinitionSha256: controlCenterDefinitionSha256(definitions), checks: REQUIRED_RUNTIME_SMOKE_CHECK_IDS.map(id => ({ id, status: 'PASS', detail: 'verified' })),
+    safety: { replayApproved: false, shadowApproved: false, paperApproved: false, testnetApproved: false, liveApproved: false, tradingEnvironmentActivated: false },
+    limitations: [],
+  };
+  const receipt = JSON.stringify(receiptValue);
+  const evidenceReader = async (file: string): Promise<string> => {
+    if (file.endsWith('control-center-runtime-smoke.json')) return receipt;
+    if (file.endsWith('docker-compose.yml')) return definitions[0]!;
+    if (file.endsWith('dsbot-project-state.json')) return definitions[1]!;
+    if (file.endsWith('datasources.yml')) return definitions[2]!;
+    throw new Error('missing tests');
+  };
+  const center = createProjectControlCenter({
+    repoPath: 'E:/repo', config: runtimeConfig,
+    runCommand: runner({ integrationHead: HEAD, remoteBranchHead: HEAD }),
+    readFile: evidenceReader,
+  });
+  await center.refresh();
+  const snapshot = center.snapshot();
+  assert.equal(snapshot.runtimeSmoke?.status, 'PASS');
+  assert.equal(snapshot.runtimeSmokeVerified, true);
+  assert.deepEqual(snapshot.blockers, ['UNRELATED_BLOCKER']);
+  assert.equal(snapshot.status, 'BLOCKED');
+  assert.match(snapshot.nextAction, /Strategy Intent/);
+
+  const digestMismatch = createProjectControlCenter({
+    repoPath: 'E:/repo', config: runtimeConfig,
+    runCommand: runner({ integrationHead: HEAD, remoteBranchHead: HEAD }),
+    readFile: async file => file.endsWith('control-center-runtime-smoke.json')
+      ? JSON.stringify({ ...receiptValue, composeDefinitionSha256: '0'.repeat(64) })
+      : evidenceReader(file),
+  });
+  await digestMismatch.refresh();
+  assert.equal(digestMismatch.snapshot().runtimeSmokeVerified, false);
+  assert.equal(digestMismatch.snapshot().blockers.some(item => item.startsWith('CONTROL_CENTER_RUNTIME_UNVERIFIED:')), true);
+
+  const dirty = createProjectControlCenter({
+    repoPath: 'E:/repo', config: runtimeConfig,
+    runCommand: runner({ status: ' M deployments/control-center/docker-compose.yml', integrationHead: HEAD, remoteBranchHead: HEAD }),
+    readFile: evidenceReader,
+  });
+  await dirty.refresh();
+  assert.equal(dirty.snapshot().runtimeSmokeVerified, false);
+  assert.equal(dirty.snapshot().blockers.some(item => item.startsWith('CONTROL_CENTER_RUNTIME_UNVERIFIED:')), true);
 });
 
 test('Control Center blocks on repository identity mismatch and never relaxes approvals', async () => {
