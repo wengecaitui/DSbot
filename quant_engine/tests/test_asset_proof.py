@@ -214,5 +214,39 @@ class StrategyProofTests(unittest.TestCase):
             run_causal_walk_forward(AlternatingAdapter(), frame, [{"period": 4}], WalkForwardConfig(30, 10, 10, fee_bps=float("nan")), audit)
 
 
+    def test_new_file_does_not_change_proof_id(self):
+        """Adding a new file under quant_engine/proof does not change the proof ID.
+        
+        The proof reads from the pinned engine commit, so later files are invisible.
+        """
+        engine_commit = "80f12966081e3851424f820dd3428249d5537eb9"
+        m1 = build_asset_manifest(REPO, engine_commit)
+        # Create an unrelated file — proof should be unchanged
+        new_file = REPO / "quant_engine" / "proof" / "stage9_future.py"
+        new_file.write_text("# future work\n", encoding="utf-8")
+        try:
+            m2 = build_asset_manifest(REPO, engine_commit)
+            self.assertEqual(m1["proofId"], m2["proofId"],
+                "Adding unrelated files must not change the proof ID")
+        finally:
+            new_file.unlink()
+
+    def test_source_file_change_is_detected(self):
+        """Modifying a file in the proof contract must fail verification.
+        
+        The verify_asset_manifest checks the pinned commit content, so if
+        the manifest doesn't match the commit's source files, it rejects.
+        """
+        engine_commit = "80f12966081e3851424f820dd3428249d5537eb9"
+        manifest = build_asset_manifest(REPO, engine_commit)
+        # Tamper the manifest's daemonSha256 to simulate source change
+        tampered = dict(manifest)
+        tampered["registry"] = dict(tampered["registry"])
+        tampered["registry"]["daemonSha256"] = "0" * 64
+        with self.assertRaises(ValueError):
+            verify_asset_manifest(REPO, tampered,
+                                  expected_source_commit=engine_commit)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -60,6 +60,15 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _git_show_text(repo: Path, commit: str, path: str) -> str:
+    """Read a file from a specific git commit as UTF-8 text."""
+    import subprocess
+    result = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{commit}:{path}"],
+        capture_output=True, text=True, encoding="utf-8", check=True)
+    return result.stdout
+
+
 def _text_file_sha256(path: Path) -> str:
     """Hash canonical UTF-8/LF text, independent of checkout line endings."""
     return _sha256(path.read_text(encoding="utf-8").encode("utf-8"))
@@ -117,22 +126,39 @@ def _registry_entry_sha256(path: Path, registry_name: str, binding: str) -> str:
 
 def build_asset_manifest(repo: Path, source_commit: str = "LOCAL") -> dict[str, Any]:
     repo = repo.resolve()
-    pine_path = _repo_file(repo, "docs/all_indicators_pine_v2.txt")
-    pine_source = pine_path.read_text(encoding="utf-8")
+    pinned = bool(re.match(r"^[0-9a-f]{40}$", source_commit))
+
+    def _read(repo_path: str) -> str:
+        if pinned:
+            return _git_show_text(repo, source_commit, repo_path)
+        return _repo_file(repo, repo_path).read_text(encoding="utf-8")
+
+    def _read_path(repo_path: str) -> Path:
+        if pinned:
+            # Write content to a temp file for AST parsing
+            import tempfile
+            content = _git_show_text(repo, source_commit, repo_path)
+            tf = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8")
+            tf.write(content)
+            tf.close()
+            return Path(tf.name)
+        return _repo_file(repo, repo_path)
+
+    pine_source = _read("docs/all_indicators_pine_v2.txt")
     pine_assets = {item["index"]: item for item in _extract_pine_assets(pine_source)}
 
-    daemon_path = _repo_file(repo, "quant_engine/daemon.py")
-    registry_path = _repo_file(repo, "quant_engine/indicators/__init__.py")
-    registry_text = daemon_path.read_text(encoding="utf-8") + "\n" + registry_path.read_text(encoding="utf-8")
+    daemon_text = _read("quant_engine/daemon.py")
+    registry_text_source = _read("quant_engine/indicators/__init__.py")
+    registry_text = daemon_text + "\n" + registry_text_source
 
     assets: list[dict[str, Any]] = []
     for contract in ASSET_CONTRACTS:
         pine = pine_assets[contract["index"]]
         if f'"{contract["registry"]}"' not in registry_text:
             raise ValueError(f"registry entry missing: {contract['registry']}")
-        python_path = _repo_file(repo, contract["python"])
+        python_path = _read_path(contract["python"])
         registry_relative = "quant_engine/daemon.py" if contract["python"] == "quant_engine/daemon.py" else "quant_engine/indicators/__init__.py"
-        asset_registry_path = _repo_file(repo, registry_relative)
+        asset_registry_path = _read_path(registry_relative)
         registry_binding = REGISTRY_BINDINGS[contract["registry"]]
         blockers: list[str] = []
         if contract["classification"] == "needs-lifecycle":
@@ -166,12 +192,12 @@ def build_asset_manifest(repo: Path, source_commit: str = "LOCAL") -> dict[str, 
         "sourceCommit": source_commit,
         "pineCollection": {
             "path": "docs/all_indicators_pine_v2.txt",
-            "sha256": _text_file_sha256(pine_path),
+            "sha256": _sha256(pine_source.encode("utf-8")),
             "assetCount": len(assets),
         },
         "registry": {
-            "daemonSha256": _text_file_sha256(daemon_path),
-            "indicatorRegistrySha256": _text_file_sha256(registry_path),
+            "daemonSha256": _sha256(daemon_text.encode("utf-8")),
+            "indicatorRegistrySha256": _sha256(registry_text_source.encode("utf-8")),
         },
         "counts": {
             "pineAssetsVerified": len(assets),
