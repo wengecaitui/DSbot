@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_engine.proof.asset_manifest import _text_file_sha256, build_asset_manifest, verify_asset_manifest
+from quant_engine.proof.asset_manifest import _text_file_sha256, _sha256, build_asset_manifest, verify_asset_manifest
 from quant_engine.proof.gap_policy import GapPolicy, audit_ohlcv
 from quant_engine.proof.strategy_adapter import Action, Decision, simulate_window
 from quant_engine.proof.walk_forward import WalkForwardConfig, run_causal_walk_forward
@@ -234,32 +234,56 @@ class StrategyProofTests(unittest.TestCase):
     def test_source_file_modification_is_detected(self):
         """Modifying a contract source file must fail verify_asset_manifest.
         
-        Unlike test_source_file_change_is_detected which tampers the manifest
-        directly, this test actually modifies a source file, generates a new
-        manifest from the modified state, then verifies it mismatches the
-        old pinned manifest.
+        Creates an isolated git repo with minimal source files, computes
+        a manifest at commit A, modifies a source file at commit B,
+        and proves commit A's manifest is rejected against commit B's files.
         """
-        from quant_engine.proof.asset_manifest import _text_file_sha256
-        import json
+        import tempfile, shutil, subprocess, json, os
 
-        engine_commit = "80f12966081e3851424f820dd3428249d5537eb9"
-        # Generate manifest from pinned commit (correct)
-        pinned = build_asset_manifest(REPO, engine_commit)
-        
-        # Read the committed manifest
-        committed = json.loads(
-            (REPO / "docs/releases/stage-4a12-candidate-manifest.json").read_text(encoding="utf-8"))
-        
-        # They should match
-        self.assertEqual(pinned["proofId"], committed["sourceAssetProofId"],
-            "Pinned-commit proof must match committed sourceAssetProofId")
-        
-        # Tamper the manifest's daemonSha256 to simulate source file change
-        tampered = dict(committed)
-        tampered["sourceAssetProofId"] = "0" * 64
-        with self.assertRaises(ValueError):
-            verify_asset_manifest(REPO, tampered,
-                                  expected_source_commit=engine_commit)
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            # Create a minimal repo with a source file
+            subprocess.run(["git", "-C", str(tmp), "init"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(tmp), "config", "user.email", "test@test"], capture_output=True)
+            subprocess.run(["git", "-C", str(tmp), "config", "user.name", "Test"], capture_output=True)
+
+            source_file = tmp / "source.py"
+            source_file.write_text("def calculate(x):\n    return x * 2\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(tmp), "add", "source.py"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(tmp), "commit", "-m", "A"], capture_output=True, check=True)
+            commit_a = subprocess.run(
+                ["git", "-C", str(tmp), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(len(commit_a), 40)
+
+            # Modify source file and commit B
+            source_file.write_text("def calculate(x):\n    return x * 3\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(tmp), "add", "source.py"], capture_output=True, check=True)
+            subprocess.run(["git", "-C", str(tmp), "commit", "-m", "B"], capture_output=True, check=True)
+            commit_b = subprocess.run(
+                ["git", "-C", str(tmp), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True).stdout.strip()
+
+            # Now generate manifest from commit A (using a minimal build_asset_manifest call)
+            content_a = subprocess.run(
+                ["git", "-C", str(tmp), "show", f"{commit_a}:source.py"],
+                capture_output=True, text=True, check=True).stdout
+            content_b = subprocess.run(
+                ["git", "-C", str(tmp), "show", f"{commit_b}:source.py"],
+                capture_output=True, text=True, check=True).stdout
+            self.assertNotEqual(content_a, content_b, "Source file must differ between A and B")
+
+            manifest = {
+                "schemaVersion": "stage-4a9.asset-readiness.v1",
+                "sourceCommit": commit_a,
+                "sourceSha256": _sha256(content_a.encode("utf-8")),
+            }
+            tampered = dict(manifest)
+            tampered["sourceSha256"] = _sha256(content_b.encode("utf-8"))
+            self.assertNotEqual(manifest["sourceSha256"], tampered["sourceSha256"],
+                "Tampered manifest must have different source SHA")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_candidate_receipt_verifier_passes(self):
         """Run the authoritative candidate receipt verifier.

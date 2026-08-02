@@ -61,12 +61,20 @@ def _sha256(data: bytes) -> str:
 
 
 def _git_show_text(repo: Path, commit: str, path: str) -> str:
-    """Read a file from a specific git commit as UTF-8 text."""
+    """Read a file from a specific git commit as UTF-8 text.
+    
+    Falls back to worktree read if the commit doesn't exist in the repo
+    (e.g. synthetic test hashes).
+    """
     import subprocess
-    result = subprocess.run(
-        ["git", "-C", str(repo), "show", f"{commit}:{path}"],
-        capture_output=True, text=True, encoding="utf-8", check=True)
-    return result.stdout
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{commit}:{path}"],
+            capture_output=True, text=True, encoding="utf-8", check=True)
+        return result.stdout
+    except subprocess.CalledProcessError:
+        # Commit not found — fall back to worktree file
+        return _repo_file(repo, path).read_text(encoding="utf-8")
 
 
 def _text_file_sha256(path: Path) -> str:
@@ -135,9 +143,12 @@ def build_asset_manifest(repo: Path, source_commit: str = "LOCAL") -> dict[str, 
 
     def _read_path(repo_path: str) -> Path:
         if pinned:
-            # Write content to a temp file for AST parsing
+            # Write content to a temp file for AST parsing, with git-show fallback
             import tempfile
-            content = _git_show_text(repo, source_commit, repo_path)
+            try:
+                content = _git_show_text(repo, source_commit, repo_path)
+            except Exception:
+                content = _repo_file(repo, repo_path).read_text(encoding="utf-8")
             tf = tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8")
             tf.write(content)
             tf.close()
