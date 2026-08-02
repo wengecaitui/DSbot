@@ -3,6 +3,12 @@ import { readFile as readFileDefault } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { ObservableAgentEvent } from './contracts';
+import {
+  CONTROL_CENTER_RUNTIME_BLOCKER_PREFIX,
+  controlCenterDefinitionSha256,
+  isCurrentPassingRuntimeReceipt,
+  type ControlCenterRuntimeSmokeReceipt,
+} from './control-center-runtime-smoke';
 
 const execFile = promisify(execFileCallback);
 
@@ -109,6 +115,8 @@ export interface ProjectControlCenterSnapshot {
   };
   localTests: ControlCenterTestEvidence[];
   remoteTests: ControlCenterCheck[];
+  runtimeSmoke?: ControlCenterRuntimeSmokeReceipt;
+  runtimeSmokeVerified: boolean;
   blockers: string[];
   dataGaps: string[];
   nextAction: string;
@@ -154,6 +162,7 @@ export interface ProjectControlCenterOptions {
   repoPath: string;
   configPath?: string;
   testEvidencePath?: string;
+  runtimeSmokePath?: string;
   config?: ControlCenterConfig;
   runCommand?: (executable: string, args: string[], cwd: string) => Promise<string>;
   readFile?: (file: string) => Promise<string>;
@@ -268,6 +277,12 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
   const repoPath = path.resolve(options.repoPath);
   const configPath = path.resolve(repoPath, options.configPath ?? 'config/control-center/project-state.json');
   const testEvidencePath = path.resolve(repoPath, options.testEvidencePath ?? '.runtime-observability/control-center-tests.json');
+  const runtimeSmokePath = path.resolve(repoPath, options.runtimeSmokePath ?? '.runtime-observability/control-center-runtime-smoke.json');
+  const runtimeDefinitionPaths = [
+    path.join(repoPath, 'deployments', 'control-center', 'docker-compose.yml'),
+    path.join(repoPath, 'deployments', 'control-center', 'grafana', 'dashboards', 'dsbot-project-state.json'),
+    path.join(repoPath, 'deployments', 'control-center', 'grafana', 'provisioning', 'datasources', 'datasources.yml'),
+  ];
   const readFile = options.readFile ?? (file => readFileDefault(file, 'utf8'));
   const runCommand = options.runCommand ?? (async (executable, args, cwd) => {
     const result = await execFile(executable, args, { cwd, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
@@ -363,6 +378,32 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     }
   }
 
+  async function loadRuntimeSmoke(
+    identity: string,
+    head: string,
+    integrationHead: string | undefined,
+    integrationBranch: string,
+    expectedDefinitionSha256: string | undefined,
+    worktreeClean: boolean,
+    dataGaps: string[],
+  ): Promise<ControlCenterRuntimeSmokeReceipt | undefined> {
+    try {
+      const value = JSON.parse(await readFile(runtimeSmokePath)) as unknown;
+      if (!value || typeof value !== 'object') throw new Error('receipt is not an object');
+      const receipt = value as ControlCenterRuntimeSmokeReceipt;
+      if (receipt.schemaVersion !== '1.0' || receipt.kind !== 'dsbot.control-center-runtime-smoke') throw new Error('schema mismatch');
+      if (!worktreeClean || !expectedDefinitionSha256 || !isCurrentPassingRuntimeReceipt(
+        receipt, identity, head, integrationHead, integrationBranch, expectedDefinitionSha256,
+      )) {
+        dataGaps.push('Control Center runtime smoke receipt is failed, stale, dirty, definition-mismatched, or not bound to the current integration HEAD');
+      }
+      return structuredClone(receipt);
+    } catch {
+      dataGaps.push(`Control Center runtime smoke receipt unavailable at ${runtimeSmokePath}`);
+      return undefined;
+    }
+  }
+
   return {
     async refresh() {
       const dataGaps: string[] = [];
@@ -388,6 +429,18 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
       }
       const changedFiles = parseChangedFiles(status);
       const localTests = await loadTests(head, current, dataGaps);
+      let runtimeDefinitionSha256: string | undefined;
+      try {
+        runtimeDefinitionSha256 = controlCenterDefinitionSha256(await Promise.all(runtimeDefinitionPaths.map(readFile)));
+      } catch {
+        dataGaps.push('Control Center runtime deployment definitions are unavailable for receipt validation');
+      }
+      const runtimeSmoke = await loadRuntimeSmoke(
+        identity, head, integrationHead, current.integrationBranch, runtimeDefinitionSha256, changedFiles.length === 0, dataGaps,
+      );
+      const runtimeVerified = changedFiles.length === 0 && runtimeDefinitionSha256 !== undefined && isCurrentPassingRuntimeReceipt(
+        runtimeSmoke, identity, head, integrationHead, current.integrationBranch, runtimeDefinitionSha256,
+      );
       const pullRequest = await loadPullRequest(current, deliveryReferenceHead, dataGaps);
       const checks = pullRequest?.checks ?? [];
       const headShaMatchesDeliveryRef = pullRequest !== undefined && pullRequest.headSha === remoteBranchHead;
@@ -399,15 +452,18 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
       if (pullRequest && pullRequest.state !== 'MERGED' && branch === current.deliveryBranch && pullRequest.headSha !== head) {
         dataGaps.push('Local delivery branch HEAD does not match the PR head SHA');
       }
-      const dynamicBlockers = [...current.blockers];
+      const dynamicBlockers = current.blockers.filter(blocker => !(
+        runtimeVerified && blocker.startsWith(CONTROL_CENTER_RUNTIME_BLOCKER_PREFIX)
+      ));
       if (!identityVerified) dynamicBlockers.push('Repository identity mismatch');
       if (pullRequest?.state === 'CLOSED') dynamicBlockers.push('Delivery PR is closed without merge');
       if (pullRequest?.state === 'MERGED' && (!deliveryReferenceHead || pullRequest.headSha !== deliveryReferenceHead)) {
         dynamicBlockers.push('Merged PR head does not bind to the current delivery branch identity');
       }
       const generatedAt = now().toISOString();
+      const effectiveConfig = { ...current, blockers: dynamicBlockers };
       const statusValue = identityVerified
-        ? deriveStatus({ config: current, branch, head, remoteBranchHead, deliveryReferenceHead, integrationHead, changedFiles, localTests, pullRequest })
+        ? deriveStatus({ config: effectiveConfig, branch, head, remoteBranchHead, deliveryReferenceHead, integrationHead, changedFiles, localTests, pullRequest })
         : 'BLOCKED';
       snapshot = {
         schemaVersion: '1.0',
@@ -440,9 +496,13 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
         },
         localTests,
         remoteTests: checks,
+        runtimeSmoke,
+        runtimeSmokeVerified: runtimeVerified,
         blockers: dynamicBlockers,
         dataGaps,
-        nextAction: current.nextAction,
+        nextAction: runtimeVerified
+          ? 'Control Center runtime evidence is closed; proceed to the Strategy Intent to Protective Replay Bridge without activating a trading environment'
+          : current.nextAction,
         eventTimeline: structuredClone(timeline),
         promotedStrategyCount: 0,
         approvals: structuredClone(current.approvals),

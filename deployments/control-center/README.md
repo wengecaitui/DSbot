@@ -13,10 +13,10 @@ The pins were checked against the projects' official release pages. Review and u
 
 ## Start the read-only loop
 
-1. Start the DSbot Dashboard from the repository root:
+1. Start the DSbot Dashboard from a clean worktree whose HEAD equals `origin/feature/orangeai-split`:
 
    ```powershell
-   npm.cmd run monitor:dashboard -- --repo E:\Workplace\CloddsBot
+   npm.cmd run monitor:dashboard -- --repo <clean-integration-worktree>
    ```
 
 2. Copy `.env.example` to `.env`, replace every placeholder with a locally generated secret, and keep `.env` untracked. The DevLake database password must be URL-safe because it is embedded in `DB_URL`.
@@ -32,6 +32,14 @@ The pins were checked against the projects' official release pages. Review and u
 
 5. Open `http://127.0.0.1:3002`. The provisioned `DSbot Project State` dashboard reads `http://host.docker.internal:8765/api/project`; the `Apache DevLake` datasource is available for historical panels.
 
+6. With the Dashboard and containers already running, create a SHA-bound runtime receipt. This command is read-only with respect to Docker: it never runs `up`, `start`, `restart`, `stop` or `down`.
+
+   ```powershell
+   npm.cmd run control-center:runtime-smoke -- --repo <clean-integration-worktree> --env-file <clean-integration-worktree>\deployments\control-center\.env
+   ```
+
+   A passing receipt requires the current clean HEAD to equal the remote integration HEAD, all four services to be running, the Dashboard to report every approval and trading activation as `false`, DevLake/Config UI/Grafana health, and an actual Grafana Infinity query of the provisioned DSbot API target. The receipt is written to the ignored `.runtime-observability/control-center-runtime-smoke.json` and never contains credentials or response bodies.
+
 Only loopback ports are published. MySQL is not exposed to the host. `host.docker.internal` is the only container-to-host path used for the DSbot API.
 
 ## Evidence and limitations
@@ -41,6 +49,7 @@ Only loopback ports are published. MySQL is not exposed to the host. `host.docke
 - Local test results come from observable test events or `.runtime-observability/control-center-tests.json`, bound to a commit SHA. Missing evidence remains visibly unavailable.
 - DevLake needs a user-provided GitHub credential and an explicit blueprint before historical data exists.
 - Docker Desktop/daemon must be running for container startup. Compose syntax can be validated without starting trading infrastructure.
+- A runtime receipt does not prove that DevLake has completed GitHub collection; connection and blueprint evidence remain separate.
 - Grafana and DevLake are analysis surfaces, not approval authorities or project truth sources.
 
 ## Stop and rollback
