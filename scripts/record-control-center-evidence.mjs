@@ -43,7 +43,15 @@ if (!/^[a-f0-9]{40}$/.test(beforeSha) || beforeStatus !== '') {
 }
 
 const startedAt = Date.now();
-const child = spawn(command[0], command.slice(1), { cwd: repoPath, stdio: 'inherit', windowsHide: true, shell: false });
+// Windows requires a command shell to launch .cmd shims such as npm.cmd. The
+// executable and every argument are already matched exactly against committed
+// gate configuration above, so no caller-controlled command is admitted here.
+const child = spawn(command[0], command.slice(1), {
+  cwd: repoPath,
+  stdio: 'inherit',
+  windowsHide: true,
+  shell: process.platform === 'win32',
+});
 const exitCode = await new Promise((resolve, reject) => {
   child.once('error', reject);
   child.once('exit', code => resolve(code ?? 1));
