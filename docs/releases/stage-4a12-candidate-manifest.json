@@ -6,7 +6,7 @@
     "NOT APPROVED FOR PAPER, TESTNET OR LIVE"
   ],
   "sourceCommit": "80f12966081e3851424f820dd3428249d5537eb9",
-  "sourceAssetProofId": "475f7a1b14b28a504f03edfd09a72cab93d6d1c08cb39a48bad0cfc44b1eaf1a",
+  "sourceAssetProofId": "d7d118af86ba4bad2d92ff20b8f88940c9d94b0df1d8ad3244d20992d1fa954b",
   "sourceAssetCounts": {
     "pineAssetsVerified": 14,
     "directStrategies": 1,
@@ -691,5 +691,5 @@
       "specId": "4acc61095aa516bfb5757a5ff615e0fd2560ee07c30028ff4d2fd6b5b6032750"
     }
   ],
-  "manifestId": "87f2d0a3d608da8add326e1eabcf4818e225824343289b1f133925bc8029b118"
+  "manifestId": "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa"
 }
