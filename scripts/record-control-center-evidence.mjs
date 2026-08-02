@@ -43,14 +43,21 @@ if (!/^[a-f0-9]{40}$/.test(beforeSha) || beforeStatus !== '') {
 }
 
 const startedAt = Date.now();
-// Windows requires a command shell to launch .cmd shims such as npm.cmd. The
-// executable and every argument are already matched exactly against committed
-// gate configuration above, so no caller-controlled command is admitted here.
-const child = spawn(command[0], command.slice(1), {
+let childExecutable = command[0];
+let childArguments = command.slice(1);
+if (process.platform === 'win32' && childExecutable.toLowerCase() === 'npm.cmd') {
+  if (!process.env.npm_execpath) {
+    console.error('npm_execpath is required to execute npm.cmd gates without a command shell');
+    process.exit(2);
+  }
+  childExecutable = process.env.npm_node_execpath ?? process.execPath;
+  childArguments = [process.env.npm_execpath, ...childArguments];
+}
+const child = spawn(childExecutable, childArguments, {
   cwd: repoPath,
   stdio: 'inherit',
   windowsHide: true,
-  shell: process.platform === 'win32',
+  shell: false,
 });
 const exitCode = await new Promise((resolve, reject) => {
   child.once('error', reject);
