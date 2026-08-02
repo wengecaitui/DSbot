@@ -4,6 +4,7 @@ import type { RemediationRecommendation } from '../remediation-advisor';
 import { redactValue } from '../redaction';
 import type { ObservableStateSnapshot } from '../state-projector';
 import type { TaskActivitySnapshot } from '../task-activity-projector';
+import type { ProjectControlCenterSnapshot } from '../project-control-center';
 
 export interface DashboardCollaborationContext {
   schemaVersion: '1.0';
@@ -23,6 +24,7 @@ export interface DashboardCollaborationContext {
   };
   monitor: ObservableStateSnapshot;
   activity: TaskActivitySnapshot;
+  project?: ProjectControlCenterSnapshot;
   recentEvents: ObservableAgentEvent[];
   recentAlerts: ObservableAlert[];
   recommendations: RemediationRecommendation[];
@@ -31,6 +33,7 @@ export interface DashboardCollaborationContext {
 interface DashboardCollaborationContextInput {
   monitor: ObservableStateSnapshot;
   activity: TaskActivitySnapshot;
+  project?: ProjectControlCenterSnapshot;
   recentEvents: ObservableAgentEvent[];
   recentAlerts: ObservableAlert[];
   recommendations: RemediationRecommendation[];
@@ -47,6 +50,7 @@ export function createDashboardCollaborationContext(
   }
   const monitor = redactValue(structuredClone(input.monitor)).value;
   const activity = redactValue(structuredClone(input.activity)).value;
+  const project = input.project === undefined ? undefined : redactValue(structuredClone(input.project)).value;
   const recentEvents = redactValue(structuredClone(input.recentEvents.slice(-maxItems))).value;
   const recentAlerts = redactValue(structuredClone(input.recentAlerts.slice(-maxItems))).value;
   const recommendations = redactValue(structuredClone(input.recommendations.slice(-maxItems))).value;
@@ -68,6 +72,7 @@ export function createDashboardCollaborationContext(
     },
     monitor,
     activity,
+    project,
     recentEvents,
     recentAlerts,
     recommendations,

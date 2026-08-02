@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "1.0",
+  "repository": "wengecaitui/DSbot",
+  "integrationBranch": "feature/orangeai-split",
+  "deliveryBranch": "agent/project-control-center",
+  "currentCapability": "Project Control Center",
+  "currentTask": "Close the existing DSbot Dashboard + DevLake + Grafana read-only evidence loop",
+  "activeAgent": "Codex orchestrator; Hermes evidence is observable-only",
+  "nextAction": "Verify the Control Center locally, open a Draft PR, pass remote CI, merge, and verify the integration commit",
+  "requiredLocalGates": [
+    { "id": "focused", "executable": "npm.cmd", "args": ["run", "test:control-center"] },
+    { "id": "full-node", "executable": "npm.cmd", "args": ["test"] },
+    { "id": "full-python", "executable": "npm.cmd", "args": ["run", "test:quant-engine"] },
+    { "id": "typecheck", "executable": "npm.cmd", "args": ["run", "typecheck"] },
+    { "id": "build", "executable": "npm.cmd", "args": ["run", "build"] },
+    { "id": "security", "executable": "npm.cmd", "args": ["run", "security:audit"] }
+  ],
+  "requiredRemoteChecks": [
+    "build",
+    "security",
+    "asset-readiness",
+    "Security Audit"
+  ],
+  "promotedStrategyCount": 0,
+  "blockers": [],
+  "approvals": {
+    "replay": {
+      "approved": false,
+      "source": "No explicit Replay activation approval artifact",
+      "limitation": "Replay contracts and offline evidence do not prove full protective runtime integration"
+    },
+    "shadow": {
+      "approved": false,
+      "source": "docs/releases/stage-4b4-3-shadow-proof.md",
+      "limitation": "Reference shadow infrastructure proof only; no real strategy Shadow authorization"
+    },
+    "paper": {
+      "approved": false,
+      "source": "src/validation/RuntimeSafety.ts",
+      "limitation": "Paper infrastructure exists but Paper is not authorized"
+    },
+    "testnet": {
+      "approved": false,
+      "source": "src/validation/RuntimeSafety.ts",
+      "limitation": "Testnet is not authorized"
+    },
+    "live": {
+      "approved": false,
+      "source": "src/validation/RuntimeSafety.ts",
+      "limitation": "Live is not authorized and real-money execution remains outside the boundary"
+    }
+  }
+}

@@ -17,6 +17,7 @@ import { createObservabilityDashboardServer } from '../observability/dashboard/d
 import { createObservableAlertEngine } from '../observability/alert-engine';
 import { createTaskActivityProjector } from '../observability/task-activity-projector';
 import { createRemediationAdvisor } from '../observability/remediation-advisor';
+import { createProjectControlCenter } from '../observability/project-control-center';
 
 function optionValue(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -76,6 +77,8 @@ async function runRealtime(write: boolean, rootDir: string, runId: string): Prom
   const alertEngine = createObservableAlertEngine();
   const activityProjector = createTaskActivityProjector();
   const remediationAdvisor = createRemediationAdvisor();
+  const projectControlCenter = dashboardEnabled ? createProjectControlCenter({ repoPath }) : undefined;
+  let projectRefreshTimer: NodeJS.Timeout | undefined;
   const ledger = write ? createAuditLedger({ rootDir }) : undefined;
   const onAdapterError = (error: Error) => process.stderr.write(`[adapter] ${error.message}\n`);
   const sources = [];
@@ -105,11 +108,13 @@ async function runRealtime(write: boolean, rootDir: string, runId: string): Prom
     port: dashboardPort,
     stateProvider: () => projector.snapshot(),
     activityProvider: () => activityProjector.snapshot(),
+    projectProvider: () => projectControlCenter!.snapshot(),
   }) : undefined;
   const monitor = createObservableMonitor({
     sources, projector, ledger, defaultRunId: runId,
     onEvent(event) {
       activityProjector.apply(event);
+      projectControlCenter?.observe(event);
       dashboard?.publish(event);
       for (const alert of alertEngine.evaluate(event)) {
         dashboard?.publishAlert(alert);
@@ -124,6 +129,12 @@ async function runRealtime(write: boolean, rootDir: string, runId: string): Prom
     onError(error, context) { process.stderr.write(`[${context}] ${error.message}\n`); },
   });
   try {
+    if (projectControlCenter) {
+      await projectControlCenter.refresh();
+      projectRefreshTimer = setInterval(() => {
+        void projectControlCenter.refresh().catch(onAdapterError);
+      }, Math.max(5_000, intervalMs * 5));
+    }
     const dashboardUrl = await dashboard?.start();
     if (dashboardUrl) process.stderr.write(`Dashboard ready: ${dashboardUrl}\n`);
     await monitor.start();
@@ -144,6 +155,7 @@ async function runRealtime(write: boolean, rootDir: string, runId: string): Prom
       if (durationMs !== undefined) timer = setTimeout(finish, durationMs);
     });
   } finally {
+    if (projectRefreshTimer) clearInterval(projectRefreshTimer);
     try { if (monitor.isRunning) await monitor.stop(); }
     finally { await dashboard?.stop(); }
   }

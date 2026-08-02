@@ -206,10 +206,10 @@ Alert state is memory-only and disappears when the monitor exits. Automatic
 acknowledgement, external notifications, retention deletion, and OS service
 installation remain disabled.
 
-### Beginner-friendly task cockpit
+### Project Control Center
 
-The default page is a plain-language task cockpit rather than a raw log viewer.
-It answers five questions first:
+The existing loopback Dashboard is the DSbot Project Control Center rather than
+a separate project website. It answers these questions first:
 
 1. Is Hermes healthy?
 2. Is a task observably active?
@@ -217,15 +217,38 @@ It answers five questions first:
 4. What observable stage has been reached?
 5. What needs the user's attention?
 
-Task progress is evidence-based: task identification is 25%, observed tool
-activity is 55%, task-correlated workspace activity is 80%, and an explicit
-completion marker is 100%. These values describe monitoring coverage, not a
-prediction of how much hidden reasoning or real work remains.
+The Control Center never converts observations into a subjective completion
+percentage. Delivery uses only `PLANNED`, `IMPLEMENTING`, `LOCAL_VERIFIED`,
+`PUSHED`, `PR_OPEN`, `REMOTE_CI_VERIFIED`, `MERGED`,
+`INTEGRATION_VERIFIED`, `CLOSED`, or `BLOCKED`. GitHub or local-test evidence
+that cannot be read remains visibly unavailable and does not become a pass.
 
-The page supports pause/resume, manual refresh, beginner/technical view,
-activity category filters, search, evidence dialogs, and copying normalized
-event evidence. These interactions affect only the browser view; they cannot
-start, stop, approve, or modify Hermes actions.
+`/api/project` exposes the current capability, task, observable agent identity,
+worktree, branch, commit, changed files, pull request, local test exit codes,
+remote CI, blockers, next action, event timeline, integration head, promoted
+strategy count, and fail-closed Replay/Shadow/Paper/Testnet/Live approvals.
+The endpoint verifies repository identity and never grants approval.
+
+Run a configured local gate through
+`npm run control-center:run -- --gate <gate-id> <exact configured command>`
+when its exit code should be visible in the Dashboard. The wrapper rejects
+unknown IDs or command substitutions, requires a clean worktree before the
+command, and verifies that HEAD and tracked state remain unchanged afterward.
+Each result is bound to its before/after SHA in an ignored runtime artifact.
+`LOCAL_VERIFIED` requires every configured local gate to pass on the same clean
+SHA; one arbitrary successful command is insufficient.
+
+The page supports manual refresh, a raw-evidence view, activity filters, search,
+evidence dialogs, and a redacted collaboration handoff. These interactions
+affect only the browser view; they cannot start, stop, approve, or modify Hermes
+actions.
+
+Apache DevLake, Grafana, and the Infinity datasource are an optional local
+analytics companion configured under `deployments/control-center`. DevLake
+owns historical GitHub delivery analytics; Grafana visualizes those analytics
+and the read-only DSbot API. Neither replaces the Dashboard as the project
+truth source. A GitHub credential and DevLake blueprint must be configured by
+the operator before history is collected.
 
 ### Evidence-driven remediation advice
 

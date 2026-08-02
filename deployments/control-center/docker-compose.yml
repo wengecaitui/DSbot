@@ -1,0 +1,86 @@
+name: dsbot-control-center
+
+services:
+  mysql:
+    image: mysql:8.0.46@sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_bin
+      - --skip-log-bin
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DEVLAKE_MYSQL_ROOT_PASSWORD:?set DEVLAKE_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: lake
+      MYSQL_USER: devlake
+      MYSQL_PASSWORD: ${DEVLAKE_DB_PASSWORD:?set DEVLAKE_DB_PASSWORD}
+      TZ: UTC
+    volumes:
+      - mysql-storage:/var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  devlake:
+    image: devlake.docker.scarf.sh/apache/devlake:v1.0.3-beta15
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:8080:8080
+    environment:
+      DB_URL: mysql://devlake:${DEVLAKE_DB_PASSWORD:?set DEVLAKE_DB_PASSWORD}@mysql:3306/lake?charset=utf8mb4&parseTime=True&loc=UTC
+      ENCRYPTION_SECRET: ${DEVLAKE_ENCRYPTION_SECRET:?set DEVLAKE_ENCRYPTION_SECRET}
+      PORT: "8080"
+      MODE: release
+      LOGGING_DIR: /app/logs
+      PIPELINE_MAX_PARALLEL: "1"
+      RESUME_PIPELINES: "true"
+      SKIP_COMMIT_FILES: "true"
+      TZ: UTC
+    volumes:
+      - devlake-logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  config-ui:
+    image: devlake.docker.scarf.sh/apache/devlake-config-ui:v1.0.3-beta15
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:4000:4000
+    environment:
+      DEVLAKE_ENDPOINT: devlake:8080
+      GRAFANA_ENDPOINT: grafana:3000
+      ADMIN_USER: ${DEVLAKE_ADMIN_USER:?set DEVLAKE_ADMIN_USER}
+      ADMIN_PASS: ${DEVLAKE_ADMIN_PASSWORD:?set DEVLAKE_ADMIN_PASSWORD}
+      TZ: UTC
+    depends_on:
+      - devlake
+      - grafana
+
+  grafana:
+    image: grafana/grafana:13.1.1
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:3002:3000
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?set GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_DEFAULT_THEME: dark
+      GF_PLUGINS_PREINSTALL: yesoreyeram-infinity-datasource@3.11.1
+      DEVLAKE_DB_PASSWORD: ${DEVLAKE_DB_PASSWORD:?set DEVLAKE_DB_PASSWORD}
+      TZ: UTC
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql-storage:
+  devlake-logs:
+  grafana-storage:
