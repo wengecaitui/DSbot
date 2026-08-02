@@ -2,11 +2,11 @@
   "schemaVersion": "1.0",
   "repository": "wengecaitui/DSbot",
   "integrationBranch": "feature/orangeai-split",
-  "deliveryBranch": "agent/project-control-center",
+  "deliveryBranch": "agent/control-center-runtime-blocker",
   "currentCapability": "Project Control Center",
-  "currentTask": "Close the existing DSbot Dashboard + DevLake + Grafana read-only evidence loop",
+  "currentTask": "Verify the DSbot Dashboard + DevLake + Grafana container runtime evidence loop",
   "activeAgent": "Codex orchestrator; Hermes evidence is observable-only",
-  "nextAction": "Verify the Control Center locally, open a Draft PR, pass remote CI, merge, and verify the integration commit",
+  "nextAction": "Under an authorized interactive or administrative context, start Docker Desktop or com.docker.service, then rerun the documented loopback container smoke without activating a trading environment",
   "requiredLocalGates": [
     { "id": "focused", "executable": "npm.cmd", "args": ["run", "test:control-center"] },
     { "id": "full-node", "executable": "npm.cmd", "args": ["test"] },
@@ -22,7 +22,9 @@
     "Security Audit"
   ],
   "promotedStrategyCount": 0,
-  "blockers": [],
+  "blockers": [
+    "CONTROL_CENTER_RUNTIME_UNVERIFIED: com.docker.service is stopped and the current process lacks permission to start it; Grafana Infinity to Dashboard API reachability and the DevLake/Grafana container runtime remain unverified"
+  ],
   "approvals": {
     "replay": {
       "approved": false,
