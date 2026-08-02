@@ -12,7 +12,6 @@ export interface ObservedTaskSummary {
   toolEvents: number;
   errorEvents: number;
   workspaceEvents: number;
-  observedProgress: number;
   stages: {
     taskObserved: boolean;
     toolObserved: boolean;
@@ -33,13 +32,6 @@ export interface TaskActivityProjector {
   snapshot(): TaskActivitySnapshot;
 }
 
-function progress(task: ObservedTaskSummary): number {
-  if (task.stages.completionObserved) return 100;
-  if (task.stages.workspaceChanged) return 80;
-  if (task.stages.toolObserved) return 55;
-  return 25;
-}
-
 export function createTaskActivityProjector(maxTasks = 20): TaskActivityProjector {
   if (!Number.isInteger(maxTasks) || maxTasks <= 0) throw new Error('maxTasks must be a positive integer');
   const tasks = new Map<string, ObservedTaskSummary>();
@@ -58,7 +50,7 @@ export function createTaskActivityProjector(maxTasks = 20): TaskActivityProjecto
         task = {
           taskId: event.taskId, status: 'ACTIVE', firstSeenAt: event.timestamp,
           lastSeenAt: event.timestamp, lastAction: event.action,
-          toolEvents: 0, errorEvents: 0, workspaceEvents: 0, observedProgress: 25,
+          toolEvents: 0, errorEvents: 0, workspaceEvents: 0,
           stages: { taskObserved: true, toolObserved: false, workspaceChanged: false, completionObserved: false },
         };
         tasks.set(event.taskId, task);
@@ -83,7 +75,6 @@ export function createTaskActivityProjector(maxTasks = 20): TaskActivityProjecto
       } else if (task.status !== 'COMPLETED') {
         task.status = 'ACTIVE';
       }
-      task.observedProgress = progress(task);
       while (tasks.size > maxTasks) tasks.delete(tasks.keys().next().value as string);
     },
     snapshot() {

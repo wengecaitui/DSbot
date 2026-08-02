@@ -14,14 +14,14 @@ function event(action: string, overrides: Partial<ObservableAgentEvent> = {}): O
 test('task projector advances only from observable stages', () => {
   const projector = createTaskActivityProjector();
   projector.apply(event('task.started'));
-  assert.equal(projector.snapshot().currentTask?.observedProgress, 25);
+  assert.equal(projector.snapshot().currentTask?.status, 'ACTIVE');
   projector.apply(event('tool.completed'));
-  assert.equal(projector.snapshot().currentTask?.observedProgress, 55);
+  assert.equal(projector.snapshot().currentTask?.stages.toolObserved, true);
   projector.apply(event('filesystem.changed', { source: 'filesystem' }));
-  assert.equal(projector.snapshot().currentTask?.observedProgress, 80);
+  assert.equal(projector.snapshot().currentTask?.stages.workspaceChanged, true);
   projector.apply(event('task.completed'));
   const task = projector.snapshot().currentTask;
-  assert.equal(task?.observedProgress, 100);
+  assert.equal(task?.stages.completionObserved, true);
   assert.equal(task?.status, 'COMPLETED');
 });
 

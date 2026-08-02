@@ -7,12 +7,14 @@ import type { TaskActivitySnapshot } from '../task-activity-projector';
 import type { RemediationRecommendation } from '../remediation-advisor';
 import { DASHBOARD_CSS, DASHBOARD_HTML, DASHBOARD_JS } from './page';
 import { createDashboardCollaborationContext } from './collaboration-context';
+import type { ProjectControlCenterSnapshot } from '../project-control-center';
 
 export interface DashboardServerOptions {
   port?: number;
   maxEvents?: number;
   stateProvider: () => ObservableStateSnapshot;
   activityProvider?: () => TaskActivitySnapshot;
+  projectProvider?: () => ProjectControlCenterSnapshot;
 }
 
 export interface ObservabilityDashboardServer {
@@ -62,14 +64,24 @@ export function createObservabilityDashboardServer(options: DashboardServerOptio
       }
       const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
       if (requestUrl.pathname === '/') return send(response, 200, 'text/html; charset=utf-8', DASHBOARD_HTML);
+      if (requestUrl.pathname === '/favicon.ico') {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
       if (requestUrl.pathname === '/dashboard.css') return send(response, 200, 'text/css; charset=utf-8', DASHBOARD_CSS);
       if (requestUrl.pathname === '/dashboard.js') return send(response, 200, 'text/javascript; charset=utf-8', DASHBOARD_JS);
       if (requestUrl.pathname === '/api/health') {
         return send(response, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: true, service: 'hermes-observability-dashboard' }));
       }
+      if (requestUrl.pathname === '/api/project') {
+        if (!options.projectProvider) return send(response, 503, 'application/json; charset=utf-8', JSON.stringify({ error: 'project_evidence_unavailable' }));
+        return send(response, 200, 'application/json; charset=utf-8', JSON.stringify(options.projectProvider()));
+      }
       if (requestUrl.pathname === '/api/state') {
         return send(response, 200, 'application/json; charset=utf-8', JSON.stringify({
           generatedAt: new Date().toISOString(),
+          project: options.projectProvider?.(),
           monitor: options.stateProvider(),
           activity: options.activityProvider?.() ?? { recentTasks: [] },
           recentEvents: events.slice(-100),
@@ -82,6 +94,7 @@ export function createObservabilityDashboardServer(options: DashboardServerOptio
           createDashboardCollaborationContext({
             monitor: options.stateProvider(),
             activity: options.activityProvider?.() ?? { recentTasks: [] },
+            project: options.projectProvider?.(),
             recentEvents: events,
             recentAlerts: alerts,
             recommendations,

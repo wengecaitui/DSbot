@@ -1,0 +1,92 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "graphTooltip": 0,
+  "links": [
+    {
+      "title": "Open the authoritative DSbot Control Center",
+      "type": "link",
+      "url": "http://127.0.0.1:8765",
+      "targetBlank": true
+    },
+    {
+      "title": "Configure Apache DevLake GitHub collection",
+      "type": "link",
+      "url": "http://127.0.0.1:4000",
+      "targetBlank": true
+    }
+  ],
+  "panels": [
+    {
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "dsbot-control-center" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "columns": [],
+          "data": "",
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "dsbot-control-center" },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "refId": "A",
+          "root_selector": "",
+          "source": "url",
+          "type": "uql",
+          "uql": "parse-json\n| project \"Status\"=\"status\", \"Capability\"=\"currentCapability\", \"Task\"=\"currentTask\", \"Agent\"=\"activeAgent\", \"Branch\"=\"repository.branch\", \"SHA\"=\"repository.commitSha\", \"CI\"=\"ci.status\", \"Next action\"=\"nextAction\"",
+          "url": "http://host.docker.internal:8765/api/project",
+          "url_options": { "data": "", "method": "GET" }
+        }
+      ],
+      "title": "Current evidence state (DSbot API is authoritative)",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "dsbot-control-center" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 2,
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "columns": [],
+          "data": "",
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "dsbot-control-center" },
+          "filters": [],
+          "format": "table",
+          "global_query_id": "",
+          "refId": "A",
+          "root_selector": "",
+          "source": "url",
+          "type": "uql",
+          "uql": "parse-json\n| project \"Replay\"=\"approvals.replay.approved\", \"Shadow\"=\"approvals.shadow.approved\", \"Paper\"=\"approvals.paper.approved\", \"Testnet\"=\"approvals.testnet.approved\", \"Live\"=\"approvals.live.approved\", \"Promoted strategies\"=\"promotedStrategyCount\"",
+          "url": "http://host.docker.internal:8765/api/project",
+          "url_options": { "data": "", "method": "GET" }
+        }
+      ],
+      "title": "Fail-closed authorization boundary",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 16 },
+      "id": 3,
+      "options": {
+        "content": "## Historical delivery analytics\n\nApache DevLake stores GitHub commits, PRs, reviews and Actions jobs in the `lake` database. Build historical panels from the provisioned **Apache DevLake** datasource after a repository connection and blueprint are configured. Grafana is an analysis surface; it does not grant approval and is not the DSbot project truth source.",
+        "mode": "markdown"
+      },
+      "title": "DevLake usage boundary",
+      "type": "text"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["dsbot", "control-center", "read-only"],
+  "time": { "from": "now-24h", "to": "now" },
+  "timezone": "browser",
+  "title": "DSbot Project State",
+  "uid": "dsbot-project-state",
+  "version": 1
+}
