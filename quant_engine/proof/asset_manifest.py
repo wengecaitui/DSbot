@@ -62,19 +62,22 @@ def _sha256(data: bytes) -> str:
 
 def _git_show_text(repo: Path, commit: str, path: str) -> str:
     """Read a file from a specific git commit as UTF-8 text.
-    
-    Falls back to worktree read if the commit doesn't exist in the repo
-    (e.g. synthetic test hashes).
+
+    For a real git commit: reads via git-show, normalizes CRLF, fail-closed.
+    For synthetic/test commits: git-show fails, worktree fallback applies.
     """
     import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "show", f"{commit}:{path}"],
-            capture_output=True, text=True, encoding="utf-8", check=True)
-        return result.stdout
-    except subprocess.CalledProcessError:
-        # Commit not found — fall back to worktree file
+    result = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{commit}:{path}"],
+        capture_output=True, text=True, encoding="utf-8")
+    if result.returncode != 0:
+        stderr = result.stderr
+        if "bad revision" in stderr or "unknown revision" in stderr or "does not have" in stderr or "exists on disk, but not in" in stderr:
+            raise ValueError("ASSET_SOURCE_COMMIT_UNRESOLVABLE")
+        if "does not exist in" in stderr:
+            raise ValueError("ASSET_SOURCE_PATH_MISSING_AT_COMMIT")
         return _repo_file(repo, path).read_text(encoding="utf-8")
+    return result.stdout
 
 
 def _text_file_sha256(path: Path) -> str:
