@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import unittest
 import tempfile
 from pathlib import Path
@@ -350,8 +349,6 @@ class StrategyProofTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ASSET_SOURCE_COMMIT_UNRESOLVABLE"):
             verify_asset_manifest(REPO, forged, expected_source_commit=fake)
 
-    @unittest.skipIf(os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true",
-                     "git-clone-from-parent test requires local repo; skip on CI runners")
     def test_real_source_file_mutation_is_detected(self):
         """Clone, mutate daemon.py, prove forged manifest is rejected."""
         import hashlib, json, shutil, subprocess, tempfile

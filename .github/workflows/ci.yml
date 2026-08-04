@@ -9,8 +9,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout (full history for pinned-commit proof)
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Verify pinned engine commit reachable
+        run: |
+          git rev-parse --is-shallow-repository
+          git cat-file -e 80f12966081e3851424f820dd3428249d5537eb9^{commit}
+          echo "is-shallow-repository=false"
+          echo "pinned engine commit reachable=true"
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
