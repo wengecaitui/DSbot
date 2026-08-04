@@ -27,10 +27,11 @@ jobs:
       SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       PROOF_PATH: artifacts/reference-infrastructure-proof.json
     steps:
-      - name: Checkout exact source commit
+      - name: Checkout exact source commit (full history)
         uses: actions/checkout@v6
         with:
           ref: ${{ env.SOURCE_COMMIT }}
+          fetch-depth: 0
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
