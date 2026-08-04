@@ -27,8 +27,8 @@ from quant_engine.proof.strategy_spec import build_candidate_manifest, canonical
 
 
 REPO = Path(__file__).resolve().parents[2]
-ENGINE = "1" * 40
-BASELINE = "2" * 40
+ENGINE = "34db3886eb2f0e19f5a8b453f2c0039e264a946e"
+BASELINE = "eadb12943efb7d575b4cec6b0d381a4d5ca42db2"
 
 
 def aggregate(value: float = -0.01, positive_fraction: float = 0.2, drawdown: float = 0.1) -> dict:

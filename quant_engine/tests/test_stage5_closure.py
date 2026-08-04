@@ -260,7 +260,7 @@ class Stage5ClosureTests(unittest.TestCase):
 
     def test_tamper_source_commit_rejected(self):
         self._assert_tamper_rejected(
-            lambda v: v.update(sourceCommit="f" * 40)
+            lambda v: v.update(sourceCommit="34db3886eb2f0e19f5a8b453f2c0039e264a946e")
         )
 
     def test_tamper_final_target_sha_rejected(self):
