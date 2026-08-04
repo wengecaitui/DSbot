@@ -158,7 +158,8 @@ class StrategySimulatorTests(unittest.TestCase):
 
 class PromotionReceiptTests(unittest.TestCase):
     def test_receipt_is_source_free_counted_and_tamper_evident(self):
-        engine = "34db3886eb2f0e19f5a8b453f2c0039e264a946e"
+        import subprocess as _sp
+        engine = _sp.check_output(["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True).strip()
         assets = build_asset_manifest(REPO, engine)
         manifest = build_candidate_manifest(assets, engine)
         specs = build_candidate_specs(assets)
