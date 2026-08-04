@@ -27,10 +27,11 @@ jobs:
       RECEIPT_PATH: docs/releases/stage-4a10-tradeiq-proof-receipt.json
       SUBJECT_PATH: artifacts/tradeiq-private-proof-receipt.json
     steps:
-      - name: Checkout exact receipt commit
+      - name: Checkout exact receipt commit (full history)
         uses: actions/checkout@v6
         with:
           ref: ${{ env.SOURCE_COMMIT }}
+          fetch-depth: 0
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
