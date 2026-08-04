@@ -259,9 +259,10 @@ class Stage5ClosureTests(unittest.TestCase):
         )
 
     def test_tamper_source_commit_rejected(self):
+        real_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True).strip()
         self._assert_tamper_rejected(
-            lambda v: v.update(sourceCommit="f" * 40)
-        )
+            lambda v: v.update(sourceCommit=real_commit))
 
     def test_tamper_final_target_sha_rejected(self):
         self._assert_tamper_rejected(
