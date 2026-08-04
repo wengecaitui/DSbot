@@ -10,6 +10,7 @@ import ast
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,25 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _git_show_text(repo: Path, commit: str, path: str) -> str:
+    """Read a file from a specific git commit as UTF-8 text.
+
+    Fail-closed: any git error raises. Only called for validated 40-hex
+    commits — there is no worktree fallback.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{commit}:{path}"],
+        capture_output=True, text=True, encoding="utf-8")
+    if result.returncode != 0:
+        stderr = result.stderr
+        if "bad revision" in stderr or "unknown revision" in stderr or "does not have" in stderr or "exists on disk, but not in" in stderr:
+            raise ValueError("ASSET_SOURCE_COMMIT_UNRESOLVABLE")
+        if "does not exist in" in stderr:
+            raise ValueError("ASSET_SOURCE_PATH_MISSING_AT_COMMIT")
+        raise ValueError(f"ASSET_GIT_SHOW_ERROR: {stderr.strip()}")
+    return result.stdout.replace("\r\n", "\n")
+
+
 def _text_file_sha256(path: Path) -> str:
     """Hash canonical UTF-8/LF text, independent of checkout line endings."""
     return _sha256(path.read_text(encoding="utf-8").encode("utf-8"))
@@ -95,45 +115,64 @@ def _extract_pine_assets(source: str) -> list[dict[str, Any]]:
     return assets
 
 
-def _symbol_sha256(path: Path, symbol: str) -> str:
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
+def _symbol_sha256(source_text: str, symbol: str, path_hint: str) -> str:
+    """Hash a named symbol's source segment from full source text.
+
+    Uses ast.get_source_segment for exact extraction — identical semantics
+    to the original Path-based version, but operates on in-memory text with
+    no file I/O.
+    """
+    tree = ast.parse(source_text)
     nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == symbol]
     if len(nodes) != 1:
-        raise ValueError(f"expected exactly one symbol {symbol} in {path.name}")
-    segment = ast.get_source_segment(source, nodes[0])
+        raise ValueError(f"expected exactly one symbol {symbol} in {path_hint}")
+    segment = ast.get_source_segment(source_text, nodes[0])
     if not segment:
         raise ValueError(f"could not extract symbol {symbol}")
     return _sha256(segment.encode("utf-8"))
 
 
-def _registry_entry_sha256(path: Path, registry_name: str, binding: str) -> str:
+def _registry_entry_sha256(source_text: str, registry_name: str, binding: str, path_hint: str) -> str:
+    """Hash the registry binding line from full source text.
+
+    Matches the exact line in REGISTRY_BINDINGS style dict. No file I/O —
+    operates on in-memory text.
+    """
     pattern = re.compile(rf'^\s*"{re.escape(registry_name)}"\s*:\s*{re.escape(binding)}\s*,?\s*$')
-    matches = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if pattern.match(line)]
+    matches = [line.strip() for line in source_text.splitlines() if pattern.match(line)]
     if len(matches) != 1:
-        raise ValueError(f"expected exactly one registry binding for {registry_name}")
+        raise ValueError(f"expected exactly one registry binding for {registry_name} in {path_hint}")
     return _sha256(matches[0].encode("utf-8"))
 
 
 def build_asset_manifest(repo: Path, source_commit: str = "LOCAL") -> dict[str, Any]:
     repo = repo.resolve()
-    pine_path = _repo_file(repo, "docs/all_indicators_pine_v2.txt")
-    pine_source = pine_path.read_text(encoding="utf-8")
+    pinned = bool(re.match(r"^[0-9a-f]{40}$", source_commit))
+
+    def _read(repo_path: str) -> str:
+        """Read source text: git-show for pinned commits, worktree for synthetic."""
+        if pinned:
+            return _git_show_text(repo, source_commit, repo_path)
+        return _repo_file(repo, repo_path).read_text(encoding="utf-8")
+
+    pine_source = _read("docs/all_indicators_pine_v2.txt")
     pine_assets = {item["index"]: item for item in _extract_pine_assets(pine_source)}
 
-    daemon_path = _repo_file(repo, "quant_engine/daemon.py")
-    registry_path = _repo_file(repo, "quant_engine/indicators/__init__.py")
-    registry_text = daemon_path.read_text(encoding="utf-8") + "\n" + registry_path.read_text(encoding="utf-8")
+    daemon_text = _read("quant_engine/daemon.py")
+    registry_text_source = _read("quant_engine/indicators/__init__.py")
+    registry_text = daemon_text + "\n" + registry_text_source
 
     assets: list[dict[str, Any]] = []
     for contract in ASSET_CONTRACTS:
         pine = pine_assets[contract["index"]]
         if f'"{contract["registry"]}"' not in registry_text:
             raise ValueError(f"registry entry missing: {contract['registry']}")
-        python_path = _repo_file(repo, contract["python"])
+
+        python_text = _read(contract["python"])
         registry_relative = "quant_engine/daemon.py" if contract["python"] == "quant_engine/daemon.py" else "quant_engine/indicators/__init__.py"
-        asset_registry_path = _repo_file(repo, registry_relative)
+        registry_source = daemon_text if contract["python"] == "quant_engine/daemon.py" else registry_text_source
         registry_binding = REGISTRY_BINDINGS[contract["registry"]]
+
         blockers: list[str] = []
         if contract["classification"] == "needs-lifecycle":
             blockers.append("PINE_LIFECYCLE_INCOMPLETE")
@@ -142,16 +181,17 @@ def build_asset_manifest(repo: Path, source_commit: str = "LOCAL") -> dict[str, 
         if pine["kind"] != "strategy":
             blockers.append("PINE_IS_INDICATOR")
         ready = not blockers and contract["classification"] == "direct-strategy"
+
         assets.append({
             **pine,
             "registryName": contract["registry"],
             "pythonPath": contract["python"],
-            "pythonFileSha256": _text_file_sha256(python_path),
+            "pythonFileSha256": _sha256(python_text.encode("utf-8")),
             "pythonSymbol": contract["symbol"],
-            "pythonSymbolSha256": _symbol_sha256(python_path, contract["symbol"]),
+            "pythonSymbolSha256": _symbol_sha256(python_text, contract["symbol"], contract["python"]),
             "registryPath": registry_relative,
             "registryBinding": registry_binding,
-            "registryEntrySha256": _registry_entry_sha256(asset_registry_path, contract["registry"], registry_binding),
+            "registryEntrySha256": _registry_entry_sha256(registry_source, contract["registry"], registry_binding, registry_relative),
             "mappingRelation": contract["relation"],
             "classification": contract["classification"],
             "classificationReason": contract["reason"],
@@ -166,12 +206,12 @@ def build_asset_manifest(repo: Path, source_commit: str = "LOCAL") -> dict[str, 
         "sourceCommit": source_commit,
         "pineCollection": {
             "path": "docs/all_indicators_pine_v2.txt",
-            "sha256": _text_file_sha256(pine_path),
+            "sha256": _sha256(pine_source.encode("utf-8")),
             "assetCount": len(assets),
         },
         "registry": {
-            "daemonSha256": _text_file_sha256(daemon_path),
-            "indicatorRegistrySha256": _text_file_sha256(registry_path),
+            "daemonSha256": _sha256(daemon_text.encode("utf-8")),
+            "indicatorRegistrySha256": _sha256(registry_text_source.encode("utf-8")),
         },
         "counts": {
             "pineAssetsVerified": len(assets),
