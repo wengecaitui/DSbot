@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_engine.proof.asset_manifest import _text_file_sha256, _sha256, build_asset_manifest, verify_asset_manifest
+from quant_engine.proof.asset_manifest import _git_show_text, _sha256, _symbol_sha256, _text_file_sha256, build_asset_manifest, verify_asset_manifest
 from quant_engine.proof.gap_policy import GapPolicy, audit_ohlcv
 from quant_engine.proof.strategy_adapter import Action, Decision, simulate_window
 from quant_engine.proof.walk_forward import WalkForwardConfig, run_causal_walk_forward
@@ -395,6 +395,36 @@ class StrategyProofTests(unittest.TestCase):
 
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_missing_file_at_pinned_commit_must_fail(self):
+        """A real 40-hex commit must raise for a file that does not exist at that commit."""
+        real_commit = "80f12966081e3851424f820dd3428249d5537eb9"
+        with self.assertRaisesRegex(ValueError, "ASSET_SOURCE_PATH_MISSING_AT_COMMIT"):
+            _git_show_text(REPO, real_commit, "quant_engine/proof/nonexistent.py")
+
+    def test_symbol_hash_computed_directly_from_text(self):
+        """_symbol_sha256 computes from pure text — no temp file, no Path I/O."""
+        source = "def alpha():\n    return 42\n\ndef beta():\n    return 0\n"
+        h1 = _symbol_sha256(source, "alpha", "<test>")
+        h2 = _symbol_sha256(source, "alpha", "<test>")
+        self.assertEqual(h1, h2, "Deterministic: same input → same hash")
+        # Confirm 'alpha' != 'beta' for different symbols in same text
+        h_beta = _symbol_sha256(source, "beta", "<test>")
+        self.assertNotEqual(h1, h_beta, "Different symbols have different hashes")
+
+    def test_no_temp_files_after_pinned_commit_build(self):
+        """build_asset_manifest with a pinned commit must not leave temp files."""
+        import glob as _glob
+        import os as _os
+        tmpdir = tempfile.gettempdir()
+        # NamedTemporaryFile with suffix='.py' produces tmp*.py files
+        pattern = _os.path.join(tmpdir, "tmp*.py")
+        before = set(_glob.glob(pattern))
+        build_asset_manifest(REPO, "80f12966081e3851424f820dd3428249d5537eb9")
+        after = set(_glob.glob(pattern))
+        new_files = after - before
+        self.assertEqual(len(new_files), 0,
+            f"No new .py temp files (NamedTemporaryFile leak): {new_files}")
 
 
 if __name__ == "__main__":
