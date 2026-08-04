@@ -356,8 +356,7 @@ class StrategyProofTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         try:
             subprocess.run(
-                ["git", "clone", "--depth=1", "--branch=feature/orangeai-split",
-                 "--single-branch", str(REPO), str(tmp)],
+                ["git", "clone", str(REPO), str(tmp)],
                 capture_output=True, check=True)
 
             commit_a = subprocess.run(
