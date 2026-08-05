@@ -4,17 +4,12 @@
 //   - market.kline.closed:  requires kline + isExchangeId(kline.exchange) + confirm === true.
 //   Invalid exchange is rejected synchronously (never reaches subscribers).
 //   No separate `source` field — exchange travels on ticker/kline itself.
-import { KlineClosedEventRejectedError } from './TradingEvent';
+import { KlineClosedEventRejectedError, InvalidExchangeProvenanceError } from './TradingEvent';
 import type { TradingEventType, TradingEventPayloadMap, TradingEvent } from './TradingEvent';
-import { isExchangeId } from '../data/MarketIdentity';
+import { validateTradingEventPayload } from './validateTradingEventPayload';
 
-export class InvalidExchangeProvenanceError extends Error {
-  constructor(msg: string) {
-    super(msg);
-    this.name = 'InvalidExchangeProvenanceError';
-    Object.setPrototypeOf(this, InvalidExchangeProvenanceError.prototype);
-  }
-}
+// Re-export for public API compatibility
+export { InvalidExchangeProvenanceError };
 
 export interface TradingEventBus {
   subscribe<T extends TradingEventType>(
@@ -46,42 +41,8 @@ export function createTradingEventBus(): TradingEventBus {
     },
 
     publish(type, payload) {
-      // Stage 3B4C2: validate exchange provenance at the publish boundary.
-      if (type === 'market.ticker.updated') {
-        const p = payload as TradingEventPayloadMap['market.ticker.updated'];
-        if (!p || !p.ticker) {
-          throw new InvalidExchangeProvenanceError('market.ticker.updated requires ticker payload');
-        }
-        if (!isExchangeId((p.ticker as { exchange?: unknown }).exchange)) {
-          throw new InvalidExchangeProvenanceError(
-            `market.ticker.updated: invalid ticker.exchange: ${JSON.stringify((p.ticker as { exchange?: unknown }).exchange)}`,
-          );
-        }
-      } else if (type === 'market.kline.closed') {
-        const p = payload as TradingEventPayloadMap['market.kline.closed'];
-        if (!p || !p.kline) {
-          throw new KlineClosedEventRejectedError('market.kline.closed requires kline payload');
-        }
-        if (!isExchangeId((p.kline as { exchange?: unknown }).exchange)) {
-          throw new InvalidExchangeProvenanceError(
-            `market.kline.closed: invalid kline.exchange: ${JSON.stringify((p.kline as { exchange?: unknown }).exchange)}`,
-          );
-        }
-        if (p.kline.confirm !== true) {
-          throw new KlineClosedEventRejectedError();
-        }
-      } else if (type === 'research.bias.updated') {
-        // Stage 3B4C4: validate report.exchange provenance for bias events
-        const p = payload as TradingEventPayloadMap['research.bias.updated'];
-        if (!p || !p.report) {
-          throw new InvalidExchangeProvenanceError('research.bias.updated requires report payload');
-        }
-        if (!isExchangeId((p.report as { exchange?: unknown }).exchange)) {
-          throw new InvalidExchangeProvenanceError(
-            `research.bias.updated: invalid report.exchange: ${JSON.stringify((p.report as { exchange?: unknown }).exchange)}`,
-          );
-        }
-      }
+      // Stage 3B4C2 + Phase 1A: delegate to shared canonical validation
+      validateTradingEventPayload(type, payload as Record<string, unknown>);
 
       seq += 1;
       const sequence = seq;
