@@ -310,25 +310,16 @@ describe('InMemoryEventJournal', () => {
 // ─── Flaky journal recovery ─────────────────────────────────────────────────
 describe('flaky journal recovery', () => {
   it('same-kernel: first append fails, second publish succeeds with sequence=1', () => {
+    const backing = createInMemoryEventJournal();
     let callCount = 0;
     const flakyJournal: EventJournalPort = {
-      append: () => {
+      append: (env) => {
         callCount++;
         if (callCount === 1) throw new Error('DISK_FULL');
-        // Second call succeeds — use a real journal to store
-        const j = createInMemoryEventJournal();
-        // Create a valid envelope manually to store
-        const env: KernelEventEnvelope = Object.freeze({
-          kernelEventId: 'a'.repeat(64),
-          kernelLogicalSequence: 1,
-          kernelTimestamp: 1000,
-          type: 'market.ticker.updated' as TradingEventType,
-          payload: Object.freeze({ ticker: makeTicker(), receivedAt: 1 }),
-        } as KernelEventEnvelope);
-        j.append(env);
+        backing.append(env);
       },
-      getByEventId: () => null,
-      readFromLogicalSequence: () => [],
+      getByEventId: (id) => backing.getByEventId(id),
+      readFromLogicalSequence: (from, limit) => backing.readFromLogicalSequence(from, limit),
     };
     const k = createTradingKernel({ exchange: BITGET, journal: flakyJournal });
     // First attempt fails
@@ -339,6 +330,13 @@ describe('flaky journal recovery', () => {
     assert.strictEqual(r.status, 'accepted');
     assert.strictEqual(r.envelope.kernelLogicalSequence, 1);
     assert.strictEqual(callCount, 2);
+    // Assert backing contains second envelope by ID and sequence
+    const stored = backing.getByEventId(r.envelope.kernelEventId);
+    assert.ok(stored);
+    assert.strictEqual(stored.kernelLogicalSequence, 1);
+    const entries = backing.readFromLogicalSequence(1, 1);
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].kernelEventId, r.envelope.kernelEventId);
   });
 });
 
