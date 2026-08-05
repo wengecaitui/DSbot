@@ -310,29 +310,59 @@ describe('InMemoryEventJournal', () => {
 // ─── Flaky journal recovery ─────────────────────────────────────────────────
 describe('flaky journal recovery', () => {
   it('same-kernel: first append fails, second publish succeeds with sequence=1', () => {
-    let shouldFail = true;
+    let callCount = 0;
     const flakyJournal: EventJournalPort = {
-      append: (env) => {
-        if (shouldFail) { shouldFail = false; throw new Error('DISK_FULL'); }
-        const realJournal = createInMemoryEventJournal();
-        // Wrap: create a real journal and append here after first failure
-        realJournal.append(env);
+      append: () => {
+        callCount++;
+        if (callCount === 1) throw new Error('DISK_FULL');
+        // Second call succeeds — use a real journal to store
+        const j = createInMemoryEventJournal();
+        // Create a valid envelope manually to store
+        const env: KernelEventEnvelope = Object.freeze({
+          kernelEventId: 'a'.repeat(64),
+          kernelLogicalSequence: 1,
+          kernelTimestamp: 1000,
+          type: 'market.ticker.updated' as TradingEventType,
+          payload: Object.freeze({ ticker: makeTicker(), receivedAt: 1 }),
+        } as KernelEventEnvelope);
+        j.append(env);
       },
       getByEventId: () => null,
       readFromLogicalSequence: () => [],
     };
     const k = createTradingKernel({ exchange: BITGET, journal: flakyJournal });
-    // First attempt: fails
+    // First attempt fails
     assert.throws(() => k.publish('market.ticker.updated', { ticker: makeTicker(), receivedAt: 1 }), /JOURNAL_APPEND_FAILED/);
-    // Second attempt with working journal: succeeds with sequence=1
-    // (sequence was not committed, so it restarts at 1)
-    // Replace journal before retry — this is the "same kernel retry" contract
-    // Since we can't atomically replace the journal in the current kernel API,
-    // prove that a fresh kernel with working journal starts at 1
-    const k2 = createTradingKernel({ exchange: BITGET });
-    const r = k2.publish('market.ticker.updated', { ticker: makeTicker(), receivedAt: 1 });
-    assert.strictEqual(r.envelope.kernelLogicalSequence, 1);
+    assert.strictEqual(callCount, 1);
+    // Second attempt on SAME kernel succeeds with sequence=1
+    const r = k.publish('market.ticker.updated', { ticker: makeTicker(), receivedAt: 1 });
     assert.strictEqual(r.status, 'accepted');
+    assert.strictEqual(r.envelope.kernelLogicalSequence, 1);
+    assert.strictEqual(callCount, 2);
+  });
+});
+
+// ─── Direct-append mutation isolation ───────────────────────────────────────
+describe('direct-append mutation isolation', () => {
+  it('append mutable nested envelope → caller mutation does not alter journal', () => {
+    const j = createInMemoryEventJournal();
+    const mutablePayload = { ticker: makeTicker(), receivedAt: 1 };
+    const env: KernelEventEnvelope = {
+      kernelEventId: 'a'.repeat(64),
+      kernelLogicalSequence: 1,
+      kernelTimestamp: 1000,
+      type: 'market.ticker.updated' as TradingEventType,
+      payload: mutablePayload,
+    } as KernelEventEnvelope;
+    j.append(env);
+    // Mutate original payload after append
+    mutablePayload.ticker.symbol = 'MUTATED' as string;
+    mutablePayload.receivedAt = 999;
+    // Journal read must return original values
+    const stored = j.getByEventId('a'.repeat(64));
+    assert.ok(stored);
+    assert.notStrictEqual((stored!.payload as { ticker: WsTicker }).ticker.symbol, 'MUTATED');
+    assert.notStrictEqual((stored!.payload as { receivedAt: number }).receivedAt, 999);
   });
 });
 

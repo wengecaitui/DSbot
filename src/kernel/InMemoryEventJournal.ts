@@ -29,14 +29,14 @@ export function createInMemoryEventJournal(): EventJournalPort {
     append(envelope: KernelEventEnvelope): void {
       const seq = envelope.kernelLogicalSequence;
       assertValidSequence(seq);
-      // reject duplicate eventId BEFORE contiguity check
       if (byId.has(envelope.kernelEventId)) {
         throw new Error(`JOURNAL_DUPLICATE_EVENT_ID: ${envelope.kernelEventId}`);
       }
-      // reject non-contiguous
       assertContiguousSequence(seq);
-      byId.set(envelope.kernelEventId, envelope);
-      bySequence.set(seq, envelope);
+      // deep-clone before storage so caller mutation cannot alter journal
+      const cloned = deepClone(envelope) as KernelEventEnvelope;
+      byId.set(cloned.kernelEventId, cloned);
+      bySequence.set(seq, cloned);
     },
 
     getByEventId(eventId: string): KernelEventEnvelope | null {
