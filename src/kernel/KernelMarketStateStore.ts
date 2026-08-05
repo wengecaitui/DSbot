@@ -4,12 +4,10 @@
 // Reduces market.ticker.updated and market.kline.closed events.
 // research.bias.updated is irrelevant.
 //
-// Key: sourceKey(exchange, instId)
-// Snapshot version: kernelLogicalSequence of last accepted mutation
-// generatedAt: clock.now() at read time
-// lastUpdatedAt: max accepted payload.receivedAt
-// ageMs: max(0, generatedAt - lastUpdatedAt)
-// isStale: ageMs > staleAfterMs
+// Key: (exchange, symbol) — stored explicitly, never parsed from sourceKey.
+// Snapshot version: kernelLogicalSequence of last accepted mutation.
+// generatedAt: clock.now() at read time.
+// lastUpdatedAt: max(previous, payload.receivedAt).
 
 import type { WsTicker, WsKline } from '../data/types';
 import type { ExchangeId } from '../data/MarketIdentity';
@@ -21,7 +19,6 @@ import type {
 } from '../data/MarketSnapshot';
 import type { KernelEventEnvelope } from './KernelEventEnvelope';
 import type { DomainClock } from '../runtime/Clock';
-import { systemDomainClock } from '../runtime/Clock';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -39,9 +36,10 @@ export interface KernelMarketStateStore {
 // ─── Internal ───────────────────────────────────────────────────────────────
 
 interface InternalEntry {
+  exchange: ExchangeId;
+  symbol: string;
   lastSeq: number;
   ticker: ReceivedTicker | null;
-  tickerTs: number; // last applied ticker.ts for staleness comparison
   lastReceivedAt: number;
   klines: Record<string, ReceivedClosedKline>;
   klineTs: Record<string, number>;
@@ -63,68 +61,89 @@ function deepFreeze<T>(obj: T): T {
   return obj;
 }
 
-function assertFiniteTicker(ticker: WsTicker): void {
-  // Check critical price fields for non-finite values
-  const fields: Array<[string, unknown]> = [
-    ['last', ticker.last],
-    ['high24h', ticker.high24h],
-    ['low24h', ticker.low24h],
-  ];
+function assertAllFinite(prefix: string, fields: Array<[string, unknown]>): void {
   for (const [name, val] of fields) {
     if (typeof val === 'number' && !Number.isFinite(val)) {
-      throw new Error(`NON_FINITE_TICKER: ${name}=${val}`);
+      throw new Error(`${prefix}: ${name}=${val}`);
     }
   }
 }
 
-function assertFiniteKline(kline: WsKline): void {
-  const fields: Array<[string, unknown]> = [
+function assertValidTicker(ticker: WsTicker, receivedAt: number): void {
+  if (ticker.channel !== 'ticker') {
+    throw new Error(`TICKER_CHANNEL: expected 'ticker', got ${JSON.stringify(ticker.channel)}`);
+  }
+  assertAllFinite('NON_FINITE_TICKER', [
+    ['last', ticker.last],
+    ['bestBid', ticker.bestBid],
+    ['bestAsk', ticker.bestAsk],
+    ['volume24h', ticker.volume24h],
+    ['high24h', ticker.high24h],
+    ['low24h', ticker.low24h],
+    ['ts', ticker.ts],
+    ['receivedAt', receivedAt],
+  ]);
+}
+
+function assertValidKline(kline: WsKline, receivedAt: number): void {
+  if (kline.channel !== 'kline') {
+    throw new Error(`KLINE_CHANNEL: expected 'kline', got ${JSON.stringify(kline.channel)}`);
+  }
+  if (kline.confirm !== true) {
+    throw new Error(`KLINE_NOT_CONFIRMED: confirm=${kline.confirm}`);
+  }
+  if (typeof kline.interval !== 'string' || kline.interval.length === 0) {
+    throw new Error(`KLINE_INTERVAL: must be non-empty string, got ${JSON.stringify(kline.interval)}`);
+  }
+  assertAllFinite('NON_FINITE_KLINE', [
     ['open', kline.open],
     ['high', kline.high],
     ['low', kline.low],
     ['close', kline.close],
     ['volume', kline.volume],
-  ];
-  for (const [name, val] of fields) {
-    if (typeof val === 'number' && !Number.isFinite(val)) {
-      throw new Error(`NON_FINITE_KLINE: ${name}=${val}`);
-    }
-  }
+    ['ts', kline.ts],
+    ['receivedAt', receivedAt],
+  ]);
 }
 
 // ─── Factory ────────────────────────────────────────────────────────────────
 
 export function createKernelMarketStateStore(config: {
-  clock?: DomainClock;
+  clock: DomainClock;
   staleAfterMs: number;
 }): KernelMarketStateStore {
-  const clock: DomainClock = config.clock ?? systemDomainClock;
+  if (!config.clock || typeof config.clock.now !== 'function') {
+    throw new Error('STORAGE_CONFIG: clock is required');
+  }
+  if (typeof config.staleAfterMs !== 'number' || !Number.isFinite(config.staleAfterMs) || config.staleAfterMs <= 0) {
+    throw new Error(`STORAGE_CONFIG: staleAfterMs must be finite >0, got ${config.staleAfterMs}`);
+  }
+  const clock = config.clock;
   const staleAfterMs = config.staleAfterMs;
+  const keys: string[] = [];
   const entries = new Map<string, InternalEntry>();
 
-  function ensureEntry(key: string): InternalEntry {
-    let e = entries.get(key);
+  function entryKey(exchange: ExchangeId, symbol: string): string {
+    return sourceKey(exchange, symbol);
+  }
+
+  function ensureEntry(exchange: ExchangeId, symbol: string): InternalEntry {
+    const k = entryKey(exchange, symbol);
+    let e = entries.get(k);
     if (!e) {
-      e = {
-        lastSeq: 0,
-        ticker: null,
-        tickerTs: 0,
-        lastReceivedAt: 0,
-        klines: {},
-        klineTs: {},
-      };
-      entries.set(key, e);
+      e = { exchange, symbol, lastSeq: 0, ticker: null, lastReceivedAt: 0, klines: {}, klineTs: {} };
+      entries.set(k, e);
+      keys.push(k);
     }
     return e;
   }
 
-  function buildSnapshot(key: string, entry: InternalEntry): MarketSnapshot {
-    const parts = key.split('::');
+  function buildSnapshot(entry: InternalEntry): MarketSnapshot {
     const generatedAt = clock.now();
     const ageMs = Math.max(0, generatedAt - entry.lastReceivedAt);
     return deepFreeze({
-      exchange: parts[0] as ExchangeId,
-      symbol: parts[1],
+      exchange: entry.exchange,
+      symbol: entry.symbol,
       ticker: entry.ticker ? deepClone(entry.ticker) : null,
       klines: deepClone(entry.klines) as Readonly<Record<string, ReceivedClosedKline>>,
       snapshotVersion: entry.lastSeq,
@@ -137,83 +156,97 @@ export function createKernelMarketStateStore(config: {
 
   return {
     apply(envelope: KernelEventEnvelope): ApplyResult {
-      const seq = envelope.kernelLogicalSequence;
       const { type } = envelope;
+      const seq = envelope.kernelLogicalSequence;
 
       if (type === 'research.bias.updated') {
         return { status: 'irrelevant' };
       }
 
-      let key: string;
-
+      // ── Ticker ────────────────────────────────────────────────────────────
       if (type === 'market.ticker.updated') {
         const p = envelope.payload as { ticker: WsTicker; receivedAt: number };
         const ticker = p.ticker;
-        assertFiniteTicker(ticker);
-        key = sourceKey(ticker.exchange as ExchangeId, ticker.instId);
 
-        const entry = ensureEntry(key);
+        // All validation BEFORE mutation
+        assertValidTicker(ticker, p.receivedAt);
+        const exchange = ticker.exchange as ExchangeId;
+        const symbol = ticker.instId;
+        // sourceKey validates exchange and symbol
+        entryKey(exchange, symbol);
 
-        // Out-of-order kernel sequence → ignore
+        const entry = ensureEntry(exchange, symbol);
+
+        // Out-of-order kernel sequence → ignore (no state change)
         if (seq <= entry.lastSeq) return { status: 'ignored' };
 
-        // Older ticker timestamp → ignore
         const newTs = ticker.ts;
-        if (entry.tickerTs > 0 && newTs < entry.tickerTs) {
+
+        // Older ticker timestamp → ignore
+        if (entry.ticker && newTs < entry.ticker.ticker.ts) {
           return { status: 'ignored' };
         }
-        // Same ts, not newer receivedAt → ignore
-        if (newTs === entry.tickerTs && p.receivedAt <= entry.lastReceivedAt) {
-          return { status: 'ignored' };
+        // Same ts: compare against existing ticker.receivedAt
+        if (entry.ticker && newTs === entry.ticker.ticker.ts) {
+          if (p.receivedAt <= entry.ticker.receivedAt) {
+            return { status: 'ignored' };
+          }
+          // Same ts + newer receivedAt → apply
         }
 
         entry.ticker = { ticker: deepClone(ticker), receivedAt: p.receivedAt };
-        entry.tickerTs = newTs;
-        entry.lastReceivedAt = p.receivedAt;
+        entry.lastReceivedAt = Math.max(entry.lastReceivedAt, p.receivedAt);
         entry.lastSeq = seq;
-        return { status: 'applied', snapshot: buildSnapshot(key, entry) };
+        return { status: 'applied', snapshot: buildSnapshot(entry) };
       }
 
+      // ── Kline ────────────────────────────────────────────────────────────
       if (type === 'market.kline.closed') {
         const p = envelope.payload as { kline: WsKline; receivedAt: number };
         const kline = p.kline;
-        assertFiniteKline(kline);
-        key = sourceKey(kline.exchange as ExchangeId, kline.instId);
 
-        const entry = ensureEntry(key);
+        // All validation BEFORE mutation
+        assertValidKline(kline, p.receivedAt);
+        const exchange = kline.exchange as ExchangeId;
+        const symbol = kline.instId;
+        entryKey(exchange, symbol);
+
+        const entry = ensureEntry(exchange, symbol);
 
         // Out-of-order kernel sequence → ignore
         if (seq <= entry.lastSeq) return { status: 'ignored' };
 
         const interval = kline.interval;
-        const existingTs = entry.klineTs[interval] ?? -1;
+        const existing = entry.klines[interval] as ReceivedClosedKline | undefined;
+        const existingTs = existing ? existing.kline.ts : -1;
 
         // Older kline.ts per interval → ignore
-        if (kline.ts <= existingTs) {
+        if (kline.ts < existingTs) {
+          return { status: 'ignored' };
+        }
+        // Same ts: compare against existing kline.receivedAt
+        if (kline.ts === existingTs && existing && p.receivedAt <= existing.receivedAt) {
           return { status: 'ignored' };
         }
 
         entry.klines[interval] = { kline: deepClone(kline), receivedAt: p.receivedAt };
         entry.klineTs[interval] = kline.ts;
-        if (p.receivedAt > entry.lastReceivedAt) {
-          entry.lastReceivedAt = p.receivedAt;
-        }
+        entry.lastReceivedAt = Math.max(entry.lastReceivedAt, p.receivedAt);
         entry.lastSeq = seq;
-        return { status: 'applied', snapshot: buildSnapshot(key, entry) };
+        return { status: 'applied', snapshot: buildSnapshot(entry) };
       }
 
       return { status: 'irrelevant' };
     },
 
     getSnapshot(exchange: ExchangeId, symbol: string): MarketSnapshot | undefined {
-      const key = sourceKey(exchange, symbol);
-      const entry = entries.get(key);
-      if (!entry) return undefined;
-      return buildSnapshot(key, entry);
+      const e = entries.get(entryKey(exchange, symbol));
+      if (!e) return undefined;
+      return buildSnapshot(e);
     },
 
     getAllSnapshots(): MarketSnapshot[] {
-      return [...entries.entries()].map(([key, entry]) => buildSnapshot(key, entry));
+      return keys.map((k) => entries.get(k)!).filter(Boolean).map((e) => buildSnapshot(e));
     },
   };
 }
