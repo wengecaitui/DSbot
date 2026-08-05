@@ -2,6 +2,10 @@
 import type { KernelEventEnvelope } from './KernelEventEnvelope';
 import type { EventJournalPort } from './EventJournalPort';
 
+function deepClone<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj));
+}
+
 export function createInMemoryEventJournal(): EventJournalPort {
   const byId = new Map<string, KernelEventEnvelope>();
   const bySequence = new Map<number, KernelEventEnvelope>();
@@ -12,12 +16,12 @@ export function createInMemoryEventJournal(): EventJournalPort {
     }
   }
 
-  function assertMonotonicSequence(seq: number): void {
-    // find highest seq, must be strictly greater
+  function assertContiguousSequence(seq: number): void {
+    // Must be exactly previous+1 for contiguous ordering
     let maxSeq = 0;
     for (const s of bySequence.keys()) { if (s > maxSeq) maxSeq = s; }
-    if (seq <= maxSeq) {
-      throw new Error(`JOURNAL_SEQUENCE_NOT_MONOTONIC: ${seq} <= existing max ${maxSeq}`);
+    if (seq !== maxSeq + 1) {
+      throw new Error(`JOURNAL_SEQUENCE_NOT_CONTIGUOUS: expected ${maxSeq + 1}, got ${seq}`);
     }
   }
 
@@ -25,18 +29,21 @@ export function createInMemoryEventJournal(): EventJournalPort {
     append(envelope: KernelEventEnvelope): void {
       const seq = envelope.kernelLogicalSequence;
       assertValidSequence(seq);
-      // reject duplicate eventId BEFORE monotonicity check
+      // reject duplicate eventId BEFORE contiguity check
       if (byId.has(envelope.kernelEventId)) {
         throw new Error(`JOURNAL_DUPLICATE_EVENT_ID: ${envelope.kernelEventId}`);
       }
-      // reject non-monotonic
-      assertMonotonicSequence(seq);
+      // reject non-contiguous
+      assertContiguousSequence(seq);
       byId.set(envelope.kernelEventId, envelope);
       bySequence.set(seq, envelope);
     },
 
     getByEventId(eventId: string): KernelEventEnvelope | null {
-      return byId.get(eventId) ?? null;
+      const stored = byId.get(eventId);
+      if (!stored) return null;
+      // return defensive clone to prevent caller mutation of journal state
+      return deepClone(stored) as KernelEventEnvelope;
     },
 
     readFromLogicalSequence(fromSequence: number, limit: number = 100): KernelEventEnvelope[] {
@@ -50,7 +57,8 @@ export function createInMemoryEventJournal(): EventJournalPort {
       for (let i = 0; i < limit; i++) {
         const env = bySequence.get(fromSequence + i);
         if (!env) break;
-        result.push(env);
+        // return defensive clone to prevent caller mutation of journal state
+        result.push(deepClone(env) as KernelEventEnvelope);
       }
       return result;
     },

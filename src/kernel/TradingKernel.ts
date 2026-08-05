@@ -1,7 +1,7 @@
 // Phase 1A: TradingKernel — deterministic event spine
 //
 // Boundary:
-//   validate → eventId → duplicate check → deep clone → freeze → journal → sequence → dispatch
+//   validate → eventId → duplicate check → deep clone → recursive freeze → journal → sequence → dispatch
 //   Duplicate eventId = status:duplicate, delivered:0, failures:0
 //   Journal append failure = throw, no sequence, no dispatch.
 //     Same kernel retry with working journal starts at sequence 1.
@@ -22,7 +22,17 @@ const SHA_RE = /^[0-9a-f]{64}$/;
 // ─── Canonical JSON ─────────────────────────────────────────────────────────
 
 function canonicalJSON(value: unknown): string {
-  return JSON.stringify(value, sortedKeysReplacer);
+  try {
+    return JSON.stringify(value, sortedKeysReplacer);
+  } catch (e) {
+    if (e instanceof TypeError && (e.message.includes('circular') || e.message.includes('cyclic'))) {
+      throw new Error('CANONICAL_CYCLE: circular reference detected');
+    }
+    if (e instanceof RangeError && (e.message.includes('call stack') || e.message.includes('recursion'))) {
+      throw new Error('CANONICAL_CYCLE: circular reference detected');
+    }
+    throw e;
+  }
 }
 
 function sortedKeysReplacer(_key: string, value: unknown): unknown {
@@ -50,10 +60,24 @@ function sha256(s: string): string {
   return crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 }
 
-// ─── Deep clone ─────────────────────────────────────────────────────────────
+// ─── Deep clone + recursive freeze ──────────────────────────────────────────
 
 function deepClone<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj));
+}
+
+function deepFreeze<T>(obj: T): T {
+  if (obj && typeof obj === 'object') {
+    Object.freeze(obj);
+    if (Array.isArray(obj)) {
+      for (const item of obj) deepFreeze(item);
+    } else {
+      for (const key of Object.keys(obj as Record<string, unknown>)) {
+        deepFreeze((obj as Record<string, unknown>)[key]);
+      }
+    }
+  }
+  return obj;
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -107,16 +131,18 @@ export function createTradingKernel(config: {
         throw new Error(`INVALID_EVENT_ID: must be 64-char hex, got ${JSON.stringify(eventId)}`);
       }
     } else {
-      const partial = { type, payload };
-      eventId = sha256(canonicalJSON(partial));
+      eventId = sha256(canonicalJSON({ type, payload }));
     }
 
     // Step 3: duplicate lookup
     const existing = journal.getByEventId(eventId);
     if (existing) {
+      // Defensive: clone the stored envelope before returning, preventing mutation
+      const cloned = deepClone(existing) as KernelEventEnvelope<T>;
+      deepFreeze(cloned);
       return {
         status: 'duplicate',
-        envelope: existing as KernelEventEnvelope<T>,
+        envelope: cloned,
         delivered: 0,
         failures: 0,
       };
@@ -128,15 +154,15 @@ export function createTradingKernel(config: {
     // Step 5: injected DomainClock timestamp
     const timestamp = clock.now();
 
-    // Step 6: deep defensive clone + freeze before journal
+    // Step 6: deep defensive clone + recursive freeze before journal
     const clonedPayload = deepClone(payload);
-    const env = Object.freeze({
+    const env = deepFreeze({
       kernelEventId: eventId,
       kernelLogicalSequence: candidateSeq,
       kernelTimestamp: timestamp,
       type,
       payload: clonedPayload,
-    } as KernelEventEnvelope<T>);
+    } as unknown as KernelEventEnvelope<T>) as KernelEventEnvelope<T>;
 
     // Step 7: journal append
     let appendFailed = false;
