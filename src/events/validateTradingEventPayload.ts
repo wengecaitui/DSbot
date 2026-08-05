@@ -5,8 +5,7 @@
 import type { WsTicker, WsKline } from '../data/types';
 import type { MarketBiasReportFull } from '../types/market-bias';
 import { isExchangeId } from '../data/MarketIdentity';
-import { InvalidExchangeProvenanceError } from './TradingEventBus';
-import { KlineClosedEventRejectedError } from './TradingEvent';
+import { InvalidExchangeProvenanceError, KlineClosedEventRejectedError } from './TradingEvent';
 
 export function validateTradingEventPayload(
   type: string,

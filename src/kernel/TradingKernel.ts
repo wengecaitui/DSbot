@@ -1,10 +1,11 @@
 // Phase 1A: TradingKernel — deterministic event spine
 //
 // Boundary:
-//   validate → eventId → duplicate check → journal append → sequence → dispatch
-//   Duplicate eventId = no append, no sequence advancement, no dispatch
-//   Journal append failure = throw, no sequence, no dispatch
-//   Subscriber failure = count and continue
+//   validate → eventId → duplicate check → deep clone → freeze → journal → sequence → dispatch
+//   Duplicate eventId = status:duplicate, delivered:0, failures:0
+//   Journal append failure = throw, no sequence, no dispatch.
+//     Same kernel retry with working journal starts at sequence 1.
+//   Subscriber failure = count and continue; async subscriber = counted as failure.
 
 import * as crypto from 'node:crypto';
 import type { ExchangeId } from '../data/MarketIdentity';
@@ -18,11 +19,22 @@ import { systemDomainClock } from '../runtime/Clock';
 
 const SHA_RE = /^[0-9a-f]{64}$/;
 
-function canonical(envelope: Omit<KernelEventEnvelope, 'kernelEventId' | 'kernelLogicalSequence' | 'kernelTimestamp'>): string {
-  return JSON.stringify({ type: envelope.type, payload: envelope.payload }, sortedKeysReplacer);
+// ─── Canonical JSON ─────────────────────────────────────────────────────────
+
+function canonicalJSON(value: unknown): string {
+  return JSON.stringify(value, sortedKeysReplacer);
 }
 
 function sortedKeysReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    throw new Error(`CANONICAL_NON_FINITE: ${value}`);
+  }
+  if (value === undefined) {
+    throw new Error('CANONICAL_UNDEFINED: undefined is not valid JSON');
+  }
+  if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
+    throw new Error(`CANONICAL_INVALID_TYPE: ${typeof value}`);
+  }
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const sorted: Record<string, unknown> = {};
     const keys = Object.keys(value as Record<string, unknown>).sort();
@@ -38,14 +50,30 @@ function sha256(s: string): string {
   return crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 }
 
-export type KernelSubscriber<T extends TradingEventType = TradingEventType> = (envelope: KernelEventEnvelope<T>) => void;
+// ─── Deep clone ─────────────────────────────────────────────────────────────
+
+function deepClone<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export type KernelSubscriber<T extends TradingEventType = TradingEventType> =
+  (envelope: KernelEventEnvelope<T>) => void | Promise<void>;
+
+export interface PublishResult<T extends TradingEventType = TradingEventType> {
+  status: 'accepted' | 'duplicate';
+  envelope: KernelEventEnvelope<T>;
+  delivered: number;
+  failures: number;
+}
 
 export interface TradingKernel {
   publish<T extends TradingEventType>(
     type: T,
     payload: TradingEventPayloadMap[T],
     eventId?: string,
-  ): KernelEventEnvelope<T>;
+  ): PublishResult<T>;
   subscribe<T extends TradingEventType>(
     type: T,
     handler: KernelSubscriber<T>,
@@ -53,21 +81,23 @@ export interface TradingKernel {
   journal(): EventJournalPort;
 }
 
+// ─── Factory ────────────────────────────────────────────────────────────────
+
 export function createTradingKernel(config: {
   exchange: ExchangeId;
   clock?: DomainClock;
   journal?: EventJournalPort;
 }): TradingKernel {
   let seq: number = 0;
+  let journal: EventJournalPort = config.journal ?? createInMemoryEventJournal();
   const clock: DomainClock = config.clock ?? systemDomainClock;
-  const journal: EventJournalPort = config.journal ?? createInMemoryEventJournal();
   const subs = new Map<TradingEventType, KernelSubscriber[]>();
 
   function publish<T extends TradingEventType>(
     type: T,
     payload: TradingEventPayloadMap[T],
     eventId?: string,
-  ): KernelEventEnvelope<T> {
+  ): PublishResult<T> {
     // Step 1: validate
     validateTradingEventPayload(type, payload as Record<string, unknown>);
 
@@ -78,12 +108,19 @@ export function createTradingKernel(config: {
       }
     } else {
       const partial = { type, payload };
-      eventId = sha256(canonical(partial as Omit<KernelEventEnvelope, 'kernelEventId' | 'kernelLogicalSequence' | 'kernelTimestamp'>));
+      eventId = sha256(canonicalJSON(partial));
     }
 
     // Step 3: duplicate lookup
     const existing = journal.getByEventId(eventId);
-    if (existing) return existing as KernelEventEnvelope<T>;
+    if (existing) {
+      return {
+        status: 'duplicate',
+        envelope: existing as KernelEventEnvelope<T>,
+        delivered: 0,
+        failures: 0,
+      };
+    }
 
     // Step 4: candidate sequence (not yet committed)
     const candidateSeq = seq + 1;
@@ -91,30 +128,53 @@ export function createTradingKernel(config: {
     // Step 5: injected DomainClock timestamp
     const timestamp = clock.now();
 
-    // Step 6: defensive immutable envelope via Object.freeze
+    // Step 6: deep defensive clone + freeze before journal
+    const clonedPayload = deepClone(payload);
     const env = Object.freeze({
       kernelEventId: eventId,
       kernelLogicalSequence: candidateSeq,
       kernelTimestamp: timestamp,
       type,
-      payload,
+      payload: clonedPayload,
     } as KernelEventEnvelope<T>);
 
     // Step 7: journal append
-    journal.append(env);
+    let appendFailed = false;
+    try {
+      journal.append(env);
+    } catch {
+      appendFailed = true;
+    }
+
+    // Step 7a: append failure → throw. Same kernel can retry with working journal.
+    if (appendFailed) {
+      throw new Error('JOURNAL_APPEND_FAILED');
+    }
 
     // Step 8: commit sequence
     seq = candidateSeq;
 
-    // Step 9: dispatch
+    // Step 9: dispatch with delivered/failures counting
     const handlers = subs.get(type);
+    let delivered = 0;
+    let failures = 0;
     if (handlers) {
       for (const h of [...handlers]) {
-        try { h(env as KernelEventEnvelope); } catch { /* count and continue */ }
+        try {
+          const ret = h(env as KernelEventEnvelope);
+          if (ret !== null && typeof ret === 'object' && typeof (ret as unknown as { then?: unknown }).then === 'function') {
+            failures += 1;
+            Promise.resolve(ret as Promise<void>).catch(() => {});
+          } else {
+            delivered += 1;
+          }
+        } catch {
+          failures += 1;
+        }
       }
     }
 
-    return env;
+    return { status: 'accepted', envelope: env, delivered, failures };
   }
 
   function subscribe<T extends TradingEventType>(

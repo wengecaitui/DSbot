@@ -29,3 +29,11 @@ export class KlineClosedEventRejectedError extends Error {
     Object.setPrototypeOf(this, KlineClosedEventRejectedError.prototype);
   }
 }
+
+export class InvalidExchangeProvenanceError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = 'InvalidExchangeProvenanceError';
+    Object.setPrototypeOf(this, InvalidExchangeProvenanceError.prototype);
+  }
+}

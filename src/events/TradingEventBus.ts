@@ -4,18 +4,12 @@
 //   - market.kline.closed:  requires kline + isExchangeId(kline.exchange) + confirm === true.
 //   Invalid exchange is rejected synchronously (never reaches subscribers).
 //   No separate `source` field — exchange travels on ticker/kline itself.
-import { KlineClosedEventRejectedError } from './TradingEvent';
+import { KlineClosedEventRejectedError, InvalidExchangeProvenanceError } from './TradingEvent';
 import type { TradingEventType, TradingEventPayloadMap, TradingEvent } from './TradingEvent';
-import { isExchangeId } from '../data/MarketIdentity';
 import { validateTradingEventPayload } from './validateTradingEventPayload';
 
-export class InvalidExchangeProvenanceError extends Error {
-  constructor(msg: string) {
-    super(msg);
-    this.name = 'InvalidExchangeProvenanceError';
-    Object.setPrototypeOf(this, InvalidExchangeProvenanceError.prototype);
-  }
-}
+// Re-export for public API compatibility
+export { InvalidExchangeProvenanceError };
 
 export interface TradingEventBus {
   subscribe<T extends TradingEventType>(
