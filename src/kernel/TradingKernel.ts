@@ -11,6 +11,7 @@ import * as crypto from 'node:crypto';
 import type { ExchangeId } from '../data/MarketIdentity';
 import type { TradingEventType, TradingEventPayloadMap } from '../events/TradingEvent';
 import { validateTradingEventPayload } from '../events/validateTradingEventPayload';
+import { validatePolicyPublication } from '../events/validatePolicySnapshot';
 import type { KernelEventEnvelope } from './KernelEventEnvelope';
 import type { EventJournalPort } from './EventJournalPort';
 import { createInMemoryEventJournal } from './InMemoryEventJournal';
@@ -153,6 +154,13 @@ export function createTradingKernel(config: {
 
     // Step 5: injected DomainClock timestamp
     const timestamp = clock.now();
+
+    // Step 5a: policy.snapshot.published pre-journal validation
+    if (type === 'policy.snapshot.published') {
+      const policy = (payload as unknown as { policy: unknown }).policy;
+      // 24h default max lifetime for kernel-level gate; PolicyStore enforces proper config
+      validatePolicyPublication(policy as Parameters<typeof validatePolicyPublication>[0], candidateSeq, timestamp, 86400000);
+    }
 
     // Step 6: deep defensive clone + recursive freeze before journal
     const clonedPayload = deepClone(payload);

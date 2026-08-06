@@ -7,11 +7,13 @@
 
 import type { WsTicker, WsKline } from '../data/types';
 import type { MarketBiasReportFull } from '../types/market-bias';
+import type { CompiledPolicy } from '../types/policy-snapshot';
 
 export interface TradingEventPayloadMap {
-  'market.ticker.updated':  { ticker: WsTicker; receivedAt: number };
-  'market.kline.closed':    { kline: WsKline; receivedAt: number };
-  'research.bias.updated':  { report: MarketBiasReportFull; receivedAt: number };
+  'market.ticker.updated':      { ticker: WsTicker; receivedAt: number };
+  'market.kline.closed':        { kline: WsKline; receivedAt: number };
+  'research.bias.updated':      { report: MarketBiasReportFull; receivedAt: number };
+  'policy.snapshot.published':  { policy: CompiledPolicy };
 }
 
 export type TradingEventType = keyof TradingEventPayloadMap;
