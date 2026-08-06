@@ -259,3 +259,103 @@ describe('kernel subscription', () => {
     assert.ok(s.getSnapshot('bitget', 'BTC/USDT'));
   });
 });
+
+// ─── Field-level validation ─────────────────────────────────────────────────
+describe('field-level atomic validation', () => {
+  it('invalid first event leaves getSnapshot undefined', () => {
+    const s = mkStore();
+    assert.throws(() => s.apply(tickerEnv({ last: NaN } as Partial<WsTicker>, 1, 1)), /NON_FINITE_TICKER/);
+    assert.strictEqual(s.getSnapshot('bitget', 'BTC/USDT'), undefined);
+  });
+
+  it('invalid update preserves previous snapshot and version', () => {
+    const s = mkStore();
+    s.apply(tickerEnv({}, 1000, 1));
+    const before = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.throws(() => s.apply(tickerEnv({ last: NaN } as Partial<WsTicker>, 2000, 2)), /NON_FINITE_TICKER/);
+    const after = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.strictEqual(after.snapshotVersion, before.snapshotVersion);
+    assert.strictEqual(after.lastUpdatedAt, before.lastUpdatedAt);
+  });
+
+  // Ticker: every numeric field with undefined, string, NaN, Infinity
+  for (const [field, badValue] of [
+    ['last', undefined],
+    ['last', 'not-a-number'],
+    ['last', NaN],
+    ['last', Infinity],
+    ['bestBid', undefined],
+    ['bestAsk', NaN],
+    ['volume24h', Infinity],
+    ['high24h', 'abc'],
+    ['low24h', null],
+    ['ts', undefined],
+  ] as const) {
+    it(`ticker.${field} = ${JSON.stringify(badValue)} → throw, state unchanged`, () => {
+      const s = mkStore();
+      s.apply(tickerEnv({}, 1000, 1));
+      const before = s.getSnapshot('bitget', 'BTC/USDT')!;
+      assert.throws(() => s.apply(tickerEnv({ [field]: badValue } as Partial<WsTicker>, 2000, 2)), /NON_FINITE_TICKER/);
+      const after = s.getSnapshot('bitget', 'BTC/USDT')!;
+      assert.strictEqual(after.snapshotVersion, before.snapshotVersion);
+    });
+  }
+
+  // Kline: every numeric field with undefined, string, NaN, Infinity
+  for (const [field, badValue] of [
+    ['open', undefined],
+    ['open', 'not-a-number'],
+    ['open', NaN],
+    ['open', Infinity],
+    ['close', undefined],
+    ['volume', NaN],
+    ['ts', 'abc'],
+  ] as const) {
+    it(`kline.${field} = ${JSON.stringify(badValue)} → throw, state unchanged`, () => {
+      const s = mkStore();
+      s.apply(klineEnv({}, 1000, 1));
+      const before = s.getSnapshot('bitget', 'BTC/USDT')!;
+      assert.throws(() => s.apply(klineEnv({ [field]: badValue } as Partial<WsKline>, 2000, 2)), /NON_FINITE_KLINE/);
+      const after = s.getSnapshot('bitget', 'BTC/USDT')!;
+      assert.strictEqual(after.snapshotVersion, before.snapshotVersion);
+    });
+  }
+});
+
+// ─── Mutation isolation deep ────────────────────────────────────────────────
+describe('deep mutation isolation', () => {
+  it('mutate original ticker after apply; stored state unchanged', () => {
+    const s = mkStore();
+    const mutableTicker = { ...validTicker };
+    const mutablePayload = { ticker: mutableTicker, receivedAt: 1000 };
+    s.apply(env('market.ticker.updated', mutablePayload as unknown as Record<string,unknown>, 1));
+    // mutate original
+    mutableTicker.last = 999999;
+    mutableTicker.ts = 999999;
+    const snap = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.notStrictEqual(snap.ticker!.ticker.last, 999999);
+  });
+
+  it('mutate original kline after apply; stored state unchanged', () => {
+    const s = mkStore();
+    const mutableKline = { ...validKline };
+    const mutablePayload = { kline: mutableKline, receivedAt: 1000 };
+    s.apply(env('market.kline.closed', mutablePayload as unknown as Record<string,unknown>, 1));
+    mutableKline.close = 999999;
+    const snap = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.notStrictEqual(snap.klines['1m'].kline.close, 999999);
+  });
+});
+
+// ─── Exchange isolation ─────────────────────────────────────────────────────
+describe('exchange isolation', () => {
+  it('bitget and binance same symbol remain isolated', () => {
+    const s = mkStore();
+    s.apply(tickerEnv({}, 1000, 1));
+    s.apply(tickerEnv({ exchange: 'binance' } as Partial<WsTicker>, 1000, 2));
+    assert.ok(s.getSnapshot('bitget', 'BTC/USDT'));
+    assert.ok(s.getSnapshot('binance', 'BTC/USDT'));
+    const all = s.getAllSnapshots();
+    assert.strictEqual(all.length, 2);
+  });
+});

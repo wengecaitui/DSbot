@@ -63,8 +63,8 @@ function deepFreeze<T>(obj: T): T {
 
 function assertAllFinite(prefix: string, fields: Array<[string, unknown]>): void {
   for (const [name, val] of fields) {
-    if (typeof val === 'number' && !Number.isFinite(val)) {
-      throw new Error(`${prefix}: ${name}=${val}`);
+    if (typeof val !== 'number' || !Number.isFinite(val)) {
+      throw new Error(`${prefix}: ${name}=${JSON.stringify(val)}`);
     }
   }
 }
@@ -168,12 +168,14 @@ export function createKernelMarketStateStore(config: {
         const p = envelope.payload as { ticker: WsTicker; receivedAt: number };
         const ticker = p.ticker;
 
-        // All validation BEFORE mutation
+        // All validation BEFORE any mutation
         assertValidTicker(ticker, p.receivedAt);
         const exchange = ticker.exchange as ExchangeId;
         const symbol = ticker.instId;
-        // sourceKey validates exchange and symbol
         entryKey(exchange, symbol);
+
+        // Deep-clone into candidate BEFORE ensureEntry
+        const candidateTicker: ReceivedTicker = { ticker: deepClone(ticker), receivedAt: p.receivedAt };
 
         const entry = ensureEntry(exchange, symbol);
 
@@ -191,10 +193,9 @@ export function createKernelMarketStateStore(config: {
           if (p.receivedAt <= entry.ticker.receivedAt) {
             return { status: 'ignored' };
           }
-          // Same ts + newer receivedAt → apply
         }
 
-        entry.ticker = { ticker: deepClone(ticker), receivedAt: p.receivedAt };
+        entry.ticker = candidateTicker;
         entry.lastReceivedAt = Math.max(entry.lastReceivedAt, p.receivedAt);
         entry.lastSeq = seq;
         return { status: 'applied', snapshot: buildSnapshot(entry) };
@@ -205,11 +206,14 @@ export function createKernelMarketStateStore(config: {
         const p = envelope.payload as { kline: WsKline; receivedAt: number };
         const kline = p.kline;
 
-        // All validation BEFORE mutation
+        // All validation BEFORE any mutation
         assertValidKline(kline, p.receivedAt);
         const exchange = kline.exchange as ExchangeId;
         const symbol = kline.instId;
         entryKey(exchange, symbol);
+
+        // Deep-clone into candidate BEFORE ensureEntry
+        const candidateKline: ReceivedClosedKline = { kline: deepClone(kline), receivedAt: p.receivedAt };
 
         const entry = ensureEntry(exchange, symbol);
 
@@ -229,7 +233,7 @@ export function createKernelMarketStateStore(config: {
           return { status: 'ignored' };
         }
 
-        entry.klines[interval] = { kline: deepClone(kline), receivedAt: p.receivedAt };
+        entry.klines[interval] = candidateKline;
         entry.klineTs[interval] = kline.ts;
         entry.lastReceivedAt = Math.max(entry.lastReceivedAt, p.receivedAt);
         entry.lastSeq = seq;
