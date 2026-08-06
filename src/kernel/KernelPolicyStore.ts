@@ -168,7 +168,7 @@ export function createKernelPolicyStore(config: {
       // Defensive validation of envelope fields
       if (!Number.isSafeInteger(seq) || seq <= 0) throw new Error('POLICY_STORE: invalid kernelLogicalSequence');
       if (!Number.isSafeInteger(ts) || ts < 0) throw new Error('POLICY_STORE: invalid kernelTimestamp');
-      if (typeof eid !== 'string' || eid.length === 0) throw new Error('POLICY_STORE: invalid kernelEventId');
+      if (typeof eid !== 'string' || !/^[0-9a-f]{64}$/.test(eid)) throw new Error('POLICY_STORE: invalid kernelEventId');
 
       // Validate policy BEFORE any store mutation
       validatePolicyPublication(policyPayload, seq, ts, maxLifetimeMs);
@@ -223,10 +223,10 @@ export function createKernelPolicyStore(config: {
     resolve(exchange: ExchangeId, symbol: string): PolicyResolution {
       const state = states.get(exchange);
       if (!state) {
-        return { status: 'missing', policy: null, allowNewEntries: false, maxPositionMultiplier: 0,
-          directionBias: 'neutral', riskLevel: 'high', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] };
+        return deepFreeze({ status: 'missing', policy: null, allowNewEntries: false, maxPositionMultiplier: 0,
+          directionBias: 'neutral', riskLevel: 'high', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } as PolicyResolution);
       }
-      return buildResolution(state, symbol);
+      return deepFreeze(buildResolution(state, symbol) as unknown as Record<string,unknown>) as unknown as PolicyResolution;
     },
   };
 }

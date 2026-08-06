@@ -119,6 +119,11 @@ export function validatePolicyPublication(
       throw new Error(`POLICY_INVALID: unknown field "${key}"`);
     }
   }
+  // Require every mandatory key
+  for (const key of COMPILED_POLICY_KEYS) {
+    if (key === 'degradeUntil') continue; // optional
+    if (!(key in p)) throw new Error(`POLICY_INVALID: missing required field "${key}"`);
+  }
 
   // Exchange with isExchangeId
   if (!isNonEmptyTrimmed(p.exchange)) throw new Error('POLICY_INVALID: exchange');
@@ -184,11 +189,17 @@ export function validatePolicyPublication(
   // reasonCodes
   assertUniqueSorted(p.reasonCodes, 'reasonCodes');
 
-  // Symbol rules
-  if (p.symbolRules !== undefined && p.symbolRules !== null) {
-    if (typeof p.symbolRules !== 'object' || Array.isArray(p.symbolRules)) {
-      throw new Error('POLICY_INVALID: symbolRules is not a plain object');
-    }
+  // Symbol rules — mandatory plain object
+  if (p.symbolRules === undefined || p.symbolRules === null) {
+    throw new Error('POLICY_INVALID: symbolRules missing');
+  }
+  if (typeof p.symbolRules !== 'object' || Array.isArray(p.symbolRules)) {
+    throw new Error('POLICY_INVALID: symbolRules is not a plain object');
+  }
+  const proto = Object.getPrototypeOf(p.symbolRules);
+  if (proto !== Object.prototype && proto !== null) {
+    throw new Error('POLICY_INVALID: symbolRules is not a plain object');
+  }
     const rules = p.symbolRules as Record<string, unknown>;
     const ruleKeys = Object.keys(rules);
     for (const sym of ruleKeys) {
@@ -200,6 +211,10 @@ export function validatePolicyPublication(
       // Strict schema: reject unknown fields in SymbolPolicyRule
       for (const rk of Object.keys(r)) {
         if (!SYMBOL_RULE_KEYS.has(rk)) throw new Error(`POLICY_INVALID: symbolRules.${sym}.unknown field "${rk}"`);
+      }
+      // Require every mandatory key in SymbolPolicyRule
+      for (const key of SYMBOL_RULE_KEYS) {
+        if (!(key in r)) throw new Error(`POLICY_INVALID: symbolRules.${sym}.missing required field "${key}"`);
       }
 
       if (typeof r.allowNewEntries !== 'boolean') throw new Error(`POLICY_INVALID: symbolRules.${sym}.allowNewEntries`);
@@ -216,7 +231,6 @@ export function validatePolicyPublication(
         `symbolRules.${sym}.allowedStrategyIds`, `symbolRules.${sym}.blockedStrategyIds`);
       assertUniqueSorted(r.reasonCodes, `symbolRules.${sym}.reasonCodes`);
     }
-  }
 
   // JSON safety (allow shared non-cyclic references)
   try { JSON.stringify(policy); } catch { throw new Error('POLICY_INVALID: not JSON-safe'); }

@@ -265,3 +265,97 @@ describe('kernel subscription', () => {
     assert.strictEqual(called, false);
   });
 });
+
+// ─── Final invariants ───────────────────────────────────────────────────────
+describe('final invariants', () => {
+  it('sourceResearchSequence=0 accepted (non-negative)', () => {
+    validatePolicyPublication(mkPolicy({ sourceResearchSequence: 0 } as Partial<CompiledPolicy>), 5, 5000, MAX_24H); // no throw
+  });
+  it('missing symbolRules rejected', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ symbolRules: undefined } as unknown as CompiledPolicy), 5, 5000, MAX_24H), /symbolRules missing/);
+  });
+  it('null symbolRules rejected', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ symbolRules: null } as unknown as CompiledPolicy), 5, 5000, MAX_24H), /symbolRules missing/);
+  });
+  it('array symbolRules rejected', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ symbolRules: [] } as unknown as CompiledPolicy), 5, 5000, MAX_24H), /is not a plain object/);
+  });
+  it('Date symbolRules rejected', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ symbolRules: new Date() } as unknown as CompiledPolicy), 5, 5000, MAX_24H), /is not a plain object/);
+  });
+  it('missing required top-level field rejected', () => {
+    const p: Record<string,unknown> = { ...mkPolicy() };
+    delete p.compilerVersion;
+    assert.throws(() => validatePolicyPublication(p, 5, 5000, MAX_24H), /missing required field/);
+  });
+  it('missing required SymbolPolicyRule field rejected', () => {
+    const rule: Record<string,unknown> = { allowNewEntries: true, maxPositionMultiplier: 0.5, directionBias: 'bullish', riskLevel: 'low', allowedStrategyIds: [], blockedStrategyIds: [] };
+    // missing reasonCodes
+    const p = mkPolicy({ symbolRules: { BTC: rule } } as unknown as CompiledPolicy);
+    assert.throws(() => validatePolicyPublication(p, 5, 5000, MAX_24H), /missing required field/);
+  });
+  it('invalid kernelEventId rejected atomically', () => {
+    const s = mkStore();
+    const badEnv = { type: 'policy.snapshot.published', kernelLogicalSequence: 2, kernelTimestamp: 1000,
+      kernelEventId: 'bad-id', payload: { policy: mkPolicy() } } as unknown as KernelEventEnvelope;
+    assert.throws(() => s.apply(badEnv), /invalid kernelEventId|POLICY_INVALID: missing policy/);
+  });
+  it('duplicate publish: subscriber called once for same eventId', () => {
+    const kernel = createTradingKernel({ exchange: BITGET, policyMaxLifetimeMs: MAX_24H });
+    let count = 0;
+    kernel.subscribe('policy.snapshot.published', () => { count++; });
+    const p = mkPolicy({ effectiveAt: 2000 });
+    const r1 = kernel.publish('policy.snapshot.published', { policy: p });
+    assert.strictEqual(r1.status, 'accepted');
+    assert.strictEqual(count, 1);
+    const r2 = kernel.publish('policy.snapshot.published', { policy: p }, r1.envelope.kernelEventId);
+    assert.strictEqual(r2.status, 'duplicate');
+    assert.strictEqual(count, 1); // not called again
+  });
+  it('resolve result is recursively frozen', () => {
+    const s = mkStore(mkClock(5000));
+    s.apply(env(mkPolicy({ effectiveAt: 1000, expiresAt: 10000 }), 2));
+    const r = s.resolve(BITGET, 'BTC/USDT');
+    assert.ok(Object.isFrozen(r));
+    assert.ok(Object.isFrozen(r.allowedStrategyIds));
+    assert.ok(Object.isFrozen(r.blockedStrategyIds));
+    assert.ok(Object.isFrozen(r.reasonCodes));
+    try { (r as Record<string,unknown>).allowNewEntries = true; } catch { /* frozen */ }
+    const r2 = s.resolve(BITGET, 'BTC/USDT');
+    assert.strictEqual(r2.allowNewEntries, r.allowNewEntries);
+  });
+  it('strategy allowlist intersection', () => {
+    const s = mkStore(mkClock(5000));
+    s.apply(env(mkPolicy({ allowedStrategyIds: ['a', 'c'], symbolRules: { 'BTC/USDT': { allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'bullish', riskLevel: 'medium', allowedStrategyIds: ['b', 'c'], blockedStrategyIds: [], reasonCodes: [] } } }), 2));
+    const r = s.resolve(BITGET, 'BTC/USDT');
+    assert.deepStrictEqual(r.allowedStrategyIds, ['c']); // intersection of [a,c] and [b,c]
+  });
+  it('blocked strategy sorted union', () => {
+    const s = mkStore(mkClock(5000));
+    s.apply(env(mkPolicy({ allowedSymbols: [], blockedStrategyIds: ['x'], symbolRules: { 'BTC/USDT': { allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'bullish', riskLevel: 'medium', allowedStrategyIds: [], blockedStrategyIds: ['x', 'y'], reasonCodes: [] } } }), 1));
+    const r = s.resolve(BITGET, 'BTC/USDT');
+    assert.deepStrictEqual(r.blockedStrategyIds, ['x', 'y']); // sorted union
+  });
+  it('reasonCodes sorted union', () => {
+    const s = mkStore(mkClock(5000));
+    s.apply(env(mkPolicy({ reasonCodes: ['global'], symbolRules: { 'BTC/USDT': { allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'bullish', riskLevel: 'medium', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: ['symbol'] } } }), 2));
+    assert.deepStrictEqual(s.resolve(BITGET, 'BTC/USDT').reasonCodes, ['global', 'symbol']);
+  });
+  it('mutating input after apply cannot affect store', () => {
+    const s = mkStore();
+    const mutablePolicy = mkPolicy();
+    s.apply(env(mutablePolicy, 2));
+    mutablePolicy.allowNewEntries = false;
+    mutablePolicy.maxPositionMultiplier = 0;
+    assert.strictEqual(s.getLatest(BITGET)!.allowNewEntries, true);
+    assert.strictEqual(s.getLatest(BITGET)!.maxPositionMultiplier, 1);
+  });
+  it('mutating resolve object is ineffective', () => {
+    const s = mkStore(mkClock(5000));
+    s.apply(env(mkPolicy({ effectiveAt: 1000, expiresAt: 10000 }), 2));
+    const r = s.resolve(BITGET, 'BTC/USDT');
+    try { (r as Record<string,unknown>).directionBias = 'bearish'; } catch { /* frozen */ }
+    const r2 = s.resolve(BITGET, 'BTC/USDT');
+    assert.strictEqual(r2.directionBias, 'bullish');
+  });
+});
