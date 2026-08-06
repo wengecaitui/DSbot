@@ -112,6 +112,7 @@ export function createTradingKernel(config: {
   exchange: ExchangeId;
   clock?: DomainClock;
   journal?: EventJournalPort;
+  policyMaxLifetimeMs?: number;
 }): TradingKernel {
   let seq: number = 0;
   let journal: EventJournalPort = config.journal ?? createInMemoryEventJournal();
@@ -157,9 +158,11 @@ export function createTradingKernel(config: {
 
     // Step 5a: policy.snapshot.published pre-journal validation
     if (type === 'policy.snapshot.published') {
+      if (config.policyMaxLifetimeMs === undefined) {
+        throw new Error('POLICY_CONFIG_MISSING: policyMaxLifetimeMs required for policy.snapshot.published');
+      }
       const policy = (payload as unknown as { policy: unknown }).policy;
-      // 24h default max lifetime for kernel-level gate; PolicyStore enforces proper config
-      validatePolicyPublication(policy as Parameters<typeof validatePolicyPublication>[0], candidateSeq, timestamp, 86400000);
+      validatePolicyPublication(policy, candidateSeq, timestamp, config.policyMaxLifetimeMs);
     }
 
     // Step 6: deep defensive clone + recursive freeze before journal

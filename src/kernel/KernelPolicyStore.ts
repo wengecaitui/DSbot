@@ -162,29 +162,43 @@ export function createKernelPolicyStore(config: {
       if (envelope.type !== 'policy.snapshot.published') return { status: 'irrelevant' };
       const policyPayload = (envelope.payload as { policy: CompiledPolicy }).policy;
       const seq = envelope.kernelLogicalSequence;
+      const ts = envelope.kernelTimestamp;
+      const eid = envelope.kernelEventId;
 
-      // Defensive validation before any mutation
-      validatePolicyPublication(policyPayload, seq, envelope.kernelTimestamp, maxLifetimeMs);
+      // Defensive validation of envelope fields
+      if (!Number.isSafeInteger(seq) || seq <= 0) throw new Error('POLICY_STORE: invalid kernelLogicalSequence');
+      if (!Number.isSafeInteger(ts) || ts < 0) throw new Error('POLICY_STORE: invalid kernelTimestamp');
+      if (typeof eid !== 'string' || eid.length === 0) throw new Error('POLICY_STORE: invalid kernelEventId');
+
+      // Validate policy BEFORE any store mutation
+      validatePolicyPublication(policyPayload, seq, ts, maxLifetimeMs);
 
       const exchange = policyPayload.exchange as ExchangeId;
+
+      // Deep-clone candidate BEFORE ensureState or any mutation
+      let cloned: CompiledPolicy;
+      try {
+        cloned = deepClone(policyPayload) as CompiledPolicy;
+      } catch {
+        throw new Error('POLICY_STORE: clone failed');
+      }
+
+      const versioned: VersionedPolicySnapshot = deepFreeze({
+        ...cloned,
+        policyId: eid,
+        policyVersion: seq,
+        publishedAt: ts,
+      } as VersionedPolicySnapshot);
+
+      // Only NOW access store state
       const state = ensureState(exchange);
 
-      // Out-of-order sequence → ignored
+      // Out-of-order sequence → ignored (no state change)
       if (state.latest && seq <= state.latest.policyVersion) {
         return { status: 'ignored' };
       }
 
-      // Build versioned snapshot from envelope
-      const cloned = deepClone(policyPayload) as CompiledPolicy;
-      const versioned: VersionedPolicySnapshot = deepFreeze({
-        ...cloned,
-        policyId: envelope.kernelEventId,
-        policyVersion: seq,
-        publishedAt: envelope.kernelTimestamp,
-      } as VersionedPolicySnapshot);
-
       // Commit atomically
-      const previous = state.latest;
       state.latest = versioned;
       state.byVersion.set(seq, versioned);
       state.history.unshift(versioned);

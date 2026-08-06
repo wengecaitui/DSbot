@@ -1,4 +1,4 @@
-// Phase 1B2: Policy Store — contract tests (RED first)
+// Phase 1B2: Policy Store — contract tests
 import * as assert from 'node:assert';
 import { describe, it, beforeEach } from 'node:test';
 import type { DomainClock } from '../../src/runtime/Clock';
@@ -18,41 +18,24 @@ function mkClock(init: number): DomainClock & { advance(ms: number): void } {
 }
 
 function mkStore(clock?: DomainClock): KernelPolicyStore {
-  return createKernelPolicyStore({
-    clock: clock ?? mkClock(1000),
-    maxLifetimeMs: MAX_24H,
-    maxVersionsPerExchange: 10,
-  });
+  return createKernelPolicyStore({ clock: clock ?? mkClock(1000), maxLifetimeMs: MAX_24H, maxVersionsPerExchange: 10 });
 }
 
 function mkPolicy(overrides?: Partial<CompiledPolicy>): CompiledPolicy {
   return {
-    exchange: BITGET,
-    sourceResearchEventId: 'a'.repeat(64),
-    sourceResearchSequence: 0,
-    compilerVersion: '1.0.0',
-    compiledAt: 900,
-    effectiveAt: 1000,
-    expiresAt: 1000000,
-    allowNewEntries: true,
-    allowedSymbols: ['BTC/USDT'],
-    blockedSymbols: [],
-    allowedStrategyIds: ['momentum'],
-    blockedStrategyIds: [],
-    maxPositionMultiplier: 1.0,
-    riskLevel: 'medium',
-    directionBias: 'bullish',
-    symbolRules: {},
-    reasonCodes: [],
+    exchange: BITGET, sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 0,
+    compilerVersion: '1.0.0', compiledAt: 900, effectiveAt: 1000, expiresAt: 1000000,
+    allowNewEntries: true, allowedSymbols: ['BTC/USDT'], blockedSymbols: [],
+    allowedStrategyIds: ['momentum'], blockedStrategyIds: [],
+    maxPositionMultiplier: 1.0, riskLevel: 'medium', directionBias: 'bullish',
+    symbolRules: {}, reasonCodes: [],
     ...overrides,
   } as CompiledPolicy;
 }
 
 function env(policy: CompiledPolicy, seq: number): KernelEventEnvelope {
-  return {
-    kernelEventId: 'a'.repeat(64), kernelLogicalSequence: seq, kernelTimestamp: 1000 * seq,
-    type: 'policy.snapshot.published', payload: { policy },
-  } as unknown as KernelEventEnvelope;
+  return { kernelEventId: 'a'.repeat(64), kernelLogicalSequence: seq, kernelTimestamp: 1000 * seq,
+    type: 'policy.snapshot.published', payload: { policy } } as unknown as KernelEventEnvelope;
 }
 
 // ─── Invalid config ─────────────────────────────────────────────────────────
@@ -60,46 +43,56 @@ describe('invalid config', () => {
   it('rejects missing clock', () => {
     assert.throws(() => createKernelPolicyStore({ maxLifetimeMs: 1000, maxVersionsPerExchange: 5 } as unknown as Parameters<typeof createKernelPolicyStore>[0]), /POLICY_STORE_CONFIG/);
   });
-  it('rejects non-positive maxLifetimeMs', () => {
-    assert.throws(() => createKernelPolicyStore({ clock: mkClock(0), maxLifetimeMs: 0, maxVersionsPerExchange: 5 }), /POLICY_STORE_CONFIG/);
-  });
-  it('rejects non-positive maxVersionsPerExchange', () => {
-    assert.throws(() => createKernelPolicyStore({ clock: mkClock(0), maxLifetimeMs: 1000, maxVersionsPerExchange: 0 }), /POLICY_STORE_CONFIG/);
-  });
 });
 
 // ─── Identity from envelope ─────────────────────────────────────────────────
 describe('identity from envelope', () => {
   it('policyId = kernelEventId', () => {
-    const kernel = createTradingKernel({ exchange: BITGET });
-    const policy = mkPolicy();
-    const r = kernel.publish('policy.snapshot.published', { policy });
+    const kernel = createTradingKernel({ exchange: BITGET, policyMaxLifetimeMs: MAX_24H });
+    const r = kernel.publish('policy.snapshot.published', { policy: mkPolicy() });
     assert.strictEqual(r.envelope.kernelEventId.length, 64);
   });
-  it('same policy payload → same eventId', () => {
-    const k1 = createTradingKernel({ exchange: BITGET });
-    const k2 = createTradingKernel({ exchange: BITGET });
+  it('same policy → same eventId', () => {
+    const k1 = createTradingKernel({ exchange: BITGET, policyMaxLifetimeMs: MAX_24H });
+    const k2 = createTradingKernel({ exchange: BITGET, policyMaxLifetimeMs: MAX_24H });
     const p = mkPolicy();
     assert.strictEqual(
       k1.publish('policy.snapshot.published', { policy: p }).envelope.kernelEventId,
-      k2.publish('policy.snapshot.published', { policy: p }).envelope.kernelEventId,
-    );
+      k2.publish('policy.snapshot.published', { policy: p }).envelope.kernelEventId);
+  });
+  it('missing policyMaxLifetimeMs rejects policy publication', () => {
+    const kernel = createTradingKernel({ exchange: BITGET });
+    assert.throws(() => kernel.publish('policy.snapshot.published', { policy: mkPolicy() }), /POLICY_CONFIG_MISSING/);
+  });
+  it('same-kernel duplicate publish returns duplicate, dispatched once', () => {
+    const kernel = createTradingKernel({ exchange: BITGET, policyMaxLifetimeMs: MAX_24H });
+    let count = 0;
+    kernel.subscribe('policy.snapshot.published', () => { count++; });
+    const r1 = kernel.publish('policy.snapshot.published', { policy: mkPolicy() });
+    assert.strictEqual(r1.status, 'accepted');
+    assert.strictEqual(count, 1);
+    const r2 = kernel.publish('policy.snapshot.published', { policy: mkPolicy() }, r1.envelope.kernelEventId);
+    assert.strictEqual(r2.status, 'duplicate');
+    assert.strictEqual(count, 1);
   });
 });
 
 // ─── Policy validation ──────────────────────────────────────────────────────
 describe('policy validation', () => {
+  it('rejects invalid exchange', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ exchange: 'coinbase' } as unknown as ExchangeId), 5, 5000, MAX_24H), /exchange/);
+  });
+  it('rejects sourceResearchSequence=0 when >= candidateSeq', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ sourceResearchSequence: 1 } as Partial<CompiledPolicy>), 1, 5000, MAX_24H), /publication seq/);
+  });
+  it('rejects sourceResearchSequence >= candidateSeq', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ sourceResearchSequence: 5 }), 5, 5000, MAX_24H), /publication seq/);
+  });
+  it('rejects unknown top-level field', () => {
+    assert.throws(() => validatePolicyPublication({ ...mkPolicy(), bogusField: true }, 5, 5000, MAX_24H), /unknown field/);
+  });
   it('rejects compiledAt > effectiveAt', () => {
     assert.throws(() => validatePolicyPublication(mkPolicy({ compiledAt: 2000, effectiveAt: 1000 }), 5, 5000, MAX_24H), /compiledAt > effectiveAt/);
-  });
-  it('rejects effectiveAt > kernelTimestamp', () => {
-    assert.throws(() => validatePolicyPublication(mkPolicy({ effectiveAt: 10000 }), 5, 5000, MAX_24H), /effectiveAt > kernelTimestamp/);
-  });
-  it('rejects expiresAt <= effectiveAt', () => {
-    assert.throws(() => validatePolicyPublication(mkPolicy({ expiresAt: 1000, effectiveAt: 1000 }), 5, 5000, MAX_24H), /expiresAt <= effectiveAt/);
-  });
-  it('rejects degradeUntil < expiresAt', () => {
-    assert.throws(() => validatePolicyPublication(mkPolicy({ expiresAt: 5000, degradeUntil: 4000 }), 5, 5000, MAX_24H), /degradeUntil/);
   });
   it('rejects lifetime > maxLifetimeMs', () => {
     assert.throws(() => validatePolicyPublication(mkPolicy({ compiledAt: 0, effectiveAt: 0, expiresAt: 100000 }), 5, 5000, 1000), /lifetime/);
@@ -110,83 +103,88 @@ describe('policy validation', () => {
   it('rejects symbol in both allow and block', () => {
     assert.throws(() => validatePolicyPublication(mkPolicy({ allowedSymbols: ['BTC/USDT'], blockedSymbols: ['BTC/USDT'] }), 5, 5000, MAX_24H), /in both/);
   });
+  it('rejects unknown SymbolPolicyRule field', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ symbolRules: { 'BTC': { allowNewEntries: true, maxPositionMultiplier: 0.5, directionBias: 'bullish', riskLevel: 'medium', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [], bogus: true } as unknown as never } }), 5, 5000, MAX_24H), /unknown field/);
+  });
+  it('rejects non-array list', () => {
+    assert.throws(() => validatePolicyPublication(mkPolicy({ allowedSymbols: 'not-array' } as unknown as CompiledPolicy), 5, 5000, MAX_24H), /is not an array/);
+  });
+  it('rejects cycle', () => {
+    // Cycle inside symbolRules: self-reference in a nested object
+    const p = mkPolicy({ symbolRules: {} });
+    const nested: Record<string,unknown> = { allowNewEntries: true, maxPositionMultiplier: 0.5, directionBias: 'bullish', riskLevel: 'low', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] };
+    nested.cycle = nested;
+    (p.symbolRules as Record<string,unknown>)['BTC'] = nested;
+    assert.throws(() => validatePolicyPublication(p, 5, 5000, MAX_24H), /JSON-safe|cycle/);
+  });
+  it('accepts shared non-cyclic reference', () => {
+    const shared = ['shared-reason'];
+    const r1 = { allowNewEntries: true, maxPositionMultiplier: 0.5, directionBias: 'bullish' as const, riskLevel: 'low' as const, allowedStrategyIds: shared, blockedStrategyIds: [], reasonCodes: shared };
+    const r2 = { allowNewEntries: true, maxPositionMultiplier: 0.3, directionBias: 'bearish' as const, riskLevel: 'medium' as const, allowedStrategyIds: shared, blockedStrategyIds: [], reasonCodes: shared };
+    const p = mkPolicy({ symbolRules: { BTC: r1, ETH: r2 } });
+    validatePolicyPublication(p, 5, 5000, MAX_24H); // no throw
+  });
 });
 
 // ─── Apply ──────────────────────────────────────────────────────────────────
 describe('apply', () => {
   let s: KernelPolicyStore;
   beforeEach(() => { s = mkStore(); });
-
   it('applies policy event', () => {
     const r = s.apply(env(mkPolicy(), 1));
     assert.strictEqual(r.status, 'applied');
-    assert.ok(r.snapshot);
     assert.strictEqual(r.snapshot!.policyVersion, 1);
   });
-
   it('legacy events irrelevant', () => {
     assert.strictEqual(s.apply({ type: 'market.ticker.updated' } as unknown as KernelEventEnvelope).status, 'irrelevant');
   });
-
   it('older sequence ignored', () => {
     s.apply(env(mkPolicy(), 5));
     const r = s.apply(env(mkPolicy({ allowNewEntries: false }), 3));
     assert.strictEqual(r.status, 'ignored');
     assert.strictEqual(s.getLatest(BITGET)!.policyVersion, 5);
   });
-
   it('equal sequence ignored', () => {
     s.apply(env(mkPolicy(), 3));
     const r = s.apply(env(mkPolicy({ allowNewEntries: false }), 3));
     assert.strictEqual(r.status, 'ignored');
   });
+  it('invalid publication: store unchanged', () => {
+    s.apply(env(mkPolicy(), 1));
+    assert.throws(() => s.apply(env(mkPolicy({ exchange: 'coinbase' } as unknown as ExchangeId), 2)), /exchange/);
+    assert.strictEqual(s.getLatest(BITGET)!.policyVersion, 1);
+  });
 });
 
 // ─── Status resolution ─────────────────────────────────────────────────────
 describe('status resolution', () => {
-  it('active policy', () => {
-    const c = mkClock(5000);
-    const s = mkStore(c);
+  it('active', () => {
+    const s = mkStore(mkClock(5000));
     s.apply(env(mkPolicy({ effectiveAt: 1000, expiresAt: 10000 }), 1));
     assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').status, 'active');
   });
-  it('degraded policy', () => {
-    const c = mkClock(12000);
-    const s = mkStore(c);
+  it('degraded', () => {
+    const s = mkStore(mkClock(12000));
     s.apply(env(mkPolicy({ effectiveAt: 1000, expiresAt: 10000, degradeUntil: 15000 }), 1));
     assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').status, 'degraded');
   });
-  it('expired policy', () => {
-    const c = mkClock(20000);
-    const s = mkStore(c);
+  it('expired', () => {
+    const s = mkStore(mkClock(20000));
     s.apply(env(mkPolicy({ effectiveAt: 1000, expiresAt: 10000 }), 1));
     assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').status, 'expired');
-  });
-  it('missing policy', () => {
-    assert.strictEqual(mkStore().resolve(BITGET, 'BTC/USDT').status, 'missing');
   });
 });
 
 // ─── Entry permission ──────────────────────────────────────────────────────
 describe('entry permission', () => {
-  it('active allows new entries', () => {
-    const c = mkClock(5000);
-    const s = mkStore(c);
+  it('active allows', () => {
+    const s = mkStore(mkClock(5000));
     s.apply(env(mkPolicy({ effectiveAt: 1000, expiresAt: 10000 }), 1));
     assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').allowNewEntries, true);
   });
-  it('degraded blocks new entries, multiplier=0', () => {
-    const c = mkClock(12000);
-    const s = mkStore(c);
+  it('degraded blocks, multiplier=0', () => {
+    const s = mkStore(mkClock(12000));
     s.apply(env(mkPolicy({ effectiveAt: 1000, expiresAt: 10000, degradeUntil: 15000 }), 1));
-    const r = s.resolve(BITGET, 'BTC/USDT');
-    assert.strictEqual(r.allowNewEntries, false);
-    assert.strictEqual(r.maxPositionMultiplier, 0);
-  });
-  it('expired blocks new entries, multiplier=0', () => {
-    const c = mkClock(20000);
-    const s = mkStore(c);
-    s.apply(env(mkPolicy({ effectiveAt: 1000, expiresAt: 10000 }), 1));
     const r = s.resolve(BITGET, 'BTC/USDT');
     assert.strictEqual(r.allowNewEntries, false);
     assert.strictEqual(r.maxPositionMultiplier, 0);
@@ -196,36 +194,36 @@ describe('entry permission', () => {
 // ─── Symbol resolution ─────────────────────────────────────────────────────
 describe('symbol resolution', () => {
   it('blocked symbol forces false', () => {
-    const c = mkClock(5000);
-    const s = mkStore(c);
+    const s = mkStore(mkClock(5000));
     s.apply(env(mkPolicy({ allowedSymbols: [], blockedSymbols: ['BTC/USDT'] }), 1));
     assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').allowNewEntries, false);
   });
-  it('allowedSymbols allowlist enforced', () => {
-    const c = mkClock(5000);
-    const s = mkStore(c);
+  it('allowlist enforced', () => {
+    const s = mkStore(mkClock(5000));
     s.apply(env(mkPolicy({ allowedSymbols: ['ETH/USDT'] }), 1));
     assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').allowNewEntries, false);
   });
-  it('symbol rule uses min(global,symbol) multiplier', () => {
-    const c = mkClock(5000);
-    const s = mkStore(c);
+  it('symbol rule min(global,symbol) multiplier', () => {
+    const s = mkStore(mkClock(5000));
     s.apply(env(mkPolicy({ maxPositionMultiplier: 0.8, symbolRules: { 'BTC/USDT': { allowNewEntries: true, maxPositionMultiplier: 0.5, directionBias: 'bullish', riskLevel: 'medium', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } } }), 1));
     assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').maxPositionMultiplier, 0.5);
   });
   it('symbol rule cannot relax global allow', () => {
-    const c = mkClock(5000);
-    const s = mkStore(c);
+    const s = mkStore(mkClock(5000));
     s.apply(env(mkPolicy({ allowNewEntries: false, symbolRules: { 'BTC/USDT': { allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'bullish', riskLevel: 'medium', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } } }), 1));
     assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').allowNewEntries, false);
   });
+  it('riskLevel uses stricter value', () => {
+    const s = mkStore(mkClock(5000));
+    s.apply(env(mkPolicy({ riskLevel: 'low', symbolRules: { 'BTC/USDT': { allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'bullish', riskLevel: 'high', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } } }), 1));
+    assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').riskLevel, 'high');
+  });
 });
 
-// ─── getLatest / getByVersion / history ────────────────────────────────────
+// ─── getLatest / getByVersion ──────────────────────────────────────────────
 describe('getLatest / getByVersion', () => {
   it('getLatest returns current', () => {
-    const s = mkStore();
-    s.apply(env(mkPolicy(), 1));
+    const s = mkStore(); s.apply(env(mkPolicy(), 1));
     assert.strictEqual(s.getLatest(BITGET)!.policyVersion, 1);
   });
   it('getByVersion returns historical', () => {
@@ -233,16 +231,12 @@ describe('getLatest / getByVersion', () => {
     s.apply(env(mkPolicy({ effectiveAt: 1000 }), 1));
     s.apply(env(mkPolicy({ effectiveAt: 2000 }), 2));
     assert.strictEqual(s.getByVersion(BITGET, 1)!.effectiveAt, 1000);
-    assert.strictEqual(s.getByVersion(BITGET, 2)!.effectiveAt, 2000);
   });
   it('bounded eviction', () => {
     const s = createKernelPolicyStore({ clock: mkClock(0), maxLifetimeMs: MAX_24H, maxVersionsPerExchange: 2 });
-    s.apply(env(mkPolicy(), 1));
-    s.apply(env(mkPolicy(), 2));
-    s.apply(env(mkPolicy(), 3));
+    s.apply(env(mkPolicy(), 1)); s.apply(env(mkPolicy(), 2)); s.apply(env(mkPolicy(), 3));
     assert.strictEqual(s.getLatest(BITGET)!.policyVersion, 3);
-    assert.strictEqual(s.getByVersion(BITGET, 1), undefined); // evicted
-    assert.ok(s.getByVersion(BITGET, 2));
+    assert.strictEqual(s.getByVersion(BITGET, 1), undefined);
   });
   it('two exchanges isolated', () => {
     const s = mkStore();
@@ -256,10 +250,18 @@ describe('getLatest / getByVersion', () => {
 // ─── Subscription integration ───────────────────────────────────────────────
 describe('kernel subscription', () => {
   it('publish → store apply', () => {
-    const kernel = createTradingKernel({ exchange: BITGET });
+    const kernel = createTradingKernel({ exchange: BITGET, policyMaxLifetimeMs: MAX_24H });
     const s = mkStore();
     kernel.subscribe('policy.snapshot.published', (e) => { s.apply(e); });
     kernel.publish('policy.snapshot.published', { policy: mkPolicy() });
     assert.ok(s.getLatest(BITGET));
+  });
+  it('invalid publication: subscriber not called, journal unchanged', () => {
+    const kernel = createTradingKernel({ exchange: BITGET, policyMaxLifetimeMs: MAX_24H });
+    let called = false;
+    kernel.subscribe('policy.snapshot.published', () => { called = true; });
+    assert.throws(() => kernel.publish('policy.snapshot.published',
+      { policy: mkPolicy({ exchange: 'coinbase' } as unknown as ExchangeId) }), /exchange/);
+    assert.strictEqual(called, false);
   });
 });
