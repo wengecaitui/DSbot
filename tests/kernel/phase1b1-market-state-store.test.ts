@@ -359,3 +359,88 @@ describe('exchange isolation', () => {
     assert.strictEqual(all.length, 2);
   });
 });
+
+// ─── Cyclic candidate atomic ────────────────────────────────────────────────
+describe('cyclic candidate atomic', () => {
+  it('cyclic ticker: first event clone throws, getSnapshot undefined', () => {
+    const s = mkStore();
+    const ticker: Record<string,unknown> = { exchange: BITGET, instId: 'BTC/USDT', channel: 'ticker',
+      last: 100, bestBid: 99, bestAsk: 101, volume24h: 1, high24h: 100, low24h: 100, ts: 1 };
+    ticker.cycle = ticker; // self-reference
+    assert.throws(() => {
+      s.apply(env('market.ticker.updated', { ticker, receivedAt: 1 }, 1));
+    });
+    assert.strictEqual(s.getSnapshot('bitget', 'BTC/USDT'), undefined);
+  });
+
+  it('cyclic kline update: state unchanged after clone failure', () => {
+    const s = mkStore();
+    s.apply(klineEnv({}, 1000, 1));
+    const before = s.getSnapshot('bitget', 'BTC/USDT')!;
+    const kline: Record<string,unknown> = { exchange: BITGET, instId: 'BTC/USDT', channel: 'kline',
+      interval: '1m', open: 100, high: 105, low: 95, close: 102, volume: 500, confirm: true, ts: 2000 };
+    kline.cycle = kline;
+    assert.throws(() => {
+      s.apply(env('market.kline.closed', { kline, receivedAt: 2000 }, 2));
+    });
+    const after = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.strictEqual(after.snapshotVersion, before.snapshotVersion);
+    assert.strictEqual(after.lastUpdatedAt, before.lastUpdatedAt);
+    assert.strictEqual(after.klines['1m'].kline.close, validKline.close);
+  });
+});
+
+// ─── Returned snapshot nested mutation ──────────────────────────────────────
+describe('returned snapshot nested mutation', () => {
+  it('mutate snapshot.ticker.ticker.last → ineffective, subsequent read unchanged', () => {
+    const s = mkStore();
+    s.apply(tickerEnv({}, 1000, 1));
+    const snap = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.ok(Object.isFrozen(snap));
+    assert.ok(snap.ticker && Object.isFrozen(snap.ticker));
+    const before = snap.ticker.ticker.last;
+    // Attempt mutation on frozen object
+    try { (snap.ticker.ticker as Record<string,unknown>).last = 999999; } catch { /* frozen */ }
+    const after = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.strictEqual(after.ticker!.ticker.last, before);
+  });
+
+  it('mutate snapshot.klines[1m].kline.close → ineffective, subsequent read unchanged', () => {
+    const s = mkStore();
+    s.apply(klineEnv({}, 1000, 1));
+    const snap = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.ok(snap.klines['1m'] && Object.isFrozen(snap.klines['1m']));
+    const before = snap.klines['1m'].kline.close;
+    try { (snap.klines['1m'].kline as Record<string,unknown>).close = 999999; } catch { /* frozen */ }
+    const after = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.strictEqual(after.klines['1m'].kline.close, before);
+  });
+});
+
+// ─── Additional invalid field coverage ──────────────────────────────────────
+describe('additional invalid field coverage', () => {
+  for (const [field, badValue] of [
+    ['high', NaN],
+    ['low', Infinity],
+  ] as const) {
+    it(`kline.${field} = ${JSON.stringify(badValue)} → throw, state unchanged`, () => {
+      const s = mkStore();
+      s.apply(klineEnv({}, 1000, 1));
+      const before = s.getSnapshot('bitget', 'BTC/USDT')!;
+      assert.throws(() => s.apply(klineEnv({ [field]: badValue } as Partial<WsKline>, 2000, 2)), /NON_FINITE_KLINE/);
+      const after = s.getSnapshot('bitget', 'BTC/USDT')!;
+      assert.strictEqual(after.snapshotVersion, before.snapshotVersion);
+    });
+  }
+
+  it('kline receivedAt = NaN → throw, state unchanged', () => {
+    const s = mkStore();
+    s.apply(klineEnv({}, 1000, 1));
+    const before = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.throws(() => {
+      s.apply(env('market.kline.closed', { kline: validKline, receivedAt: NaN }, 2));
+    }, /NON_FINITE_KLINE/);
+    const after = s.getSnapshot('bitget', 'BTC/USDT')!;
+    assert.strictEqual(after.snapshotVersion, before.snapshotVersion);
+  });
+});
