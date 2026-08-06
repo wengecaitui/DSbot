@@ -138,7 +138,7 @@ export function validatePolicyPublication(
   if (typeof p.sourceResearchEventId !== 'string' || !SHA_RE.test(p.sourceResearchEventId)) {
     throw new Error('POLICY_INVALID: sourceResearchEventId must be 64-char hex');
   }
-  if (!isNonNegativeSafeInteger(p.sourceResearchSequence)) throw new Error('POLICY_INVALID: sourceResearchSequence');
+  if (!isPositiveSafeInteger(p.sourceResearchSequence)) throw new Error('POLICY_INVALID: sourceResearchSequence');
   if ((p.sourceResearchSequence as number) >= candidateSeq) {
     throw new Error(`POLICY_INVALID: sourceResearchSequence=${p.sourceResearchSequence} >= publication seq=${candidateSeq}`);
   }
