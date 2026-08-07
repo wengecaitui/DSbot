@@ -178,6 +178,7 @@ export function createKernelPositionStateStore(config?: { maxSnapshotsPerSymbol?
         state.byVersion.set(seq, snapshot);
         state.history.unshift(snapshot);
         state.processedFills.set(canonical.fillId, canonical);
+        state.initialized = true;
 
         // Evict oldest if over capacity
         while (state.history.length > maxSnapshotsPerSymbol) {

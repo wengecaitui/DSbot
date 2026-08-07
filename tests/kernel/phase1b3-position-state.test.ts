@@ -236,3 +236,49 @@ describe('kernel integration', () => {
     assert.strictEqual(r.status, 'irrelevant');
   });
 });
+
+// ─── FIX_1: Pre-journal validation ─────────────────────────────────────────
+describe('pre-journal validation', () => {
+  it('invalid execution.fill.confirmed throws before journal', () => {
+    const kernel = createTradingKernel({ exchange: BITGET });
+    let called = false;
+    kernel.subscribe('execution.fill.confirmed', () => { called = true; });
+    assert.throws(() => kernel.publish('execution.fill.confirmed',
+      { fill: { fillId: '' } } as never), /fillId/);
+    assert.strictEqual(called, false);
+    assert.strictEqual(kernel.journal().readFromLogicalSequence(1).length, 0);
+  });
+  it('invalid position.baseline.confirmed throws before journal', () => {
+    const kernel = createTradingKernel({ exchange: BITGET });
+    let called = false;
+    kernel.subscribe('position.baseline.confirmed', () => { called = true; });
+    assert.throws(() => kernel.publish('position.baseline.confirmed',
+      { baseline: { exchange: BITGET, symbol: 'BTC/USDT', side: 'flat', signedQuantity: 1, averageEntryPrice: 0 } } as never), /flat requires/);
+    assert.strictEqual(called, false);
+    assert.strictEqual(kernel.journal().readFromLogicalSequence(1).length, 0);
+  });
+});
+
+// ─── FIX_2: Fill initializes key ──────────────────────────────────────────
+describe('fill initializes key', () => {
+  it('first fill → baseline afterwards throws', () => {
+    const s = createKernelPositionStateStore();
+    applyFill(s, { side: 'buy', quantity: 1, price: 50000 }, 1);
+    // Baseline on already-initialized key must throw
+    assert.throws(() => applyBaseline(s, { side: 'flat' }, 2), /already initialized/);
+    // Fill-derived position unchanged
+    const r = s.resolve(BITGET, 'BTC/USDT');
+    assert.strictEqual(r.status, 'open');
+    assert.strictEqual(r.side, 'long');
+    assert.strictEqual(r.signedQuantity, 1);
+    assert.strictEqual(r.averageEntryPrice, 50000);
+    assert.strictEqual(s.getLatest(BITGET, 'BTC/USDT')!.positionVersion, 1);
+  });
+  it('valid fill Kernel integration still works', () => {
+    const kernel = createTradingKernel({ exchange: BITGET });
+    const s = createKernelPositionStateStore();
+    kernel.subscribe('execution.fill.confirmed', (e) => { s.apply(e); });
+    kernel.publish('execution.fill.confirmed', { fill: mkFill() });
+    assert.strictEqual(s.resolve(BITGET, 'BTC/USDT').status, 'open');
+  });
+});
