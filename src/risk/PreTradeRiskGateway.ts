@@ -1,35 +1,32 @@
 // Phase 2: PreTradeRiskGateway — pure deterministic risk admission
-import type { ExchangeId } from '../data/MarketIdentity';
-import { isExchangeId } from '../data/MarketIdentity';
-import type { GatewayInput, GatewayResult, RiskReasonCode, MarketSnapshot } from './pretrade-risk-types';
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
+import type { GatewayInput, GatewayResult, RiskReasonCode } from './pretrade-risk-types';
 
 function reject(reasonCode: RiskReasonCode): GatewayResult {
   return { decision: 'REJECTED', reasonCode };
 }
 
-function admit(action: GatewayInput['action'], intent: GatewayInput['intent'], approvedPositionUsd: number): GatewayResult {
-  return { decision: 'ADMITTED', action,
-    intent: { intentId: intent.intentId, exchange: intent.exchange, symbol: intent.symbol,
-      direction: intent.direction, positionUsd: approvedPositionUsd },
-    approvedPositionUsd };
+function admit(input: GatewayInput, approvedPositionUsd: number): GatewayResult {
+  return { decision: 'ADMITTED', action: input.action,
+    intent: input.intent, approvedPositionUsd };
 }
 
-// ─── Validation ─────────────────────────────────────────────────────────────
+// ─── Validate input ─────────────────────────────────────────────────────────
 
 function validateInput(input: GatewayInput): RiskReasonCode | null {
-  const { intent, action, hardRisk, marketSnapshot, positionResolution, policyResolution } = input;
+  const { intent, action, hardRisk } = input;
   if (!intent || typeof intent.intentId !== 'string' || !intent.intentId) return 'INVALID_INPUT';
-  if (!isExchangeId(intent.exchange as string)) return 'INVALID_INPUT';
+  if (typeof intent.exchange !== 'string' || !intent.exchange) return 'INVALID_INPUT';
   if (typeof intent.symbol !== 'string' || !intent.symbol) return 'INVALID_INPUT';
   if (intent.direction !== 'long' && intent.direction !== 'short') return 'INVALID_INPUT';
   if (typeof intent.positionUsd !== 'number' || !Number.isFinite(intent.positionUsd) || intent.positionUsd <= 0) return 'INVALID_INPUT';
   if (action !== 'open' && action !== 'reduce' && action !== 'close' && action !== 'emergency_exit') return 'INVALID_INPUT';
+  // Boolean gate: non-boolean → REJECTED (never silently disable safety)
+  if (typeof hardRisk.locked !== 'boolean' || typeof hardRisk.enabled !== 'boolean') return 'HARD_RISK_CONFIG_INVALID';
   if (hardRisk.locked) return 'KILLSWITCH_LOCKED';
   if (typeof hardRisk.totalCapitalUsd !== 'number' || !Number.isFinite(hardRisk.totalCapitalUsd) || hardRisk.totalCapitalUsd < 0) return 'HARD_RISK_CONFIG_INVALID';
   if (typeof hardRisk.maxSinglePositionPct !== 'number' || !Number.isFinite(hardRisk.maxSinglePositionPct) || hardRisk.maxSinglePositionPct <= 0 || hardRisk.maxSinglePositionPct > 1) return 'HARD_RISK_CONFIG_INVALID';
-  if (typeof hardRisk.maxSinglePositionAbsUsd !== 'number' || !Number.isFinite(hardRisk.maxSinglePositionAbsUsd) || hardRisk.maxSinglePositionAbsUsd < 0) return 'HARD_RISK_CONFIG_INVALID';
+  if (typeof hardRisk.maxSinglePositionAbsUsd !== 'number' || !Number.isFinite(hardRisk.maxSinglePositionAbsUsd) && hardRisk.maxSinglePositionAbsUsd !== Infinity) return 'HARD_RISK_CONFIG_INVALID';
+  if (hardRisk.maxSinglePositionAbsUsd < 0) return 'HARD_RISK_CONFIG_INVALID';
   if (intent.exchange !== hardRisk.exchange) return 'PROVENANCE_MISMATCH';
   return null;
 }
@@ -50,19 +47,18 @@ function validatePosition(input: GatewayInput): RiskReasonCode | null {
   const isOpposite = (pr.side === 'long' && input.intent.direction === 'short') || (pr.side === 'short' && input.intent.direction === 'long');
   const isSame = (pr.side === input.intent.direction);
   if (input.action === 'open') {
-    if (pr.status === 'flat') return null; // all good
-    if (isSame) return null; // scale-in
-    if (isOpposite) return 'ACTION_POSITION_CONFLICT'; // opposite open → potential reduce/flip, but action is 'open'
+    if (pr.status === 'flat') return null;
+    if (isSame) return null;
+    if (isOpposite) return 'ACTION_POSITION_CONFLICT';
     return null;
   }
-  // reduce/close/emergency_exit
-  if (pr.status !== 'open') return 'ACTION_POSITION_CONFLICT'; // nothing to reduce/close
-  if (!isOpposite) return 'ACTION_POSITION_CONFLICT'; // reduce/close must be opposite direction
+  if (pr.status !== 'open') return 'ACTION_POSITION_CONFLICT';
+  if (!isOpposite) return 'ACTION_POSITION_CONFLICT';
   return null;
 }
 
 function validatePolicy(input: GatewayInput): RiskReasonCode | null {
-  if (input.action !== 'open') return null; // Policy only gates risk-increasing opens
+  if (input.action !== 'open') return null;
   const pol = input.policyResolution;
   if (pol.status !== 'active') return 'POLICY_UNAVAILABLE';
   if (!pol.allowNewEntries) return 'POLICY_ENTRIES_BLOCKED';
@@ -90,24 +86,20 @@ function hardLimitUsd(input: GatewayInput): number {
   return Math.min(hr.totalCapitalUsd * hr.maxSinglePositionPct, hr.maxSinglePositionAbsUsd);
 }
 
-function effectiveLimitUsd(input: GatewayInput): number {
-  const hard = hardLimitUsd(input);
-  if (input.action !== 'open') return hard; // protective actions ignore policy
+function approvedForOpen(input: GatewayInput): number | null {
   const multiplier = Math.min(input.policyResolution.maxPositionMultiplier, 1);
-  return hard * multiplier;
-}
-
-function approvedForOpen(input: GatewayInput): number {
-  const limit = effectiveLimitUsd(input);
+  if (multiplier <= 0) return null;
+  const hard = hardLimitUsd(input);
+  const limit = hard * multiplier; // Infinity*positive→Infinity, Infinity*0→NaN handled above
   const current = currentExposureUsd(input);
-  const available = limit - current;
-  if (available <= 0) return -1;
+  const available = limit - current; // Infinity - 0 = Infinity (valid)
+  // Reject NaN or non-positive finite; accept positive Infinity (unbounded when enabled=false)
+  if (!(available > 0)) return null;
   return Math.min(input.intent.positionUsd, available);
 }
 
 function approvedForReduce(input: GatewayInput): number {
-  const current = currentExposureUsd(input);
-  return Math.min(input.intent.positionUsd, current);
+  return Math.min(input.intent.positionUsd, currentExposureUsd(input));
 }
 
 function approvedForClose(input: GatewayInput): number {
@@ -117,33 +109,29 @@ function approvedForClose(input: GatewayInput): number {
 // ─── Main gateway ───────────────────────────────────────────────────────────
 
 export function evaluatePreTradeRisk(input: GatewayInput): GatewayResult {
-  // 1. Validate input structure
   const inputErr = validateInput(input);
   if (inputErr) return reject(inputErr);
 
-  // 2. Validate market
   const marketErr = validateMarket(input);
   if (marketErr) return reject(marketErr);
 
-  // 3. Validate position
   const posErr = validatePosition(input);
   if (posErr) return reject(posErr);
 
-  // 4. Validate policy (only for 'open')
   const polErr = validatePolicy(input);
   if (polErr) return reject(polErr);
 
-  // 5. Compute approved size
   let approvedUsd: number;
   if (input.action === 'open') {
-    approvedUsd = approvedForOpen(input);
-    if (approvedUsd <= 0) return reject('POSITION_LIMIT_REACHED');
+    const a = approvedForOpen(input);
+    if (a === null || !Number.isFinite(a) || a <= 0) return reject('POSITION_LIMIT_REACHED');
+    approvedUsd = a;
   } else if (input.action === 'reduce') {
     approvedUsd = approvedForReduce(input);
-    if (approvedUsd <= 0) return reject('POSITION_LIMIT_REACHED');
+    if (!Number.isFinite(approvedUsd) || approvedUsd <= 0) return reject('POSITION_LIMIT_REACHED');
   } else {
     approvedUsd = approvedForClose(input);
   }
 
-  return admit(input.action, input.intent, approvedUsd);
+  return admit(input, approvedUsd);
 }
