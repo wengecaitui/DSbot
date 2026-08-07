@@ -6,12 +6,14 @@ import type { WsTicker, WsKline } from '../data/types';
 import type { MarketBiasReportFull } from '../types/market-bias';
 import { isExchangeId } from '../data/MarketIdentity';
 import { InvalidExchangeProvenanceError, KlineClosedEventRejectedError } from './TradingEvent';
+import { validateConfirmedFill } from '../types/confirmed-fill';
+import { validatePositionBaseline } from '../types/position-state';
 
 export function validateTradingEventPayload(
   type: string,
   payload: Record<string, unknown>,
 ): void {
-  if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated' && type !== 'policy.snapshot.published') {
+  if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated' && type !== 'policy.snapshot.published' && type !== 'execution.fill.confirmed' && type !== 'position.baseline.confirmed') {
     throw new Error(`UNKNOWN_EVENT_TYPE: ${JSON.stringify(type)}`);
   }
 
@@ -59,5 +61,18 @@ export function validateTradingEventPayload(
         `research.bias.updated: invalid report.exchange: ${JSON.stringify((p.report as MarketBiasReportFull & { exchange?: unknown }).exchange)}`,
       );
     }
+  }
+
+  // Phase 1B3: execution + baseline pre-journal validation
+  if (type === 'execution.fill.confirmed') {
+    const p = payload as { fill?: unknown };
+    if (!p || p.fill === undefined) throw new InvalidExchangeProvenanceError('execution.fill.confirmed requires fill payload');
+    validateConfirmedFill(p.fill);
+  }
+
+  if (type === 'position.baseline.confirmed') {
+    const p = payload as { baseline?: unknown };
+    if (!p || p.baseline === undefined) throw new InvalidExchangeProvenanceError('position.baseline.confirmed requires baseline payload');
+    validatePositionBaseline(p.baseline);
   }
 }

@@ -8,12 +8,16 @@
 import type { WsTicker, WsKline } from '../data/types';
 import type { MarketBiasReportFull } from '../types/market-bias';
 import type { CompiledPolicy } from '../types/policy-snapshot';
+import type { ConfirmedFill } from '../types/confirmed-fill';
+import type { ConfirmedPositionBaseline } from '../types/position-state';
 
 export interface TradingEventPayloadMap {
-  'market.ticker.updated':      { ticker: WsTicker; receivedAt: number };
-  'market.kline.closed':        { kline: WsKline; receivedAt: number };
-  'research.bias.updated':      { report: MarketBiasReportFull; receivedAt: number };
-  'policy.snapshot.published':  { policy: CompiledPolicy };
+  'market.ticker.updated':       { ticker: WsTicker; receivedAt: number };
+  'market.kline.closed':         { kline: WsKline; receivedAt: number };
+  'research.bias.updated':       { report: MarketBiasReportFull; receivedAt: number };
+  'policy.snapshot.published':   { policy: CompiledPolicy };
+  'execution.fill.confirmed':    { fill: ConfirmedFill };
+  'position.baseline.confirmed': { baseline: ConfirmedPositionBaseline };
 }
 
 export type TradingEventType = keyof TradingEventPayloadMap;
