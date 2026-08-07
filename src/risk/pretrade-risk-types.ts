@@ -1,8 +1,14 @@
 // Phase 2: PreTrade Risk Gateway Types
+import type { ExchangeId } from '../data/MarketIdentity';
+import type { TradeIntent } from '../types/trade-intent';
+import type { MarketSnapshot } from '../data/MarketSnapshot';
+import type { PolicyResolution } from '../types/policy-snapshot';
+import type { PositionResolution } from '../types/position-state';
+
 export type TradeAction = 'open' | 'reduce' | 'close' | 'emergency_exit';
 
 export interface HardRiskSnapshot {
-  readonly exchange: string;
+  readonly exchange: ExchangeId;
   readonly locked: boolean;
   readonly enabled: boolean;
   readonly totalCapitalUsd: number;
@@ -10,30 +16,8 @@ export interface HardRiskSnapshot {
   readonly maxSinglePositionAbsUsd: number;
 }
 
-export interface MarketSnapshot {
-  readonly exchange: string;
-  readonly symbol: string;
-  readonly isStale: boolean;
-  readonly ticker?: { readonly ticker: { readonly last: number } };
-}
-
-export interface PolicyResolution {
-  readonly status: 'missing' | 'active' | 'degraded' | 'expired';
-  readonly allowNewEntries: boolean;
-  readonly maxPositionMultiplier: number;
-  readonly directionBias: 'bullish' | 'bearish' | 'neutral' | 'mixed';
-}
-
-export interface PositionResolution {
-  readonly status: 'missing' | 'flat' | 'open';
-  readonly side: 'long' | 'short' | 'flat';
-  readonly signedQuantity: number;
-}
-
 export interface GatewayInput {
-  readonly intent: { readonly intentId: string; readonly exchange: string;
-    readonly symbol: string; readonly direction: 'long' | 'short';
-    readonly positionUsd: number; };
+  readonly intent: TradeIntent;
   readonly action: TradeAction;
   readonly marketSnapshot: MarketSnapshot | undefined;
   readonly policyResolution: PolicyResolution;
@@ -51,5 +35,5 @@ export type RiskReasonCode =
 
 export type GatewayResult =
   | { readonly decision: 'ADMITTED'; readonly action: TradeAction;
-      readonly intent: GatewayInput['intent']; readonly approvedPositionUsd: number; }
+      readonly intent: TradeIntent; readonly approvedPositionUsd: number; }
   | { readonly decision: 'REJECTED'; readonly reasonCode: RiskReasonCode; };
