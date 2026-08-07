@@ -11,8 +11,15 @@ export function validateTradingEventPayload(
   type: string,
   payload: Record<string, unknown>,
 ): void {
-  if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated') {
+  if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated' && type !== 'policy.snapshot.published') {
     throw new Error(`UNKNOWN_EVENT_TYPE: ${JSON.stringify(type)}`);
+  }
+
+  if (type === 'policy.snapshot.published') {
+    if (!payload || typeof payload !== 'object' || !(payload as { policy?: unknown }).policy) {
+      throw new InvalidExchangeProvenanceError('policy.snapshot.published requires policy payload');
+    }
+    return;
   }
 
   if (type === 'market.ticker.updated') {
