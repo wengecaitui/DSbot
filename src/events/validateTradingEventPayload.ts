@@ -11,7 +11,7 @@ export function validateTradingEventPayload(
   type: string,
   payload: Record<string, unknown>,
 ): void {
-  if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated' && type !== 'policy.snapshot.published') {
+  if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated' && type !== 'policy.snapshot.published' && type !== 'execution.fill.confirmed' && type !== 'position.baseline.confirmed') {
     throw new Error(`UNKNOWN_EVENT_TYPE: ${JSON.stringify(type)}`);
   }
 
