@@ -1,164 +1,115 @@
-// Phase 3: OmsCore — deterministic order creation, submission, resolution
+// Phase 3: OmsCore — deterministic OMS with real TradingKernel
 import type { ExchangeId } from '../data/MarketIdentity';
-import type { TradeAction } from '../risk/pretrade-risk-types';
 import type { TradeIntent } from '../types/trade-intent';
-import type {
-  OmsOrder, OmsOrderSnapshot, OmsOrderStatus,
-  ExecutionAdapter, ExecutionResult, OmsResult, OmsConfirmedFill,
-} from './oms-types';
-import { TERMINAL_STATUSES } from './oms-types';
-import { generateOrderId } from './order-id';
+import type { TradeAction } from '../risk/pretrade-risk-types';
+import type { TradingKernel } from '../kernel/TradingKernel';
+import type { KernelEventEnvelope } from '../kernel/KernelEventEnvelope';
+import type { ExecutionAdapter, ExecutionResult } from './oms-types';
+import type { OmsOrder, OmsOrderSnapshot, OmsConfirmedFill } from './oms-types';
 import { OmsOrderStore } from './OmsOrderStore';
-import { randomUUID } from 'node:crypto';
+import { generateOrderId } from './order-id';
+import { validateConfirmedFill } from '../types/confirmed-fill';
 
-// ─── Side derivation ────────────────────────────────────────────────────────
+const TERMINAL_OR_BLOCKED: string[] = ['FILLED', 'REJECTED', 'SUBMISSION_UNKNOWN'];
 
 function deriveSide(direction: 'long' | 'short'): 'buy' | 'sell' {
   return direction === 'long' ? 'buy' : 'sell';
 }
 
-// ─── Canonical order ID params ──────────────────────────────────────────────
-
-function getOrderIdParams(intent: TradeIntent, action: TradeAction, approvedPositionUsd: number) {
-  return {
-    intentId: intent.intentId,
-    exchange: intent.exchange,
-    symbol: intent.symbol,
-    direction: intent.direction,
-    action,
-    approvedPositionUsd,
-  };
+function isSameOrder(a: OmsOrder, intent: TradeIntent, action: TradeAction, approved: number): boolean {
+  return a.intentId === intent.intentId && a.exchange === intent.exchange &&
+    a.symbol === intent.symbol && a.approvedNotionalUsd === approved &&
+    a.action === action && a.side === deriveSide(intent.direction);
 }
 
-// ─── OmsCore ────────────────────────────────────────────────────────────────
-
 export class OmsCore {
+  private kernel: TradingKernel;
   private store: OmsOrderStore;
   private adapter: ExecutionAdapter;
 
-  constructor(adapter: ExecutionAdapter, store?: OmsOrderStore) {
+  constructor(kernel: TradingKernel, adapter: ExecutionAdapter, store?: OmsOrderStore) {
+    this.kernel = kernel;
     this.adapter = adapter;
     this.store = store ?? new OmsOrderStore();
+    // Auto-subscribe store to kernel events
+    this.kernel.subscribe('order.created', (e: KernelEventEnvelope<'order.created'>) => { this.store.apply(e); });
+    this.kernel.subscribe('order.submitted', (e: KernelEventEnvelope<'order.submitted'>) => { this.store.apply(e); });
+    this.kernel.subscribe('order.rejected', (e: KernelEventEnvelope<'order.rejected'>) => { this.store.apply(e); });
+    this.kernel.subscribe('order.submission.unknown', (e: KernelEventEnvelope<'order.submission.unknown'>) => { this.store.apply(e); });
+    this.kernel.subscribe('execution.fill.confirmed', (e: KernelEventEnvelope<'execution.fill.confirmed'>) => { this.store.apply(e); });
   }
 
   getStore(): OmsOrderStore { return this.store; }
 
   async submitRequest(
-    intent: TradeIntent,
-    action: TradeAction,
-    approvedPositionUsd: number,
-  ): Promise<OmsResult> {
-    // 1. Create order
+    intent: TradeIntent, action: TradeAction, approvedPositionUsd: number,
+  ): Promise<{ status: string; order?: OmsOrderSnapshot; fill?: OmsConfirmedFill; reason?: string }> {
     const side = deriveSide(intent.direction);
-    const params = getOrderIdParams(intent, action, approvedPositionUsd);
-    const orderId = generateOrderId(params);
+    const orderId = generateOrderId({
+      intentId: intent.intentId, exchange: intent.exchange, symbol: intent.symbol,
+      direction: intent.direction, action, approvedPositionUsd: approvedPositionUsd });
 
-    const order: OmsOrder = {
-      orderId,
-      intentId: intent.intentId,
-      exchange: intent.exchange,
-      symbol: intent.symbol,
-      action,
-      side,
-      orderType: 'market',
-      approvedNotionalUsd: approvedPositionUsd,
-    };
-
-    // 2. Idempotency check
+    // Idempotency check
     const existing = this.store.get(orderId);
     if (existing) {
-      // Check conflict
-      if (existing.intentId !== order.intentId ||
-          existing.exchange !== order.exchange ||
-          existing.symbol !== order.symbol ||
-          existing.approvedNotionalUsd !== order.approvedNotionalUsd ||
-          existing.action !== order.action ||
-          existing.side !== order.side) {
-        return { status: 'conflict', reason: `orderId ${orderId} already exists with different content` };
+      if (TERMINAL_OR_BLOCKED.includes(existing.status)) {
+        return { status: 'duplicate', order: existing };
       }
       return { status: 'duplicate', order: existing };
     }
 
-    // 3. Publish order.created
-    const created = this.store.apply({
-      type: 'order.created',
-      payload: { order },
-      kernelLogicalSequence: 1, // placeholder — real kernel would provide
-      kernelEventId: randomUUID(),  // placeholder
-    });
+    const order: OmsOrder = {
+      orderId, intentId: intent.intentId, exchange: intent.exchange, symbol: intent.symbol,
+      action, side, orderType: 'market', approvedNotionalUsd: approvedPositionUsd };
 
-    // 4. Submit → order.submitted
-    const submitted = this.store.apply({
-      type: 'order.submitted',
-      payload: { orderId },
-      kernelLogicalSequence: 2,
-      kernelEventId: randomUUID(),
-    });
+    // 1. order.created via real kernel
+    const created = this.kernel.publish('order.created', { order });
+    if (created.status === 'duplicate') {
+      return { status: 'duplicate', order: this.store.get(orderId)! };
+    }
 
-    // 5. Call adapter
-    let adapterResult: ExecutionResult;
+    // 2. order.submitted
+    this.kernel.publish('order.submitted', { orderId });
+
+    // 3. Call adapter
+    let result: ExecutionResult;
     try {
-      adapterResult = await this.adapter.submit(order);
+      result = await this.adapter.submit(order);
     } catch (err: unknown) {
       const reason = err instanceof Error ? err.message : String(err);
-      this.store.apply({
-        type: 'order.submission.unknown',
-        payload: { orderId, reason },
-        kernelLogicalSequence: 3,
-        kernelEventId: randomUUID(),
-      });
-      const current = this.store.get(orderId)!;
-      return { status: 'submission_unknown', order: current, reason };
+      this.kernel.publish('order.submission.unknown', { orderId, reason });
+      return { status: 'submission_unknown', order: this.store.get(orderId)!, reason };
     }
 
-    // 6. Resolve adapter result
-    if (adapterResult.status === 'filled') {
-      const fill = adapterResult.fill;
-      if (fill.orderId !== orderId) {
-        // Mismatched fill — reject
-        this.store.apply({
-          type: 'order.rejected',
-          payload: { orderId, reason: `fill.orderId mismatch: ${fill.orderId} !== ${orderId}` },
-          kernelLogicalSequence: 3,
-          kernelEventId: randomUUID(),
-        });
-        const current = this.store.get(orderId)!;
-        return { status: 'rejected', order: current, reason: 'fill attribution mismatch' };
+    // 4. Resolve
+    if (result.status === 'filled') {
+      const fill = result.fill;
+      // Full attribution validation
+      if (fill.orderId !== orderId || fill.intentId !== intent.intentId ||
+          fill.exchange !== intent.exchange || fill.symbol !== intent.symbol ||
+          fill.side !== side) {
+        this.kernel.publish('order.rejected', { orderId, reason: 'fill attribution mismatch' });
+        return { status: 'rejected', order: this.store.get(orderId)!, reason: 'fill attribution mismatch' };
       }
-      this.store.apply({
-        type: 'execution.fill.confirmed',
-        payload: { fill },
-        kernelLogicalSequence: 3,
-        kernelEventId: randomUUID(),
-      });
-      const current = this.store.get(orderId)!;
-      return { status: 'filled', order: current, fill };
+      try { validateConfirmedFill(fill); } catch {
+        this.kernel.publish('order.rejected', { orderId, reason: 'invalid fill fields' });
+        return { status: 'rejected', order: this.store.get(orderId)!, reason: 'invalid fill fields' };
+      }
+      this.kernel.publish('execution.fill.confirmed', { fill });
+      return { status: 'filled', order: this.store.get(orderId)!, fill };
     }
 
-    if (adapterResult.status === 'rejected') {
-      this.store.apply({
-        type: 'order.rejected',
-        payload: { orderId, reason: adapterResult.reason },
-        kernelLogicalSequence: 3,
-        kernelEventId: randomUUID(),
-      });
-      const current = this.store.get(orderId)!;
-      return { status: 'rejected', order: current, reason: adapterResult.reason };
+    if (result.status === 'rejected') {
+      this.kernel.publish('order.rejected', { orderId, reason: result.reason });
+      return { status: 'rejected', order: this.store.get(orderId)!, reason: result.reason };
     }
 
-    if (adapterResult.status === 'accepted') {
-      const current = this.store.get(orderId)!;
-      return { status: 'submitted', order: current };
+    if (result.status === 'accepted') {
+      return { status: 'submitted', order: this.store.get(orderId)! };
     }
 
     // unknown
-    this.store.apply({
-      type: 'order.submission.unknown',
-      payload: { orderId, reason: adapterResult.reason },
-      kernelLogicalSequence: 3,
-      kernelEventId: randomUUID(),
-    });
-    const finalOrder = this.store.get(orderId)!;
-    return { status: 'submission_unknown', order: finalOrder, reason: adapterResult.reason };
+    this.kernel.publish('order.submission.unknown', { orderId, reason: result.reason });
+    return { status: 'submission_unknown', order: this.store.get(orderId)!, reason: result.reason };
   }
 }

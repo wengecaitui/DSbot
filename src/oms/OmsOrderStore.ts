@@ -1,90 +1,84 @@
-// Phase 3: OmsOrderStore — event-backed order snapshot projection
+// Phase 3: OmsOrderStore — event-backed with sequence + terminal guards
+import type { KernelEventEnvelope } from '../kernel/KernelEventEnvelope';
 import type { OmsOrderSnapshot, OmsOrderStatus } from './oms-types';
-import { TERMINAL_STATUSES } from './oms-types';
 
 interface OrderRecord {
   snapshot: OmsOrderSnapshot;
 }
 
+const VALID_TRANSITIONS: Record<OmsOrderStatus, readonly OmsOrderStatus[]> = {
+  CREATED: ['SUBMITTED', 'REJECTED', 'SUBMISSION_UNKNOWN'],
+  SUBMITTED: ['FILLED', 'REJECTED', 'SUBMISSION_UNKNOWN'],
+  FILLED: [],
+  REJECTED: [],
+  SUBMISSION_UNKNOWN: [],
+};
+
 export class OmsOrderStore {
   private orders = new Map<string, OrderRecord>();
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  apply(envelope: { readonly type: string; readonly payload: Record<string, any>; readonly kernelEventId?: string; readonly kernelLogicalSequence?: number }): OmsOrderSnapshot {
-    const seq = envelope.kernelLogicalSequence ?? 0;
-    const eventId = envelope.kernelEventId ?? '';
-    const type = envelope.type;
+  apply(envelope: KernelEventEnvelope): OmsOrderSnapshot | null {
+    const { type, kernelLogicalSequence, kernelEventId } = envelope;
+    const seq = kernelLogicalSequence;
+    const eventId = kernelEventId;
+    const payload = envelope.payload as Record<string, unknown>;
 
     if (type === 'order.created') {
-      const snapshot = envelope.payload.order as OmsOrderSnapshot;
-      if (!snapshot || !snapshot.orderId) throw new Error('OMS_STORE: order.created missing order');
-      if (this.orders.has(snapshot.orderId)) throw new Error(`OMS_STORE: duplicate order ${snapshot.orderId}`);
+      const order = payload.order as OmsOrderSnapshot & { orderId: string };
+      if (!order?.orderId) throw new Error('OMS_STORE: order.created missing orderId');
+      if (this.orders.has(order.orderId)) throw new Error(`OMS_STORE: duplicate order ${order.orderId}`);
       const frozen: OmsOrderSnapshot = Object.freeze({
-        ...snapshot,
-        status: 'CREATED',
+        ...order,
+        status: 'CREATED' as const,
         orderVersion: seq,
         sourceKernelEventId: eventId,
       });
-      this.orders.set(snapshot.orderId, { snapshot: frozen });
+      this.orders.set(order.orderId, { snapshot: frozen });
       return frozen;
     }
 
-    if (type === 'order.submitted') {
-      const update = envelope.payload as { orderId: string };
-      const rec = this.orders.get(update.orderId);
-      if (!rec) throw new Error(`OMS_STORE: unknown order ${update.orderId}`);
-      const frozen: OmsOrderSnapshot = Object.freeze({
-        ...rec.snapshot,
-        status: 'SUBMITTED',
-        orderVersion: seq,
-        sourceKernelEventId: eventId,
-      });
-      this.orders.set(update.orderId, { snapshot: frozen });
-      return frozen;
-    }
+    // Status mutation events
+    if (type === 'order.submitted' || type === 'order.rejected' ||
+        type === 'order.submission.unknown' || type === 'execution.fill.confirmed') {
+      const orderId = type === 'execution.fill.confirmed'
+        ? (payload.fill as Record<string, unknown>)?.orderId as string
+        : payload.orderId as string;
+      if (!orderId) throw new Error(`OMS_STORE: ${type} missing orderId`);
+      const rec = this.orders.get(orderId);
+      if (!rec) throw new Error(`OMS_STORE: unknown order ${orderId}`);
 
-    if (type === 'order.rejected') {
-      const update = envelope.payload as { orderId: string; reason: string };
-      const rec = this.orders.get(update.orderId);
-      if (!rec) throw new Error(`OMS_STORE: unknown order ${update.orderId}`);
-      const frozen: OmsOrderSnapshot = Object.freeze({
-        ...rec.snapshot,
-        status: 'REJECTED',
-        rejectionReason: update.reason,
-        orderVersion: seq,
-        sourceKernelEventId: eventId,
-      });
-      this.orders.set(update.orderId, { snapshot: frozen });
-      return frozen;
-    }
+      // Sequence guard: stale/equal seq → no mutation
+      if (seq <= rec.snapshot.orderVersion) return null;
 
-    if (type === 'order.submission.unknown') {
-      const update = envelope.payload as { orderId: string; reason: string };
-      const rec = this.orders.get(update.orderId);
-      if (!rec) throw new Error(`OMS_STORE: unknown order ${update.orderId}`);
-      const frozen: OmsOrderSnapshot = Object.freeze({
-        ...rec.snapshot,
-        status: 'SUBMISSION_UNKNOWN',
-        rejectionReason: update.reason,
-        orderVersion: seq,
-        sourceKernelEventId: eventId,
-      });
-      this.orders.set(update.orderId, { snapshot: frozen });
-      return frozen;
-    }
+      // Determine target status
+      let targetStatus: OmsOrderStatus;
+      let fillId: string | undefined;
+      let rejectionReason: string | undefined;
+      if (type === 'order.submitted') targetStatus = 'SUBMITTED';
+      else if (type === 'order.rejected') {
+        targetStatus = 'REJECTED';
+        rejectionReason = payload.reason as string | undefined;
+      } else if (type === 'order.submission.unknown') {
+        targetStatus = 'SUBMISSION_UNKNOWN';
+        rejectionReason = payload.reason as string | undefined;
+      } else {
+        targetStatus = 'FILLED';
+        fillId = (payload.fill as Record<string, unknown>)?.fillId as string | undefined;
+      }
 
-    if (type === 'execution.fill.confirmed') {
-      const fill = envelope.payload.fill as { orderId: string; fillId: string };
-      const rec = this.orders.get(fill.orderId);
-      if (!rec) throw new Error(`OMS_STORE: unknown order ${fill.orderId}`);
+      // Terminal guard
+      const allowed = VALID_TRANSITIONS[rec.snapshot.status];
+      if (!allowed.includes(targetStatus)) {
+        throw new Error(`OMS_STORE: invalid transition ${rec.snapshot.status} → ${targetStatus} for order ${orderId}`);
+      }
+
       const frozen: OmsOrderSnapshot = Object.freeze({
-        ...rec.snapshot,
-        status: 'FILLED',
-        fillId: fill.fillId,
-        orderVersion: seq,
-        sourceKernelEventId: eventId,
+        ...rec.snapshot, status: targetStatus,
+        fillId: fillId ?? rec.snapshot.fillId,
+        rejectionReason: rejectionReason ?? rec.snapshot.rejectionReason,
+        orderVersion: seq, sourceKernelEventId: eventId,
       });
-      this.orders.set(fill.orderId, { snapshot: frozen });
+      this.orders.set(orderId, { snapshot: frozen });
       return frozen;
     }
 
@@ -96,13 +90,9 @@ export class OmsOrderStore {
   }
 
   getByIntent(intentId: string): OmsOrderSnapshot | undefined {
-    for (const rec of this.orders.values()) {
-      if (rec.snapshot.intentId === intentId) return rec.snapshot;
+    for (const r of this.orders.values()) {
+      if (r.snapshot.intentId === intentId) return r.snapshot;
     }
     return undefined;
-  }
-
-  getLatestStatus(orderId: string): OmsOrderStatus | undefined {
-    return this.orders.get(orderId)?.snapshot?.status;
   }
 }

@@ -13,7 +13,7 @@ export function validateTradingEventPayload(
   type: string,
   payload: Record<string, unknown>,
 ): void {
-  if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated' && type !== 'policy.snapshot.published' && type !== 'execution.fill.confirmed' && type !== 'position.baseline.confirmed') {
+  if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated' && type !== 'policy.snapshot.published' && type !== 'execution.fill.confirmed' && type !== 'position.baseline.confirmed' && type !== 'order.created' && type !== 'order.submitted' && type !== 'order.rejected' && type !== 'order.submission.unknown') {
     throw new Error(`UNKNOWN_EVENT_TYPE: ${JSON.stringify(type)}`);
   }
 
@@ -74,5 +74,19 @@ export function validateTradingEventPayload(
     const p = payload as { baseline?: unknown };
     if (!p || p.baseline === undefined) throw new InvalidExchangeProvenanceError('position.baseline.confirmed requires baseline payload');
     validatePositionBaseline(p.baseline);
+  }
+
+  // Phase 3 OMS: order lifecycle validation
+  if (type === 'order.created') {
+    const p = payload as { order?: unknown };
+    if (!p || !p.order) throw new Error('order.created requires order payload');
+    const o = p.order as Record<string, unknown>;
+    if (typeof o.orderId !== 'string' || !o.orderId) throw new Error('order.created: orderId required');
+    if (typeof o.intentId !== 'string' || !o.intentId) throw new Error('order.created: intentId required');
+  }
+
+  if (type === 'order.submitted' || type === 'order.rejected' || type === 'order.submission.unknown') {
+    const p = payload as { orderId?: unknown };
+    if (typeof p.orderId !== 'string' || !p.orderId) throw new Error(`${type}: orderId required`);
   }
 }

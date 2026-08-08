@@ -1,6 +1,9 @@
-// Phase 3: PaperExecutionAdapter — adapted paper execution
+// Phase 3: PaperExecutionAdapter — reuses existing FillSimulator/PaperBroker
 import type { ExchangeId } from '../data/MarketIdentity';
 import type { OmsOrder, ExecutionAdapter, ExecutionResult, OmsConfirmedFill } from './oms-types';
+import type { TradeIntent } from '../types/trade-intent';
+import type { FillSimulatorConfig } from '../paper/FillSimulator';
+import { simulateFill } from '../paper/FillSimulator';
 
 export interface PaperAdapterConfig {
   markPriceUsd: number;
@@ -22,35 +25,42 @@ export class PaperExecutionAdapter implements ExecutionAdapter {
     const cfg = this.config;
     cfg.counter++;
 
-    // Simulate fill using approvedNotionalUsd (NOT intent.positionUsd)
-    const executedPriceUsd = cfg.markPriceUsd;
-    const slippageFactor = 1 + (order.side === 'buy' ? 1 : -1) * (cfg.slippageBps / 10000);
-    const actualPrice = roundUsd(executedPriceUsd * slippageFactor);
-    const quantity = roundQuantity(order.approvedNotionalUsd / actualPrice);
-    if (!Number.isFinite(quantity) || quantity <= 0) {
-      return { status: 'rejected', reason: `Invalid quantity: ${quantity}` };
-    }
-
-    const fill: OmsConfirmedFill = {
-      fillId: `${cfg.fillIdPrefix}--${cfg.counter}`,
-      exchange: order.exchange,
+    // Build a minimal TradeIntent for FillSimulator with approved size
+    const intent: TradeIntent = {
+      intentId: order.intentId,
+      exchange: order.exchange as ExchangeId,
       symbol: order.symbol,
-      side: order.side,
-      quantity,
-      price: actualPrice,
-      executedAt: cfg.executedAtMs,
+      direction: order.side === 'buy' ? 'long' : 'short',
+      orderType: 'market',
+      positionUsd: order.approvedNotionalUsd, // ← approved size, NOT original
+      source: 'paper-adapter',
+      createdAt: cfg.executedAtMs,
+      reason: 'oms-paper',
+      biasUpdatedAt: cfg.executedAtMs,
+    };
+
+    const simConfig: FillSimulatorConfig = {
+      markPriceUsd: cfg.markPriceUsd,
+      feeBps: cfg.feeBps,
+      slippageBps: cfg.slippageBps,
+      executedAtMs: cfg.executedAtMs,
+      fillIdPrefix: cfg.fillIdPrefix,
+    };
+
+    const { fill } = simulateFill(intent, simConfig, cfg.counter);
+
+    const omsFill: OmsConfirmedFill = {
+      fillId: fill.fillId,
+      exchange: fill.exchange,
+      symbol: fill.symbol,
+      side: fill.side,
+      quantity: fill.quantity,
+      price: fill.priceUsd,
+      executedAt: fill.executedAt,
       orderId: order.orderId,
       intentId: order.intentId,
     };
 
-    return { status: 'filled', fill };
+    return { status: 'filled', fill: omsFill };
   }
-}
-
-function roundUsd(value: number): number {
-  return Math.round(value * 100) / 100;
-}
-
-function roundQuantity(value: number): number {
-  return Math.round(value * 100000) / 100000;
 }
