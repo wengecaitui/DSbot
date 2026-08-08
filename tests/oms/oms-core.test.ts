@@ -203,23 +203,13 @@ describe('OmsOrderStore', () => {
 
 // ─── PaperAdapter ───────────────────────────────────────────────────────────
 describe('PaperAdapter', () => {
-  let adapter: any;
-  let OmsCoreCtor: any;
-  let PaperAdapterCtor: any;
-
-  before(async () => {
-    const m1 = await import('../../src/oms/PaperExecutionAdapter');
-    const m2 = await import('../../src/oms/OmsCore');
-    PaperAdapterCtor = m1.PaperExecutionAdapter;
-    OmsCoreCtor = m2.OmsCore;
-  });
-
   it('uses approvedNotionalUsd', async () => {
-    const adapter = new PaperAdapterCtor({ markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000, fillIdPrefix: 'pfx', counter: 0 });
+    const { PaperExecutionAdapter } = await import('../../src/oms/PaperExecutionAdapter');
+    const adapter = new PaperExecutionAdapter({ markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000, fillIdPrefix: 'pfx', counter: 0 });
     const r = await adapter.submit({ orderId: 'o1', intentId: 'i1', exchange: BITGET, symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 5000 });
     assert.strictEqual(r.status, 'filled');
     assert.ok(r.fill.quantity > 0);
-    assert.strictEqual(r.fill.price, 50025); // 50000 * (1 + 5/10000)
+    assert.strictEqual(r.fill.price, 50025);
     assert.strictEqual(r.fill.orderId, 'o1');
     assert.strictEqual(r.fill.intentId, 'i1');
   });
