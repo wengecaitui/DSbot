@@ -21,40 +21,40 @@ const DEFAULT_STOP_PCT = 0.05;
 describe('PositionManager.onFill', () => {
   const mgr = new PositionManager();
   it('open fill → protected plan created', () => {
-    const plan = mgr.onFill(mkPosition({ status: 'open', side: 'long', averageEntryPrice: 50000, signedQuantity: 1 }), undefined);
+    const plan = mgr.onFill(mkPosition({ status: 'open', side: 'long', averageEntryPrice: 50000, signedQuantity: 1 }), 'BTC/USDT', undefined);
     assert.ok(plan);
     assert.strictEqual(plan!.status, 'active');
     assert.strictEqual(plan!.side, 'long');
-    assert.strictEqual(plan!.stopPrice, 47500); // 50000 * (1 - 0.05)
+    assert.strictEqual(plan!.stopPrice, 47500);
   });
   it('short open → stop above entry', () => {
-    const plan = mgr.onFill(mkPosition({ status: 'open', side: 'short', averageEntryPrice: 50000, signedQuantity: -1 }), undefined);
+    const plan = mgr.onFill(mkPosition({ status: 'open', side: 'short', averageEntryPrice: 50000, signedQuantity: -1 }), 'BTC/USDT', undefined);
     assert.ok(plan);
     assert.strictEqual(plan!.side, 'short');
-    assert.strictEqual(plan!.stopPrice, 52500); // 50000 * (1 + 0.05)
+    assert.strictEqual(plan!.stopPrice, 52500);
   });
   it('missing position → null', () => {
-    assert.strictEqual(mgr.onFill(mkPosition({ status: 'missing' }), undefined), null);
+    assert.strictEqual(mgr.onFill(mkPosition({ status: 'missing' }), 'BTC/USDT', undefined), null);
   });
   it('flat position + active plan → should archive (returns plan)', () => {
     const existing = makePlan('active', 47500, 'long');
-    const r = mgr.onFill(mkPosition({ status: 'flat' }), existing);
-    assert.ok(r); // caller should archive
+    const r = mgr.onFill(mkPosition({ status: 'flat' }), 'BTC/USDT', existing);
+    assert.ok(r);
     assert.strictEqual(r!.status, 'active');
   });
   it('scale-in with changed avg → stop updated', () => {
     const existing = makePlan('active', 47500, 'long');
-    const r = mgr.onFill(mkPosition({ status: 'open', side: 'long', averageEntryPrice: 52000, signedQuantity: 2 }), existing);
+    const r = mgr.onFill(mkPosition({ status: 'open', side: 'long', averageEntryPrice: 52000, signedQuantity: 2 }), 'BTC/USDT', existing);
     assert.ok(r);
-    assert.strictEqual(r!.stopPrice, 49400); // 52000 * 0.95
+    assert.strictEqual(r!.stopPrice, 49400);
   });
   it('scale-in with same avg → null (no change)', () => {
     const existing = makePlan('active', 47500, 'long');
-    assert.strictEqual(mgr.onFill(mkPosition({ status: 'open', side: 'long', averageEntryPrice: 50000, signedQuantity: 2 }), existing), null);
+    assert.strictEqual(mgr.onFill(mkPosition({ status: 'open', side: 'long', averageEntryPrice: 50000, signedQuantity: 2 }), 'BTC/USDT', existing), null);
   });
   it('partial reduce → plan unchanged', () => {
     const existing = makePlan('active', 47500, 'long');
-    assert.strictEqual(mgr.onFill(mkPosition({ status: 'open', side: 'long', averageEntryPrice: 50000, signedQuantity: 0.5 }), existing), null);
+    assert.strictEqual(mgr.onFill(mkPosition({ status: 'open', side: 'long', averageEntryPrice: 50000, signedQuantity: 0.5 }), 'BTC/USDT', existing), null);
   });
 });
 

@@ -19,32 +19,29 @@ export class PositionManager {
   }
 
   /** Called on execution.fill.confirmed — creates/updates/archives plan */
-  onFill(position: PositionResolution, plan: PositionPlan | undefined): PositionPlan | null {
+  onFill(position: PositionResolution, symbol: string, plan: PositionPlan | undefined): PositionPlan | null {
     if (position.status === 'missing') return null;
 
     if (position.status === 'flat') {
-      // Close → archive existing plan
       if (!plan || plan.status !== 'active') return null;
-      return plan; // caller should archive
+      return plan;
     }
 
-    // Open or scale-in → create or keep plan
     if (!plan || plan.status !== 'active') {
-      // Create new plan
-      const stopPrice = computeStopPrice(position.averageEntryPrice, position.side as 'long' | 'short', this.stopConfig.stopPct);
+      const side = position.side as 'long' | 'short';
+      const stopPrice = computeStopPrice(position.averageEntryPrice, side, this.stopConfig.stopPct);
       if (!Number.isFinite(stopPrice)) return null;
-      const planId = generatePlanId(position.symbol ?? '', position.side as 'long' | 'short', position.averageEntryPrice, 0);
+      const planId = generatePlanId(symbol, side, position.averageEntryPrice, 0);
       const newPlan: PositionPlan = {
-        planId, symbol: position.symbol ?? '', positionSide: position.side as 'long' | 'short',
-        side: position.side as 'long' | 'short', entryPrice: position.averageEntryPrice,
+        planId, symbol, positionSide: side, side, entryPrice: position.averageEntryPrice,
         entryQuantity: Math.abs(position.signedQuantity), stopPrice,
         status: 'active', planVersion: 0, sourceKernelEventId: '',
       };
       return newPlan;
     }
 
-    // Scale-in → update stop-price (plan stays)
-    const newStopPrice = computeStopPrice(position.averageEntryPrice, position.side as 'long' | 'short', this.stopConfig.stopPct);
+    const side = position.side as 'long' | 'short';
+    const newStopPrice = computeStopPrice(position.averageEntryPrice, side, this.stopConfig.stopPct);
     return newStopPrice !== plan.stopPrice && Number.isFinite(newStopPrice)
       ? { ...plan, stopPrice: newStopPrice } : null;
   }
