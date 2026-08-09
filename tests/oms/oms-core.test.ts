@@ -195,22 +195,38 @@ describe('store transitions', () => {
   });
 });
 
-// ─── PaperAdapter ───────────────────────────────────────────────────────────
+// ─── PaperAdapter (real PaperExecutionService) ──────────────────────────────
 describe('PaperAdapter', () => {
-  it('uses approvedNotionalUsd not intent.positionUsd', async () => {
+  it('executes through real PaperExecutionService with approvedNotionalUsd', async () => {
     const { PaperExecutionAdapter } = await import('../../src/oms/PaperExecutionAdapter');
-    const a = new PaperExecutionAdapter({ markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 });
+    const { PaperExecutionService } = await import('../../src/paper/PaperExecutionService');
+
+    const svc = await PaperExecutionService.open(
+      { exchange: BITGET, accountId: 'test-acct', initialCashUsd: 1000000 },
+      { async save(): Promise<void> {}, async load(): Promise<any> { return null; } },
+    );
+    const a = new PaperExecutionAdapter(svc, { markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 });
     const r = await a.submit({ orderId: 'o1', intentId: 'i1', exchange: BITGET, symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 5000 });
     assert.strictEqual(r.status, 'filled');
     if (r.status === 'filled') {
       assert.ok(r.fill.quantity > 0);
       assert.strictEqual(r.fill.orderId, 'o1');
       assert.strictEqual(r.fill.intentId, 'i1');
+      assert.strictEqual(r.fill.price, 50025);
     }
+    // Verify paper ledger updated
+    const snap = svc.snapshot();
+    assert.ok(snap.processedFills >= 1, `expected >=1 processed fills, got ${snap.processedFills}`);
+    assert.ok(snap.sequence >= 1);
   });
   it('no fake same-intentId TradeIntent constructed', async () => {
     const { PaperExecutionAdapter } = await import('../../src/oms/PaperExecutionAdapter');
-    const a = new PaperExecutionAdapter({ markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 });
+    const { PaperExecutionService } = await import('../../src/paper/PaperExecutionService');
+    const svc = await PaperExecutionService.open(
+      { exchange: BITGET, accountId: 'test-acct2', initialCashUsd: 1000000 },
+      { async save(): Promise<void> {}, async load(): Promise<any> { return null; } },
+    );
+    const a = new PaperExecutionAdapter(svc, { markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 });
     const r = await a.submit({ orderId: 'o1', intentId: 'intent-001', exchange: BITGET, symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 5000 });
     assert.strictEqual(r.status, 'filled');
     if (r.status === 'filled') {

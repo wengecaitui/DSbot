@@ -1,62 +1,56 @@
-// Phase 3: PaperExecutionAdapter — uses real PaperBroker/PaperExecutionService
+// Phase 3: PaperExecutionAdapter — uses real PaperExecutionService/PaperBroker/PaperAccountLedger/persistence
 import type { OmsOrder, ExecutionAdapter, ExecutionResult, OmsConfirmedFill } from './oms-types';
 import type { TradeIntent } from '../types/trade-intent';
-import type { PaperExecutionService } from '../paper/PaperExecutionService';
-import type { ExecuteParams } from '../paper/PaperExecutionService';
+import type { PaperExecutionService, ExecuteParams } from '../paper/PaperExecutionService';
 import type { ExchangeId } from '../data/MarketIdentity';
-import { simulateFill } from '../paper/FillSimulator';
-import type { FillSimulatorConfig } from '../paper/FillSimulator';
 
 export class PaperExecutionAdapter implements ExecutionAdapter {
-  private params: ExecuteParams;
-  private counter = 0;
-
-  constructor(params: ExecuteParams) {
-    this.params = { markPriceUsd: params.markPriceUsd, feeBps: params.feeBps,
-      slippageBps: params.slippageBps, executedAtMs: params.executedAtMs,
-      fillIdPrefix: params.fillIdPrefix };
-  }
+  constructor(
+    private service: PaperExecutionService,
+    private params: ExecuteParams,
+  ) {}
 
   async submit(order: OmsOrder): Promise<ExecutionResult> {
-    const counter = ++this.counter;
-
-    // Build minimal TradeIntent with approved size for FillSimulator
-    // NOTE: different intentId to avoid canonical identity conflict
+    // Build original TradeIntent for identity only (positionUsd preserved)
     const intent: TradeIntent = {
-      intentId: `oms-${order.intentId}`,
+      intentId: order.intentId,
       exchange: order.exchange as ExchangeId,
       symbol: order.symbol,
       direction: order.side === 'buy' ? 'long' : 'short',
       orderType: 'market',
-      positionUsd: order.approvedNotionalUsd,
+      positionUsd: order.approvedNotionalUsd, // preserved for identity, sizing from approvedNotionalUsd
       source: 'oms-adapter',
       createdAt: this.params.executedAtMs,
       reason: 'oms-approved',
       biasUpdatedAt: this.params.executedAtMs,
     };
 
-    const simCfg: FillSimulatorConfig = {
-      markPriceUsd: this.params.markPriceUsd,
-      feeBps: this.params.feeBps,
-      slippageBps: this.params.slippageBps,
-      executedAtMs: this.params.executedAtMs,
-      fillIdPrefix: this.params.fillIdPrefix,
-    };
+    // Execute through real PaperExecutionService → PaperBroker → PaperAccountLedger → persistence
+    const paperEvent = await this.service.executeApproved(intent, order.approvedNotionalUsd, this.params);
 
-    const { fill: rawFill } = simulateFill(intent, simCfg, counter);
+    if (paperEvent.status === 'applied') {
+      const omsFill: OmsConfirmedFill = {
+        fillId: paperEvent.fillId!,
+        exchange: order.exchange,
+        symbol: order.symbol,
+        side: order.side,
+        quantity: paperEvent.quantity!,
+        price: paperEvent.executedPriceUsd!,
+        executedAt: this.params.executedAtMs,
+        orderId: order.orderId,
+        intentId: order.intentId,
+      };
+      return { status: 'filled', fill: omsFill };
+    }
 
-    const omsFill: OmsConfirmedFill = {
-      fillId: rawFill.fillId,
-      exchange: rawFill.exchange,
-      symbol: rawFill.symbol,
-      side: rawFill.side,
-      quantity: rawFill.quantity,
-      price: rawFill.priceUsd,
-      executedAt: rawFill.executedAt,
-      orderId: order.orderId,
-      intentId: order.intentId,
-    };
+    if (paperEvent.status === 'duplicate') {
+      return { status: 'rejected', reason: 'duplicate fill' };
+    }
 
-    return { status: 'filled', fill: omsFill };
+    if (paperEvent.status === 'rejected') {
+      return { status: 'rejected', reason: 'paper execution rejected' };
+    }
+
+    return { status: 'unknown', reason: paperEvent.error ?? 'paper execution failed' };
   }
 }
