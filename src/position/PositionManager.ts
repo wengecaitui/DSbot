@@ -42,9 +42,11 @@ export class PositionManager {
       };
     }
 
-    // Scale-in → update stop price if entry changed
-    return newStopPrice !== plan.stopPrice && Number.isFinite(newStopPrice)
-      ? { ...plan, stopPrice: newStopPrice } : null;
+    // Scale-in/partial reduce → update stop price if entry changed
+    const newStopPrice = computeStopPrice(position.averageEntryPrice, side, this.stopConfig.stopPct);
+    if (newStopPrice !== plan.stopPrice && Number.isFinite(newStopPrice))
+      return { ...plan, stopPrice: newStopPrice };
+    return null;
   }
 
   /** Called on market ticker — evaluate stop trigger */
