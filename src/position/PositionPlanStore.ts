@@ -6,6 +6,7 @@ interface PlanRecord { snapshot: PositionPlan; }
 
 function validatePlan(plan: Record<string, unknown>): void {
   if (typeof plan.planId !== 'string' || !plan.planId) throw new Error('PLAN_STORE: planId required');
+  if (typeof plan.exchange !== 'string' || !plan.exchange) throw new Error('PLAN_STORE: exchange required');
   if (typeof plan.symbol !== 'string' || !plan.symbol) throw new Error('PLAN_STORE: symbol required');
   if (plan.positionSide !== 'long' && plan.positionSide !== 'short') throw new Error('PLAN_STORE: invalid positionSide');
   if (typeof plan.entryPrice !== 'number' || !Number.isFinite(plan.entryPrice) || plan.entryPrice <= 0) throw new Error('PLAN_STORE: invalid entryPrice');

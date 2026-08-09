@@ -111,6 +111,7 @@ export function validateTradingEventPayload(
     if (!p || !p.plan) throw new Error('position.plan.created requires plan payload');
     const pl = p.plan;
     if (typeof pl.planId !== 'string' || !pl.planId) throw new Error('position.plan.created: planId required');
+    if (typeof pl.exchange !== 'string' || !pl.exchange) throw new Error('position.plan.created: exchange required');
     if (typeof pl.symbol !== 'string' || !pl.symbol) throw new Error('position.plan.created: symbol required');
     if (pl.positionSide !== 'long' && pl.positionSide !== 'short') throw new Error('position.plan.created: invalid positionSide');
     if (typeof pl.entryPrice !== 'number' || !Number.isFinite(pl.entryPrice) || pl.entryPrice <= 0) throw new Error('position.plan.created: invalid entryPrice');
