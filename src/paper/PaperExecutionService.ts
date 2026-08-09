@@ -54,6 +54,48 @@ export class PaperExecutionService {
   snapshot(): PaperAccountSnapshot { return this.broker.snapshot(); }
   entries(): readonly PaperLedgerEntry[] { return this.broker.entries(); }
 
+  /** Phase 3 OMS: Execute with explicit approved notional — original intent identity preserved. */
+  async executeApproved(
+    intent: TradeIntent,
+    approvedNotionalUsd: number,
+    params: ExecuteParams,
+  ): Promise<PaperExecutionEvent> {
+    const counter = ++this.counter;
+    const simCfg: FillSimulatorConfig = {
+      markPriceUsd: params.markPriceUsd,
+      feeBps: params.feeBps,
+      slippageBps: params.slippageBps,
+      executedAtMs: params.executedAtMs,
+      fillIdPrefix: params.fillIdPrefix,
+    };
+    // Synthetic intent for paper sizing — different intentId to avoid canonical identity conflict
+    const synthetic: TradeIntent = {
+      intentId: `oms-${intent.intentId}-${counter}`,
+      exchange: intent.exchange,
+      symbol: intent.symbol,
+      direction: intent.direction,
+      orderType: intent.orderType,
+      positionUsd: approvedNotionalUsd,
+      source: intent.source,
+      createdAt: intent.createdAt,
+      reason: `oms-${intent.reason ?? ''}`,
+      biasUpdatedAt: intent.biasUpdatedAt,
+    };
+    try {
+      const result: PaperBrokerResult = await this.broker.execute(synthetic, simCfg, counter);
+      return {
+        status: result.status,
+        fillId: result.fill.fillId,
+        executedPriceUsd: result.fill.priceUsd,
+        quantity: result.fill.quantity,
+        feeUsd: result.fill.feeUsd,
+        snapshot: result.snapshot,
+      };
+    } catch (err: any) {
+      return { status: 'failed', snapshot: this.broker.snapshot(), error: err?.message ?? String(err) };
+    }
+  }
+
   /** Execute a risk-admitted intent with dynamic simulation parameters. */
   async execute(intent: TradeIntent, params: ExecuteParams): Promise<PaperExecutionEvent> {
     const counter = ++this.counter;

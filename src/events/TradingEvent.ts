@@ -10,6 +10,7 @@ import type { MarketBiasReportFull } from '../types/market-bias';
 import type { CompiledPolicy } from '../types/policy-snapshot';
 import type { ConfirmedFill } from '../types/confirmed-fill';
 import type { ConfirmedPositionBaseline } from '../types/position-state';
+import type { OrderCreatedPayload, OrderStatusPayload } from '../oms/oms-events';
 
 export interface TradingEventPayloadMap {
   'market.ticker.updated':       { ticker: WsTicker; receivedAt: number };
@@ -18,6 +19,10 @@ export interface TradingEventPayloadMap {
   'policy.snapshot.published':   { policy: CompiledPolicy };
   'execution.fill.confirmed':    { fill: ConfirmedFill };
   'position.baseline.confirmed': { baseline: ConfirmedPositionBaseline };
+  'order.created':               OrderCreatedPayload;
+  'order.submitted':             OrderStatusPayload;
+  'order.rejected':              OrderStatusPayload;
+  'order.submission.unknown':    OrderStatusPayload;
 }
 
 export type TradingEventType = keyof TradingEventPayloadMap;
