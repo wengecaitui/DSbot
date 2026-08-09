@@ -72,8 +72,8 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       // Fail-closed: missing exchange provenance
       if (typeof exchange !== 'string' || !exchange) return;
 
-      const position = config.positionStore.resolve(exchange, symbol);
-      const activePlan = planStore.getActive(exchange, symbol);
+      const position = config.positionStore.resolve(exchange as any, symbol);
+      const activePlan = planStore.getActive(exchange as any, symbol);
 
       // Flat/missing -> close active plan
       if (!position || position.status === 'missing' || position.status === 'flat') {
@@ -124,19 +124,19 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       const marketPrice = Number(ticker.last);
       if (!Number.isFinite(marketPrice) || marketPrice <= 0) return;
 
-      const plan = planStore.getActive(exchange, symbol);
+      const plan = planStore.getActive(exchange as any, symbol);
       if (!plan) return;
 
       const result = positionManager.evaluate(plan, marketPrice);
       if (result.decision !== 'close') return;
 
-      const position = config.positionStore.resolve(exchange, symbol);
+      const position = config.positionStore.resolve(exchange as any, symbol);
       if (!position || position.status !== 'open') return;
 
       // Idempotency: one economic exit per plan incarnation
       if (submittedIntents.has(plan.planId)) return;
 
-      const marketSnapshot = config.marketStore?.getSnapshot?.(exchange, symbol) as any;
+      const marketSnapshot = config.marketStore?.getSnapshot?.(exchange as any, symbol) as any;
 
       const ctx: ProtectiveContext = {
         plan,
