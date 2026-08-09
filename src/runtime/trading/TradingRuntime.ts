@@ -43,6 +43,8 @@ export interface TradingRuntimeOptions {
   readonly seriesLimit?: number;
   readonly maxKlineAgeMs?: number;
   readonly slowPipelineConfig?: Pick<SlowPipelineConfig, 'model' | 'adapterScript' | 'timeoutMs' | 'adapterFactory'>;
+  /** Phase 4B: optional position protection runtime — activated at LIVE_READY */
+  readonly positionProtection?: import('../../position/PositionManagerRuntime').PositionManagerRuntime;
 }
 
 export interface UniverseApplyResult {
@@ -330,6 +332,9 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
         appliedPlanVersion = planAtStart.version;
         appliedPlanSnapshot = snapshotPlanEntries(planAtStart);
 
+        // Phase 4B: Activate protection at LIVE_READY boundary
+        if (opts.positionProtection) opts.positionProtection.setMode('live');
+
         // Only mark applied if Universe hasn't advanced past this version
         // during the async start window.
         if (universe.getPlan().version === planAtStart.version) {
@@ -350,6 +355,7 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
       pendingStartEpoch = -1;
       pendingApplyPromise = null;
       pendingCollectorPlan = null;
+      if (opts.positionProtection) opts.positionProtection.stop();
       marketData.stop();
       slowPipeline.shutdown();
     },
