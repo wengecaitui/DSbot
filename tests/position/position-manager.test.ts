@@ -1,4 +1,4 @@
-// Phase 4: Position Management — production-integration repair tests
+// Phase 4: Position Management — final closure repair tests
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { PositionManager } from '../../src/position/PositionManager';
@@ -29,8 +29,7 @@ describe('Real OMS submission', () => {
   });
   it('Gateway ADMITTED → admitted=true', () => {
     const ctx: ProtectiveContext = { plan: mkPlan('active', 47500, 'long'), currentPosition: mkPos(), exchange: 'bitget', marketPrice: 47499, marketSnapshot: validMarket, hardRisk: unlockedHardRisk };
-    const r = evaluateProtectiveRoute(ctx);
-    assert.strictEqual(r.admitted, true);
+    assert.strictEqual(evaluateProtectiveRoute(ctx).admitted, true);
   });
   it('HardRisk locked → admitted=false', () => {
     const ctx: ProtectiveContext = { plan: mkPlan('active', 47500, 'long'), currentPosition: mkPos(), exchange: 'bitget', marketPrice: 47499, marketSnapshot: validMarket, hardRisk: { ...unlockedHardRisk, locked: true } };
@@ -54,13 +53,13 @@ describe('Full close / flip automatic', () => {
   const mgr = new PositionManager();
   it('flat position → plan terminated (status=closed)', () => {
     const existing = mkPlan('active', 47500, 'long');
-    const r = mgr.onFill(mkPos({ status: 'flat' }), 'bitget', 'BTC/USDT', existing);
+    const r = mgr.onFill(mkPos({ status: 'flat' }), 'bitget', 'BTC/USDT', 2, existing);
     assert.ok(r);
     assert.strictEqual(r!.status, 'closed');
   });
   it('flip: long→short produces new plan with correct side', () => {
     const existing = mkPlan('active', 47500, 'long');
-    const r = mgr.onFill(mkPos({ side: 'short', signedQuantity: -1, averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', existing);
+    const r = mgr.onFill(mkPos({ side: 'short', signedQuantity: -1, averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', 3, existing);
     assert.ok(r);
     assert.strictEqual(r!.side, 'short');
     assert.strictEqual(r!.status, 'active');
@@ -70,19 +69,21 @@ describe('Full close / flip automatic', () => {
     const store = new PositionPlanStore();
     const oldPlan = mkPlan('active', 47500, 'long');
     store.apply({ type: 'position.plan.created', payload: { plan: oldPlan }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any);
-    // Flat → close
     store.apply({ type: 'position.plan.closed', payload: { planId: oldPlan.planId }, kernelLogicalSequence: 2, kernelEventId: 'e2' } as any);
     assert.strictEqual(store.getActive('BTC/USDT'), undefined);
-    // New short plan
-    const newPlan = mgr.onFill(mkPos({ side: 'short', signedQuantity: -1, averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', undefined);
+    const newPlan = mgr.onFill(mkPos({ side: 'short', signedQuantity: -1, averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', 3, undefined);
     store.apply({ type: 'position.plan.created', payload: { plan: newPlan! }, kernelLogicalSequence: 3, kernelEventId: 'e3' } as any);
     assert.ok(store.getActive('BTC/USDT'));
     assert.strictEqual(store.getActive('BTC/USDT')!.side, 'short');
   });
-  it('new position cycle with different entry → different planId from old closed', () => {
-    const p1 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 50000 }), 'bitget', 'BTC/USDT', undefined);
-    // Re-open at different price
-    const p2 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', undefined);
+  it('same-price reopen → distinct planId (different fillSequence)', () => {
+    const p1 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 50000 }), 'bitget', 'BTC/USDT', 1, undefined);
+    const p2 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 50000 }), 'bitget', 'BTC/USDT', 5, undefined);
+    assert.notStrictEqual(p2!.planId, p1!.planId);
+  });
+  it('different entry → different planId', () => {
+    const p1 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 50000 }), 'bitget', 'BTC/USDT', 1, undefined);
+    const p2 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', 2, undefined);
     assert.notStrictEqual(p2!.planId, p1!.planId);
   });
 });
@@ -94,6 +95,9 @@ describe('Plan identity', () => {
   });
   it('different entry → different planId', () => {
     assert.notStrictEqual(generatePlanId('bitget', 'BTC/USDT', 'long', 50000, 0), generatePlanId('bitget', 'BTC/USDT', 'long', 50100, 0));
+  });
+  it('different fillSequence → different planId', () => {
+    assert.notStrictEqual(generatePlanId('bitget', 'BTC/USDT', 'long', 50000, 1), generatePlanId('bitget', 'BTC/USDT', 'long', 50000, 5));
   });
 });
 
@@ -136,9 +140,9 @@ describe('Plan event validation in store', () => {
 // ─── Regression ─────────────────────────────────────────────────────────────
 describe('PositionManager (regression)', () => {
   const mgr = new PositionManager();
-  it('open → protected', () => { assert.strictEqual(mgr.onFill(mkPos(), 'bitget', 'BTC/USDT', undefined)!.stopPrice, 47500); });
-  it('short → stop above', () => { assert.strictEqual(mgr.onFill(mkPos({ side: 'short', signedQuantity: -1 }), 'bitget', 'BTC/USDT', undefined)!.stopPrice, 52500); });
-  it('missing → null', () => { assert.strictEqual(mgr.onFill(mkPos({ status: 'missing' }), 'bitget', 'BTC/USDT', undefined), null); });
+  it('open → protected', () => { assert.strictEqual(mgr.onFill(mkPos(), 'bitget', 'BTC/USDT', 0, undefined)!.stopPrice, 47500); });
+  it('short → stop above', () => { assert.strictEqual(mgr.onFill(mkPos({ side: 'short', signedQuantity: -1 }), 'bitget', 'BTC/USDT', 0, undefined)!.stopPrice, 52500); });
+  it('missing → null', () => { assert.strictEqual(mgr.onFill(mkPos({ status: 'missing' }), 'bitget', 'BTC/USDT', 0, undefined), null); });
   it('long hold', () => { assert.deepStrictEqual(mgr.evaluate(mkPlan('active', 47500, 'long'), 48000), { decision: 'hold' }); });
   it('long triggered', () => { assert.strictEqual(mgr.evaluate(mkPlan('active', 47500, 'long'), 47499).decision, 'close'); });
   it('deterministic', () => { const p=mkPlan('active',47500,'long'); assert.deepStrictEqual(mgr.evaluate(p,47000), mgr.evaluate({...p},47000)); });

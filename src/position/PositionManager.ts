@@ -19,7 +19,7 @@ export class PositionManager {
   }
 
   /** Production: fill-driven lifecycle — create/update/terminate plan */
-  onFill(position: PositionResolution, exchange: string, symbol: string, plan: PositionPlan | undefined): PositionPlan | null {
+  onFill(position: PositionResolution, exchange: string, symbol: string, fillSequence: number, plan: PositionPlan | undefined): PositionPlan | null {
     if (position.status === 'missing') return null;
 
     // Flat → terminate active plan
@@ -31,10 +31,10 @@ export class PositionManager {
     const side = position.side as 'long' | 'short';
     const stopPrice = computeStopPrice(position.averageEntryPrice, side, this.stopConfig.stopPct);
 
-    // No active plan or plan for wrong side → create new plan (flip)
+    // No active plan or plan for wrong side → create new plan (flip or fresh open)
     if (!plan || plan.status !== 'active' || plan.positionSide !== side) {
       if (!Number.isFinite(stopPrice)) return null;
-      const planId = generatePlanId(exchange, symbol, side, position.averageEntryPrice, 0);
+      const planId = generatePlanId(exchange, symbol, side, position.averageEntryPrice, fillSequence);
       return {
         planId, symbol, positionSide: side, side, entryPrice: position.averageEntryPrice,
         entryQuantity: Math.abs(position.signedQuantity), stopPrice,
@@ -42,7 +42,7 @@ export class PositionManager {
       };
     }
 
-    // Scale-in/partial reduce → update stop price if entry changed
+    // Same-side scale-in → update stop price if entry changed
     const newStopPrice = computeStopPrice(position.averageEntryPrice, side, this.stopConfig.stopPct);
     if (newStopPrice !== plan.stopPrice && Number.isFinite(newStopPrice))
       return { ...plan, stopPrice: newStopPrice };
