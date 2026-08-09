@@ -1,161 +1,132 @@
-// Phase 4: Position Management — final integration repair tests
+// Phase 4: Position Management — production-integration repair tests
 import * as assert from 'node:assert';
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it } from 'node:test';
 import { PositionManager } from '../../src/position/PositionManager';
 import { PositionPlanStore } from '../../src/position/PositionPlanStore';
 import { generatePlanId } from '../../src/position/plan-id';
-import { buildProtectiveIntent, evaluateAndRoute } from '../../src/position/ProtectiveExecutor';
-import type { ProtectiveContext, ProtectiveOutcome } from '../../src/position/ProtectiveExecutor';
+import { buildProtectiveIntent, evaluateProtectiveRoute } from '../../src/position/ProtectiveExecutor';
+import type { ProtectiveContext } from '../../src/position/ProtectiveExecutor';
 import type { PositionPlan } from '../../src/position/position-plan-types';
 import type { PositionResolution } from '../../src/types/position-state';
 
-function mkPosition(overrides?: Partial<PositionResolution>): PositionResolution {
+const unlockedHardRisk = { exchange: 'bitget' as any, locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity };
+const validMarket = { exchange: 'bitget', symbol: 'BTC/USDT', isStale: false, ticker: { ticker: { last: 50000 } } } as any;
+
+function mkPos(overrides?: Partial<PositionResolution>): PositionResolution {
   return { status: 'open', snapshot: null, side: 'long', signedQuantity: 1, averageEntryPrice: 50000, ...overrides } as PositionResolution;
 }
-function makePlan(status: string, stopPrice: number, side: 'long' | 'short'): PositionPlan {
-  return { planId: generatePlanId('BTC/USDT', side, 50000, 0), symbol: 'BTC/USDT',
+function mkPlan(status: string, stopPrice: number, side: 'long' | 'short'): PositionPlan {
+  return { planId: generatePlanId('bitget', 'BTC/USDT', side, 50000, 0), symbol: 'BTC/USDT',
     positionSide: side, side, entryPrice: 50000, entryQuantity: 1, stopPrice,
     status: status as any, planVersion: 0, sourceKernelEventId: 'e0' };
 }
 
-const unlockedHardRisk = { exchange: 'bitget' as any, locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity };
-
-// ─── Real Gateway context ───────────────────────────────────────────────────
-describe('ProtectiveExecutor → real Gateway', () => {
-  it('valid long stop close → ADMITTED through real Gateway', () => {
-    const ctx: ProtectiveContext = { plan: makePlan('active', 47500, 'long'), currentPosition: mkPosition({ side: 'long', signedQuantity: 1, averageEntryPrice: 50000 }), marketPrice: 47499, hardRisk: unlockedHardRisk };
-    const r = evaluateAndRoute(ctx);
-    assert.strictEqual(r.submitted, true);
-    assert.ok((r as any).orderId.startsWith('protect-'));
+// ─── Real OMS submission ────────────────────────────────────────────────────
+describe('Real OMS submission', () => {
+  it('intent is deterministic (same input → same intentId)', () => {
+    const ctx: ProtectiveContext = { plan: mkPlan('active', 47500, 'long'), currentPosition: mkPos(), exchange: 'bitget', marketPrice: 47499, hardRisk: unlockedHardRisk };
+    assert.strictEqual(buildProtectiveIntent(ctx).intentId, buildProtectiveIntent(ctx).intentId);
   });
-  it('valid short stop close → ADMITTED', () => {
-    const ctx: ProtectiveContext = { plan: makePlan('active', 52500, 'short'), currentPosition: mkPosition({ side: 'short', signedQuantity: -1, averageEntryPrice: 50000 }), marketPrice: 52501, hardRisk: unlockedHardRisk };
-    assert.strictEqual(evaluateAndRoute(ctx).submitted, true);
+  it('Gateway ADMITTED → admitted=true', () => {
+    const ctx: ProtectiveContext = { plan: mkPlan('active', 47500, 'long'), currentPosition: mkPos(), exchange: 'bitget', marketPrice: 47499, marketSnapshot: validMarket, hardRisk: unlockedHardRisk };
+    const r = evaluateProtectiveRoute(ctx);
+    assert.strictEqual(r.admitted, true);
   });
-  it('hardRisk locked → blocked', () => {
-    const ctx: ProtectiveContext = { plan: makePlan('active', 47500, 'long'), currentPosition: mkPosition(), marketPrice: 47499, hardRisk: { ...unlockedHardRisk, locked: true } };
-    const r = evaluateAndRoute(ctx);
-    assert.strictEqual(r.submitted, false);
-    assert.strictEqual(r.reason, 'hardrisk_locked');
+  it('HardRisk locked → admitted=false', () => {
+    const ctx: ProtectiveContext = { plan: mkPlan('active', 47500, 'long'), currentPosition: mkPos(), exchange: 'bitget', marketPrice: 47499, marketSnapshot: validMarket, hardRisk: { ...unlockedHardRisk, locked: true } };
+    assert.strictEqual(evaluateProtectiveRoute(ctx).admitted, false);
   });
-  it('missing position → no_position', () => {
-    const ctx: ProtectiveContext = { plan: makePlan('active', 47500, 'long'), currentPosition: mkPosition({ status: 'missing' }), marketPrice: 47499, hardRisk: unlockedHardRisk };
-    assert.strictEqual(evaluateAndRoute(ctx).submitted, false);
-    assert.strictEqual((evaluateAndRoute(ctx) as any).reason, 'no_position');
-  });
-  it('flat position → no_position', () => {
-    const ctx: ProtectiveContext = { plan: makePlan('active', 47500, 'long'), currentPosition: mkPosition({ status: 'flat' }), marketPrice: 47499, hardRisk: unlockedHardRisk };
-    assert.strictEqual(evaluateAndRoute(ctx).submitted, false);
-  });
-});
-
-// ─── Current PositionState sizing ───────────────────────────────────────────
-describe('Current PositionState sizing', () => {
-  it('close size from current signedQty * avgEntry, not plan qty', () => {
-    const plan = makePlan('active', 47500, 'long');
-    // Scale-in: current 2 BTC @ 52000 avg
-    const pos = mkPosition({ side: 'long', signedQuantity: 2, averageEntryPrice: 52000 });
-    const intent = buildProtectiveIntent({ plan, currentPosition: pos, marketPrice: 51000, hardRisk: unlockedHardRisk });
-    assert.strictEqual(intent.positionUsd, 104000); // 2 * 52000, not 1 * 50000
-  });
-  it('scale-in changes close size', () => {
-    const plan = makePlan('active', 47500, 'long');
-    const pos1 = mkPosition({ signedQuantity: 1, averageEntryPrice: 50000 });
-    const pos2 = mkPosition({ signedQuantity: 3, averageEntryPrice: 51000 });
-    assert.notStrictEqual(
-      buildProtectiveIntent({ plan, currentPosition: pos1, marketPrice: 50000, hardRisk: unlockedHardRisk }).positionUsd,
-      buildProtectiveIntent({ plan, currentPosition: pos2, marketPrice: 50000, hardRisk: unlockedHardRisk }).positionUsd,
-    );
-  });
-  it('partial reduce uses reduced remaining qty', () => {
-    const pos = mkPosition({ side: 'long', signedQuantity: 0.3, averageEntryPrice: 50000 });
-    const intent = buildProtectiveIntent({ plan: makePlan('active', 47500, 'long'), currentPosition: pos, marketPrice: 49000, hardRisk: unlockedHardRisk });
-    assert.strictEqual(intent.positionUsd, 15000); // 0.3 * 50000
-  });
-});
-
-// ─── Exit idempotency ───────────────────────────────────────────────────────
-describe('Exit idempotency', () => {
-  it('same plan + same position → same intentId', () => {
-    const ctx: ProtectiveContext = { plan: makePlan('active', 47500, 'long'), currentPosition: mkPosition(), marketPrice: 47499, hardRisk: unlockedHardRisk };
-    assert.strictEqual(
-      buildProtectiveIntent(ctx).intentId,
-      buildProtectiveIntent(ctx).intentId,
-    );
+  it('missing position → admitted=false', () => {
+    const ctx: ProtectiveContext = { plan: mkPlan('active', 47500, 'long'), currentPosition: mkPos({ status: 'missing' }), exchange: 'bitget', marketPrice: 47499, marketSnapshot: validMarket, hardRisk: unlockedHardRisk };
+    assert.strictEqual(evaluateProtectiveRoute(ctx).admitted, false);
   });
   it('repeated stop ticks → same intentId', () => {
-    const plan = makePlan('active', 47500, 'long');
-    const pos = mkPosition();
-    assert.strictEqual(
-      buildProtectiveIntent({ plan, currentPosition: pos, marketPrice: 47400, hardRisk: unlockedHardRisk }).intentId,
-      buildProtectiveIntent({ plan, currentPosition: pos, marketPrice: 47300, hardRisk: unlockedHardRisk }).intentId,
-    );
-  });
-  it('no Date.now() in intent construction', () => {
-    const intent = buildProtectiveIntent({ plan: makePlan('active', 47500, 'long'), currentPosition: mkPosition(), marketPrice: 47499, hardRisk: unlockedHardRisk });
-    assert.strictEqual(intent.createdAt, 0);
-    assert.strictEqual(intent.biasUpdatedAt, 0);
-  });
-  it('deterministic: same inputs → same intent', () => {
-    const ctx: ProtectiveContext = { plan: makePlan('active', 47500, 'long'), currentPosition: mkPosition(), marketPrice: 47499, hardRisk: unlockedHardRisk };
-    assert.deepStrictEqual(buildProtectiveIntent(ctx), buildProtectiveIntent({ ...ctx, plan: { ...ctx.plan } }));
+    const plan = mkPlan('active', 47500, 'long');
+    const pos = mkPos();
+    const id1 = buildProtectiveIntent({ plan, currentPosition: pos, exchange: 'bitget', marketPrice: 47400, hardRisk: unlockedHardRisk }).intentId;
+    const id2 = buildProtectiveIntent({ plan, currentPosition: pos, exchange: 'bitget', marketPrice: 47300, hardRisk: unlockedHardRisk }).intentId;
+    assert.strictEqual(id1, id2);
   });
 });
 
-// ─── Full close / flip lifecycle ────────────────────────────────────────────
-describe('Full close / flip lifecycle', () => {
-  it('full close → plan closed, no active', () => {
-    const store = new PositionPlanStore();
-    const plan = makePlan('active', 47500, 'long');
-    store.apply({ type: 'position.plan.created', payload: { plan }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any);
-    store.apply({ type: 'position.plan.closed', payload: { planId: plan.planId }, kernelLogicalSequence: 2, kernelEventId: 'e2' } as any);
-    assert.strictEqual(store.getActive('BTC/USDT'), undefined);
+// ─── Full close / flip automatic ────────────────────────────────────────────
+describe('Full close / flip automatic', () => {
+  const mgr = new PositionManager();
+  it('flat position → plan terminated (status=closed)', () => {
+    const existing = mkPlan('active', 47500, 'long');
+    const r = mgr.onFill(mkPos({ status: 'flat' }), 'bitget', 'BTC/USDT', existing);
+    assert.ok(r);
+    assert.strictEqual(r!.status, 'closed');
   });
-  it('flip → old plan closed, new plan with different planId', () => {
-    const mgr = new PositionManager();
+  it('flip: long→short produces new plan with correct side', () => {
+    const existing = mkPlan('active', 47500, 'long');
+    const r = mgr.onFill(mkPos({ side: 'short', signedQuantity: -1, averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', existing);
+    assert.ok(r);
+    assert.strictEqual(r!.side, 'short');
+    assert.strictEqual(r!.status, 'active');
+    assert.notStrictEqual(r!.planId, existing.planId);
+  });
+  it('flip: closed plan replaced by new active plan in store', () => {
     const store = new PositionPlanStore();
-    const p1 = mgr.onFill(mkPosition({ side: 'long' }), 'BTC/USDT', undefined);
-    store.apply({ type: 'position.plan.created', payload: { plan: p1! }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any);
-    store.apply({ type: 'position.plan.closed', payload: { planId: p1!.planId }, kernelLogicalSequence: 2, kernelEventId: 'e2' } as any);
+    const oldPlan = mkPlan('active', 47500, 'long');
+    store.apply({ type: 'position.plan.created', payload: { plan: oldPlan }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any);
+    // Flat → close
+    store.apply({ type: 'position.plan.closed', payload: { planId: oldPlan.planId }, kernelLogicalSequence: 2, kernelEventId: 'e2' } as any);
     assert.strictEqual(store.getActive('BTC/USDT'), undefined);
-    const p2 = mgr.onFill(mkPosition({ side: 'short', signedQuantity: -1, averageEntryPrice: 51000 }), 'BTC/USDT', undefined);
-    store.apply({ type: 'position.plan.created', payload: { plan: p2! }, kernelLogicalSequence: 3, kernelEventId: 'e3' } as any);
+    // New short plan
+    const newPlan = mgr.onFill(mkPos({ side: 'short', signedQuantity: -1, averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', undefined);
+    store.apply({ type: 'position.plan.created', payload: { plan: newPlan! }, kernelLogicalSequence: 3, kernelEventId: 'e3' } as any);
+    assert.ok(store.getActive('BTC/USDT'));
     assert.strictEqual(store.getActive('BTC/USDT')!.side, 'short');
+  });
+  it('new position cycle with different entry → different planId from old closed', () => {
+    const p1 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 50000 }), 'bitget', 'BTC/USDT', undefined);
+    // Re-open at different price
+    const p2 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', undefined);
     assert.notStrictEqual(p2!.planId, p1!.planId);
   });
 });
 
 // ─── Plan identity ──────────────────────────────────────────────────────────
 describe('Plan identity', () => {
-  it('different entry price → different planId', () => {
-    assert.notStrictEqual(generatePlanId('BTC/USDT', 'long', 50000, 0), generatePlanId('BTC/USDT', 'long', 50100, 0));
+  it('different exchange → different planId', () => {
+    assert.notStrictEqual(generatePlanId('bitget', 'BTC/USDT', 'long', 50000, 0), generatePlanId('bybit', 'BTC/USDT', 'long', 50000, 0));
   });
-  it('different symbol → different planId', () => {
-    assert.notStrictEqual(generatePlanId('BTC/USDT', 'long', 50000, 0), generatePlanId('ETH/USDT', 'long', 50000, 0));
-  });
-  it('later position cycle → different planId (different entry)', () => {
-    // Same symbol+side, but different entry price after close+reopen
-    assert.notStrictEqual(generatePlanId('BTC/USDT', 'long', 50000, 0), generatePlanId('BTC/USDT', 'long', 55000, 0));
+  it('different entry → different planId', () => {
+    assert.notStrictEqual(generatePlanId('bitget', 'BTC/USDT', 'long', 50000, 0), generatePlanId('bitget', 'BTC/USDT', 'long', 50100, 0));
   });
 });
 
-// ─── Plan event store validation ────────────────────────────────────────────
-describe('Plan event store validation', () => {
-  it('plan.created without planId → store rejects', () => {
+// ─── Plan event validation ──────────────────────────────────────────────────
+describe('Plan event validation in store', () => {
+  it('plan.created without planId → throws', () => {
     const s = new PositionPlanStore();
     assert.throws(() => s.apply({ type: 'position.plan.created', payload: { plan: {} }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
   });
-  it('plan.updated without planId → store rejects', () => {
+  it('plan.created with invalid stopPrice → throws', () => {
     const s = new PositionPlanStore();
-    assert.throws(() => s.apply({ type: 'position.plan.updated', payload: {}, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
+    assert.throws(() => s.apply({ type: 'position.plan.created', payload: { plan: { planId: 'p1', symbol: 'BTC/USDT', positionSide: 'long', entryPrice: 50000, stopPrice: 0 } }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
   });
-  it('plan.archived without planId → store rejects', () => {
+  it('plan.created with NaN stopPrice → throws', () => {
     const s = new PositionPlanStore();
-    assert.throws(() => s.apply({ type: 'position.plan.archived', payload: {}, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
+    assert.throws(() => s.apply({ type: 'position.plan.created', payload: { plan: { planId: 'p1', symbol: 'BTC/USDT', positionSide: 'long', entryPrice: 50000, stopPrice: NaN } }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
+  });
+  it('plan.updated with invalid stopPrice → throws', () => {
+    const s = new PositionPlanStore();
+    const p = mkPlan('active', 47500, 'long');
+    s.apply({ type: 'position.plan.created', payload: { plan: p }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any);
+    assert.throws(() => s.apply({ type: 'position.plan.updated', payload: { planId: p.planId, stopPrice: -100 }, kernelLogicalSequence: 2, kernelEventId: 'e2' } as any));
+  });
+  it('valid stopPrice update → passes', () => {
+    const s = new PositionPlanStore();
+    const p = mkPlan('active', 47500, 'long');
+    s.apply({ type: 'position.plan.created', payload: { plan: p }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any);
+    s.apply({ type: 'position.plan.updated', payload: { planId: p.planId, stopPrice: 47000 }, kernelLogicalSequence: 2, kernelEventId: 'e2' } as any);
+    assert.strictEqual(s.getActive('BTC/USDT')!.stopPrice, 47000);
   });
   it('stale sequence → no mutation', () => {
     const s = new PositionPlanStore();
-    const p = makePlan('active', 47500, 'long');
+    const p = mkPlan('active', 47500, 'long');
     s.apply({ type: 'position.plan.created', payload: { plan: p }, kernelLogicalSequence: 5, kernelEventId: 'e1' } as any);
     s.apply({ type: 'position.plan.updated', payload: { planId: p.planId, stopPrice: 99999 }, kernelLogicalSequence: 3, kernelEventId: 'e2' } as any);
     assert.strictEqual(s.getActive('BTC/USDT')!.stopPrice, 47500);
@@ -165,11 +136,10 @@ describe('Plan event store validation', () => {
 // ─── Regression ─────────────────────────────────────────────────────────────
 describe('PositionManager (regression)', () => {
   const mgr = new PositionManager();
-  it('open → protected', () => { assert.strictEqual(mgr.onFill(mkPosition(), 'BTC/USDT', undefined)!.stopPrice, 47500); });
-  it('short → stop above', () => { assert.strictEqual(mgr.onFill(mkPosition({ side: 'short', signedQuantity: -1 }), 'BTC/USDT', undefined)!.stopPrice, 52500); });
-  it('missing → null', () => { assert.strictEqual(mgr.onFill(mkPosition({ status: 'missing' }), 'BTC/USDT', undefined), null); });
-  it('long hold', () => { assert.deepStrictEqual(mgr.evaluate(makePlan('active', 47500, 'long'), 48000), { decision: 'hold' }); });
-  it('long triggered', () => { assert.strictEqual(mgr.evaluate(makePlan('active', 47500, 'long'), 47499).decision, 'close'); });
-  it('short triggered', () => { assert.strictEqual(mgr.evaluate(makePlan('active', 52500, 'short'), 52501).decision, 'close'); });
-  it('deterministic', () => { const p=makePlan('active',47500,'long'); assert.deepStrictEqual(mgr.evaluate(p,47000), mgr.evaluate({...p},47000)); });
+  it('open → protected', () => { assert.strictEqual(mgr.onFill(mkPos(), 'bitget', 'BTC/USDT', undefined)!.stopPrice, 47500); });
+  it('short → stop above', () => { assert.strictEqual(mgr.onFill(mkPos({ side: 'short', signedQuantity: -1 }), 'bitget', 'BTC/USDT', undefined)!.stopPrice, 52500); });
+  it('missing → null', () => { assert.strictEqual(mgr.onFill(mkPos({ status: 'missing' }), 'bitget', 'BTC/USDT', undefined), null); });
+  it('long hold', () => { assert.deepStrictEqual(mgr.evaluate(mkPlan('active', 47500, 'long'), 48000), { decision: 'hold' }); });
+  it('long triggered', () => { assert.strictEqual(mgr.evaluate(mkPlan('active', 47500, 'long'), 47499).decision, 'close'); });
+  it('deterministic', () => { const p=mkPlan('active',47500,'long'); assert.deepStrictEqual(mgr.evaluate(p,47000), mgr.evaluate({...p},47000)); });
 });

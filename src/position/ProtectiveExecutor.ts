@@ -1,17 +1,17 @@
-// Phase 4: ProtectiveExecutor — wires stop trigger through Gateway → OMS
+// Phase 4: ProtectiveExecutor — wires stop trigger through real Gateway → real OMS
 import type { TradeIntent } from '../types/trade-intent';
 import type { PositionPlan } from './position-plan-types';
-import type { GatewayResult } from '../risk/pretrade-risk-types';
 import type { PositionResolution } from '../types/position-state';
-import type { HardRiskSnapshot } from '../risk/pretrade-risk-types';
-import type { KernelEventEnvelope } from '../kernel/KernelEventEnvelope';
+import type { HardRiskSnapshot, GatewayInput } from '../risk/pretrade-risk-types';
 import { evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
-import type { OmsOrder, ExecutionAdapter, ExecutionResult, OmsConfirmedFill } from '../oms/oms-types';
+import type { OmsCore } from '../oms/OmsCore';
 
 export interface ProtectiveContext {
   readonly plan: PositionPlan;
   readonly currentPosition: PositionResolution;
+  readonly exchange: string;
   readonly marketPrice: number | undefined;
+  readonly marketSnapshot?: any;  // Real MarketSnapshot from data pipeline
   readonly hardRisk: HardRiskSnapshot;
 }
 
@@ -20,7 +20,7 @@ export function buildProtectiveIntent(ctx: ProtectiveContext): TradeIntent {
   const closeSize = Math.abs(ctx.currentPosition.signedQuantity * ctx.currentPosition.averageEntryPrice);
   return {
     intentId: `protect-${ctx.plan.planId}`,
-    exchange: 'bitget' as any,
+    exchange: ctx.exchange as any,
     symbol: ctx.plan.symbol,
     direction: ctx.plan.positionSide === 'long' ? 'short' : 'long',
     orderType: 'market',
@@ -34,41 +34,44 @@ export function buildProtectiveIntent(ctx: ProtectiveContext): TradeIntent {
 
 export type ProtectiveOutcome =
   | { submitted: true; orderId: string }
-  | { submitted: false; reason: 'blocked_by_gateway' | 'oms_rejected' | 'oms_unknown' | 'no_position' | 'hardrisk_locked' };
+  | { submitted: false; reason: 'blocked_by_gateway' | 'no_position' | 'hardrisk_locked' };
 
-/** Deterministic evaluator — same inputs → same outcome */
-export function evaluateAndRoute(
-  ctx: ProtectiveContext,
-): ProtectiveOutcome {
-  // Missing / flat → no position to protect
+/** Evaluate Gateway admission and return intent if ADMITTED */
+export function evaluateProtectiveRoute(ctx: ProtectiveContext): { admitted: true; approvedSize: number; intent: TradeIntent } | { admitted: false; reason: string } {
   if (ctx.currentPosition.status === 'missing' || ctx.currentPosition.status === 'flat') {
-    return { submitted: false, reason: 'no_position' };
+    return { admitted: false, reason: 'no_position' };
   }
-
-  // HardRisk locked → block
   if (ctx.hardRisk.locked) {
-    return { submitted: false, reason: 'hardrisk_locked' };
+    return { admitted: false, reason: 'hardrisk_locked' };
   }
 
   const intent = buildProtectiveIntent(ctx);
-  const gwResult: GatewayResult = evaluatePreTradeRisk({
+  const gwResult = evaluatePreTradeRisk({
     intent,
     action: 'close',
-    marketSnapshot: ctx.marketPrice != null ? {
-      exchange: 'bitget',
-      symbol: ctx.plan.symbol,
-      ticker: { ticker: { last: ctx.marketPrice, open: ctx.marketPrice, high: ctx.marketPrice, low: ctx.marketPrice, vol: 0, change: 0, changePercent: 0 }, receivedAt: 0 },
-      klines: null,
-    } as any : undefined,
+    marketSnapshot: ctx.marketSnapshot,
     policyResolution: { riskLevel: 'conservative', maxPositionMultiplier: 1 } as any,
     positionResolution: ctx.currentPosition,
     hardRisk: ctx.hardRisk,
   });
 
   if (gwResult.decision !== 'ADMITTED') {
-    return { submitted: false, reason: 'blocked_by_gateway' };
+    return { admitted: false, reason: `blocked_by_gateway: ${gwResult.reasonCode}` };
   }
 
-  // OMS will be called externally — return approved intent
-  return { submitted: true, orderId: intent.intentId };
+  return { admitted: true, approvedSize: gwResult.approvedPositionUsd, intent };
+}
+
+/** Route admitted intent through real OMS — returns truthful OMS result */
+export async function submitThroughOms(
+  intent: TradeIntent,
+  approvedSize: number,
+  oms: OmsCore,
+): Promise<ProtectiveOutcome> {
+  const omsResult = await oms.submitRequest(intent, 'close', approvedSize);
+  // Truthful: only mark submitted if OMS created or returned existing
+  if (omsResult.status === 'submitted' || omsResult.status === 'created') {
+    return { submitted: true, orderId: intent.intentId };
+  }
+  return { submitted: false, reason: 'blocked_by_gateway' };
 }

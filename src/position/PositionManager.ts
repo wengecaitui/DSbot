@@ -18,30 +18,31 @@ export class PositionManager {
     this.stopConfig = config ?? DEFAULT_STOP_CONFIG;
   }
 
-  /** Called on execution.fill.confirmed — creates/updates/archives plan */
-  onFill(position: PositionResolution, symbol: string, plan: PositionPlan | undefined): PositionPlan | null {
+  /** Production: fill-driven lifecycle — create/update/terminate plan */
+  onFill(position: PositionResolution, exchange: string, symbol: string, plan: PositionPlan | undefined): PositionPlan | null {
     if (position.status === 'missing') return null;
 
+    // Flat → terminate active plan
     if (position.status === 'flat') {
       if (!plan || plan.status !== 'active') return null;
-      return plan;
+      return { ...plan, status: 'closed' as const };
     }
 
-    if (!plan || plan.status !== 'active') {
-      const side = position.side as 'long' | 'short';
-      const stopPrice = computeStopPrice(position.averageEntryPrice, side, this.stopConfig.stopPct);
+    const side = position.side as 'long' | 'short';
+    const stopPrice = computeStopPrice(position.averageEntryPrice, side, this.stopConfig.stopPct);
+
+    // No active plan or plan for wrong side → create new plan (flip)
+    if (!plan || plan.status !== 'active' || plan.positionSide !== side) {
       if (!Number.isFinite(stopPrice)) return null;
-      const planId = generatePlanId(symbol, side, position.averageEntryPrice, 0);
-      const newPlan: PositionPlan = {
+      const planId = generatePlanId(exchange, symbol, side, position.averageEntryPrice, 0);
+      return {
         planId, symbol, positionSide: side, side, entryPrice: position.averageEntryPrice,
         entryQuantity: Math.abs(position.signedQuantity), stopPrice,
         status: 'active', planVersion: 0, sourceKernelEventId: '',
       };
-      return newPlan;
     }
 
-    const side = position.side as 'long' | 'short';
-    const newStopPrice = computeStopPrice(position.averageEntryPrice, side, this.stopConfig.stopPct);
+    // Scale-in → update stop price if entry changed
     return newStopPrice !== plan.stopPrice && Number.isFinite(newStopPrice)
       ? { ...plan, stopPrice: newStopPrice } : null;
   }
@@ -60,6 +61,5 @@ export class PositionManager {
       : { decision: 'hold' };
   }
 
-  /** Ensure MFE/MAE or other analytics are not embedded here */
   getStopConfig(): StopConfig { return { ...this.stopConfig }; }
 }
