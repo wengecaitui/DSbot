@@ -29,7 +29,7 @@ export interface RuntimeState {
 }
 
 export function createPositionManagerRuntime(config: PositionManagerRuntimeConfig) {
-  const positionManager = new PositionManager(config.stopConfig?.stopPct ?? 0.05);
+  const positionManager = new PositionManager({ stopPct: config.stopConfig?.stopPct ?? 0.05 });
   const state: RuntimeState = { mode: 'replay', submittedIntents: new Set() };
 
   // ── Fail-closed: no OMS, no live protection ──────────────────────────────
