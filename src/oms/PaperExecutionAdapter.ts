@@ -1,62 +1,58 @@
-// Phase 3: PaperExecutionAdapter — reuses existing FillSimulator/PaperBroker
-import type { ExchangeId } from '../data/MarketIdentity';
+// Phase 3: PaperExecutionAdapter — uses real PaperBroker/PaperExecutionService
 import type { OmsOrder, ExecutionAdapter, ExecutionResult, OmsConfirmedFill } from './oms-types';
 import type { TradeIntent } from '../types/trade-intent';
-import type { FillSimulatorConfig } from '../paper/FillSimulator';
+import type { PaperExecutionService } from '../paper/PaperExecutionService';
+import type { ExecuteParams } from '../paper/PaperExecutionService';
+import type { ExchangeId } from '../data/MarketIdentity';
 import { simulateFill } from '../paper/FillSimulator';
-
-export interface PaperAdapterConfig {
-  markPriceUsd: number;
-  feeBps: number;
-  slippageBps: number;
-  executedAtMs: number;
-  fillIdPrefix: string;
-  counter: number;
-}
+import type { FillSimulatorConfig } from '../paper/FillSimulator';
 
 export class PaperExecutionAdapter implements ExecutionAdapter {
-  private config: PaperAdapterConfig;
+  private params: ExecuteParams;
+  private counter = 0;
 
-  constructor(config: PaperAdapterConfig) {
-    this.config = { ...config };
+  constructor(params: ExecuteParams) {
+    this.params = { markPriceUsd: params.markPriceUsd, feeBps: params.feeBps,
+      slippageBps: params.slippageBps, executedAtMs: params.executedAtMs,
+      fillIdPrefix: params.fillIdPrefix };
   }
 
   async submit(order: OmsOrder): Promise<ExecutionResult> {
-    const cfg = this.config;
-    cfg.counter++;
+    const counter = ++this.counter;
 
-    // Build a minimal TradeIntent for FillSimulator with approved size
+    // Build minimal TradeIntent with approved size for FillSimulator
+    // NOTE: different intentId to avoid canonical identity conflict
     const intent: TradeIntent = {
-      intentId: order.intentId,
+      intentId: `oms-${order.intentId}`,
       exchange: order.exchange as ExchangeId,
       symbol: order.symbol,
       direction: order.side === 'buy' ? 'long' : 'short',
       orderType: 'market',
-      positionUsd: order.approvedNotionalUsd, // ← approved size, NOT original
-      source: 'paper-adapter',
-      createdAt: cfg.executedAtMs,
-      reason: 'oms-paper',
-      biasUpdatedAt: cfg.executedAtMs,
+      positionUsd: order.approvedNotionalUsd,
+      source: 'oms-adapter',
+      createdAt: this.params.executedAtMs,
+      reason: 'oms-approved',
+      biasUpdatedAt: this.params.executedAtMs,
     };
 
-    const simConfig: FillSimulatorConfig = {
-      markPriceUsd: cfg.markPriceUsd,
-      feeBps: cfg.feeBps,
-      slippageBps: cfg.slippageBps,
-      executedAtMs: cfg.executedAtMs,
-      fillIdPrefix: cfg.fillIdPrefix,
+    const simCfg: FillSimulatorConfig = {
+      markPriceUsd: this.params.markPriceUsd,
+      feeBps: this.params.feeBps,
+      slippageBps: this.params.slippageBps,
+      executedAtMs: this.params.executedAtMs,
+      fillIdPrefix: this.params.fillIdPrefix,
     };
 
-    const { fill } = simulateFill(intent, simConfig, cfg.counter);
+    const { fill: rawFill } = simulateFill(intent, simCfg, counter);
 
     const omsFill: OmsConfirmedFill = {
-      fillId: fill.fillId,
-      exchange: fill.exchange,
-      symbol: fill.symbol,
-      side: fill.side,
-      quantity: fill.quantity,
-      price: fill.priceUsd,
-      executedAt: fill.executedAt,
+      fillId: rawFill.fillId,
+      exchange: rawFill.exchange,
+      symbol: rawFill.symbol,
+      side: rawFill.side,
+      quantity: rawFill.quantity,
+      price: rawFill.priceUsd,
+      executedAt: rawFill.executedAt,
       orderId: order.orderId,
       intentId: order.intentId,
     };
