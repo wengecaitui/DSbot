@@ -30,7 +30,7 @@ export async function executeProtectiveClose(
   const gwResult = gatewayFn({
     action: 'close',
     marketSnapshot: undefined,
-    policyResolution: { riskLevel: 'normal', maxPositionMultiplier: 1, allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] },
+    policyResolution: { riskLevel: 'conservative', maxPositionMultiplier: 1, allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [], allowNewEntries: false } as any,
     positionResolution: { status: 'open' as const, snapshot: null, side: plan.positionSide, signedQuantity: plan.entryQuantity, averageEntryPrice: plan.entryPrice },
     hardRisk: { exchange: 'bitget' as any, locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity },
   });
