@@ -1,7 +1,6 @@
 // Phase 4B: PositionManagerRuntime — production fill+market orchestrator
 import type { TradingKernel } from '../kernel/TradingKernel';
 import type { KernelPositionStateStore } from '../kernel/KernelPositionStateStore';
-import type { MarketSnapshotStore } from '../runtime/market/MarketSnapshotStore';
 import { PositionManager } from './PositionManager';
 import { PositionPlanStore } from './PositionPlanStore';
 import { evaluateProtectiveRoute } from './ProtectiveExecutor';
@@ -17,7 +16,7 @@ export interface PositionManagerRuntimeConfig {
   readonly kernel: TradingKernel;
   readonly positionStore: KernelPositionStateStore;
   readonly planStore: PositionPlanStore;
-  readonly marketStore: MarketSnapshotStore;
+  readonly marketStore?: any;
   readonly hardRisk: () => HardRiskSnapshot;
   readonly oms?: OmsCore;
   readonly stopConfig?: { stopPct: number };
@@ -29,7 +28,7 @@ export interface RuntimeState {
 }
 
 export function createPositionManagerRuntime(config: PositionManagerRuntimeConfig) {
-  const positionManager = new PositionManager({ stopPct: config.stopConfig?.stopPct ?? 0.05 });
+  const positionManager = new PositionManager({ stopPct: config.stopConfig?.stopPct ?? 0.05, enabled: true });
   const state: RuntimeState = { mode: 'replay', submittedIntents: new Set() };
 
   // ── Fail-closed: no OMS, no live protection ──────────────────────────────
