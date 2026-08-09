@@ -333,7 +333,7 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
         appliedPlanSnapshot = snapshotPlanEntries(planAtStart);
 
         // Phase 4B: Activate protection at LIVE_READY boundary
-        if (opts.positionProtection) opts.positionProtection.setMode('live');
+        if (options.positionProtection) options.positionProtection.setMode('live');
 
         // Only mark applied if Universe hasn't advanced past this version
         // during the async start window.
@@ -355,7 +355,7 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
       pendingStartEpoch = -1;
       pendingApplyPromise = null;
       pendingCollectorPlan = null;
-      if (opts.positionProtection) opts.positionProtection.stop();
+      if (options.positionProtection) options.positionProtection.stop();
       marketData.stop();
       slowPipeline.shutdown();
     },
