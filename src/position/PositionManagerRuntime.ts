@@ -67,7 +67,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       const fill = envelope.payload?.fill;
       if (!fill) return;
 
-      const exchange = fill.exchange;
+      const exchange = fill.exchange as any;
       const symbol = fill.symbol;
       // Fail-closed: missing exchange provenance
       if (typeof exchange !== 'string' || !exchange) return;
@@ -117,7 +117,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       if (!ticker) return;
 
       const symbol = ticker.symbol ?? ticker.instId;
-      const exchange = ticker.exchange;
+      const exchange = ticker.exchange as any;
       // Fail-closed: missing exchange provenance
       if (typeof exchange !== 'string' || !exchange) return;
 
@@ -136,7 +136,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       // Idempotency: one economic exit per plan incarnation
       if (submittedIntents.has(plan.planId)) return;
 
-      const marketSnapshot = config.marketStore?.get?.(exchange, symbol) as any;
+      const marketSnapshot = config.marketStore?.getSnapshot?.(exchange, symbol) as any;
 
       const ctx: ProtectiveContext = {
         plan,
