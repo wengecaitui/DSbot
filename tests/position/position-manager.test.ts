@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { PositionManager } from '../../src/position/PositionManager';
 import { PositionPlanStore } from '../../src/position/PositionPlanStore';
 import { generatePlanId } from '../../src/position/plan-id';
+import { createTradingKernel } from '../../src/kernel/TradingKernel';
 import { buildProtectiveIntent, evaluateProtectiveRoute } from '../../src/position/ProtectiveExecutor';
 import type { ProtectiveContext } from '../../src/position/ProtectiveExecutor';
 import type { PositionPlan } from '../../src/position/position-plan-types';
@@ -146,4 +147,43 @@ describe('PositionManager (regression)', () => {
   it('long hold', () => { assert.deepStrictEqual(mgr.evaluate(mkPlan('active', 47500, 'long'), 48000), { decision: 'hold' }); });
   it('long triggered', () => { assert.strictEqual(mgr.evaluate(mkPlan('active', 47500, 'long'), 47499).decision, 'close'); });
   it('deterministic', () => { const p=mkPlan('active',47500,'long'); assert.deepStrictEqual(mgr.evaluate(p,47000), mgr.evaluate({...p},47000)); });
+});
+
+// ─── Phase 4A: pre-journal validation through real TradingKernel ───────────
+describe('Pre-journal plan-update validation (real kernel)', () => {
+  const BITGET = 'bitget' as any;
+  it('invalid stopPrice NaN → rejected before journal append', async () => {
+    const kernel = createTradingKernel({ exchange: BITGET });
+    // Create a valid plan first
+    const plan = mkPlan('active', 47500, 'long');
+    await kernel.publish('position.plan.created', { plan });
+    const seqBefore = kernel.journal().readFromLogicalSequence(1).length;
+    // Attempt invalid update (synchronous publish)
+    assert.throws(() => kernel.publish('position.plan.updated', { planId: plan.planId, stopPrice: NaN }));
+    assert.strictEqual(kernel.journal().readFromLogicalSequence(1).length, seqBefore, 'journal unchanged');
+  });
+  it('invalid stopPrice 0 → rejected before journal append', async () => {
+    const kernel = createTradingKernel({ exchange: BITGET });
+    const plan = mkPlan('active', 47500, 'long');
+    await kernel.publish('position.plan.created', { plan });
+    const seqBefore = kernel.journal().readFromLogicalSequence(1).length;
+    assert.throws(() => kernel.publish('position.plan.updated', { planId: plan.planId, stopPrice: 0 }));
+    assert.strictEqual(kernel.journal().readFromLogicalSequence(1).length, seqBefore, 'journal unchanged');
+  });
+  it('invalid stopPrice -5 → rejected before journal append', async () => {
+    const kernel = createTradingKernel({ exchange: BITGET });
+    const plan = mkPlan('active', 47500, 'long');
+    await kernel.publish('position.plan.created', { plan });
+    const seqBefore = kernel.journal().readFromLogicalSequence(1).length;
+    assert.throws(() => kernel.publish('position.plan.updated', { planId: plan.planId, stopPrice: -5 }));
+    assert.strictEqual(kernel.journal().readFromLogicalSequence(1).length, seqBefore, 'journal unchanged');
+  });
+  it('valid stopPrice update → journal accepted', async () => {
+    const kernel = createTradingKernel({ exchange: BITGET });
+    const plan = mkPlan('active', 47500, 'long');
+    await kernel.publish('position.plan.created', { plan });
+    const seqBefore = kernel.journal().readFromLogicalSequence(1).length;
+    await kernel.publish('position.plan.updated', { planId: plan.planId, stopPrice: 47000 });
+    assert.strictEqual(kernel.journal().readFromLogicalSequence(1).length, seqBefore + 1, 'journal advanced');
+  });
 });

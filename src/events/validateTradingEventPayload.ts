@@ -118,7 +118,12 @@ export function validateTradingEventPayload(
   }
 
   if (type === 'position.plan.updated' || type === 'position.plan.archived' || type === 'position.plan.closed') {
-    const p = payload as { planId?: unknown };
+    const p = payload as { planId?: unknown; stopPrice?: unknown };
     if (typeof p.planId !== 'string' || !p.planId) throw new Error(`${type}: planId required`);
+    // Phase 4A: position.plan.updated stopPrice must be valid before journal append
+    if (type === 'position.plan.updated' && p.stopPrice !== undefined) {
+      if (typeof p.stopPrice !== 'number' || !Number.isFinite(p.stopPrice) || p.stopPrice <= 0)
+        throw new Error('position.plan.updated: invalid stopPrice');
+    }
   }
 }
