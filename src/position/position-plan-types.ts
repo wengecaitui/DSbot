@@ -13,6 +13,7 @@ export const DEFAULT_STOP_CONFIG: StopConfig = {
 
 export interface PositionPlan {
   readonly planId: string;
+  readonly exchange: string;
   readonly symbol: string;
   readonly positionSide: 'long' | 'short';
   /** Side that opened the position for this plan */

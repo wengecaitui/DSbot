@@ -65,8 +65,10 @@ export class PositionPlanStore {
     throw new Error(`PLAN_STORE: unknown event ${type}`);
   }
 
-  getActive(symbol: string): PositionPlan | undefined {
-    for (const r of this.plans.values()) if (r.snapshot.symbol === symbol && r.snapshot.status === 'active') return r.snapshot;
+  getActive(exchange: string, symbol: string): PositionPlan | undefined {
+    for (const r of this.plans.values())
+      if (r.snapshot.exchange === exchange && r.snapshot.symbol === symbol && r.snapshot.status === 'active')
+        return r.snapshot;
     return undefined;
   }
 
