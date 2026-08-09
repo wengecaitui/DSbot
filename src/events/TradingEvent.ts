@@ -11,6 +11,7 @@ import type { CompiledPolicy } from '../types/policy-snapshot';
 import type { ConfirmedFill } from '../types/confirmed-fill';
 import type { ConfirmedPositionBaseline } from '../types/position-state';
 import type { OrderCreatedPayload, OrderStatusPayload } from '../oms/oms-events';
+import type { PositionPlan } from '../position/position-plan-types';
 
 export interface TradingEventPayloadMap {
   'market.ticker.updated':       { ticker: WsTicker; receivedAt: number };
@@ -23,6 +24,10 @@ export interface TradingEventPayloadMap {
   'order.submitted':             OrderStatusPayload;
   'order.rejected':              OrderStatusPayload;
   'order.submission.unknown':    OrderStatusPayload;
+  'position.plan.created':      { plan: PositionPlan };
+  'position.plan.updated':      { planId: string; stopPrice?: number };
+  'position.plan.archived':     { planId: string };
+  'position.plan.closed':       { planId: string };
 }
 
 export type TradingEventType = keyof TradingEventPayloadMap;
