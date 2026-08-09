@@ -104,4 +104,21 @@ export function validateTradingEventPayload(
     if (typeof p.orderId !== 'string' || !p.orderId) throw new Error(`${type}: orderId required`);
     if (typeof p.reason !== 'string' || !p.reason) throw new Error(`${type}: reason required`);
   }
+
+  // Phase 4: position.plan.* pre-journal validation
+  if (type === 'position.plan.created') {
+    const p = payload as { plan?: Record<string, unknown> };
+    if (!p || !p.plan) throw new Error('position.plan.created requires plan payload');
+    const pl = p.plan;
+    if (typeof pl.planId !== 'string' || !pl.planId) throw new Error('position.plan.created: planId required');
+    if (typeof pl.symbol !== 'string' || !pl.symbol) throw new Error('position.plan.created: symbol required');
+    if (pl.positionSide !== 'long' && pl.positionSide !== 'short') throw new Error('position.plan.created: invalid positionSide');
+    if (typeof pl.entryPrice !== 'number' || !Number.isFinite(pl.entryPrice) || pl.entryPrice <= 0) throw new Error('position.plan.created: invalid entryPrice');
+    if (typeof pl.stopPrice !== 'number' || !Number.isFinite(pl.stopPrice) || pl.stopPrice <= 0) throw new Error('position.plan.created: invalid stopPrice');
+  }
+
+  if (type === 'position.plan.updated' || type === 'position.plan.archived' || type === 'position.plan.closed') {
+    const p = payload as { planId?: unknown };
+    if (typeof p.planId !== 'string' || !p.planId) throw new Error(`${type}: planId required`);
+  }
 }
