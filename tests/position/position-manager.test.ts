@@ -17,7 +17,7 @@ function mkPos(overrides?: Partial<PositionResolution>): PositionResolution {
   return { status: 'open', snapshot: null, side: 'long', signedQuantity: 1, averageEntryPrice: 50000, ...overrides } as PositionResolution;
 }
 function mkPlan(status: string, stopPrice: number, side: 'long' | 'short'): PositionPlan {
-  return { planId: generatePlanId('bitget', 'BTC/USDT', side, 50000, 0), symbol: 'BTC/USDT',
+  return { planId: generatePlanId('bitget', 'BTC/USDT', side, 50000, 0), exchange: 'bitget', symbol: 'BTC/USDT',
     positionSide: side, side, entryPrice: 50000, entryQuantity: 1, stopPrice,
     status: status as any, planVersion: 0, sourceKernelEventId: 'e0' };
 }
@@ -71,11 +71,11 @@ describe('Full close / flip automatic', () => {
     const oldPlan = mkPlan('active', 47500, 'long');
     store.apply({ type: 'position.plan.created', payload: { plan: oldPlan }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any);
     store.apply({ type: 'position.plan.closed', payload: { planId: oldPlan.planId }, kernelLogicalSequence: 2, kernelEventId: 'e2' } as any);
-    assert.strictEqual(store.getActive('BTC/USDT'), undefined);
+    assert.strictEqual(store.getActive('bitget', 'BTC/USDT'), undefined);
     const newPlan = mgr.onFill(mkPos({ side: 'short', signedQuantity: -1, averageEntryPrice: 51000 }), 'bitget', 'BTC/USDT', 3, undefined);
     store.apply({ type: 'position.plan.created', payload: { plan: newPlan! }, kernelLogicalSequence: 3, kernelEventId: 'e3' } as any);
-    assert.ok(store.getActive('BTC/USDT'));
-    assert.strictEqual(store.getActive('BTC/USDT')!.side, 'short');
+    assert.ok(store.getActive('bitget', 'BTC/USDT'));
+    assert.strictEqual(store.getActive('bitget', 'BTC/USDT')!.side, 'short');
   });
   it('same-price reopen → distinct planId (different fillSequence)', () => {
     const p1 = mgr.onFill(mkPos({ side: 'long', averageEntryPrice: 50000 }), 'bitget', 'BTC/USDT', 1, undefined);
@@ -110,11 +110,11 @@ describe('Plan event validation in store', () => {
   });
   it('plan.created with invalid stopPrice → throws', () => {
     const s = new PositionPlanStore();
-    assert.throws(() => s.apply({ type: 'position.plan.created', payload: { plan: { planId: 'p1', symbol: 'BTC/USDT', positionSide: 'long', entryPrice: 50000, stopPrice: 0 } }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
+    assert.throws(() => s.apply({ type: 'position.plan.created', payload: { plan: { planId: 'p1', exchange: 'bitget', symbol: 'BTC/USDT', positionSide: 'long', entryPrice: 50000, stopPrice: 0 } }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
   });
   it('plan.created with NaN stopPrice → throws', () => {
     const s = new PositionPlanStore();
-    assert.throws(() => s.apply({ type: 'position.plan.created', payload: { plan: { planId: 'p1', symbol: 'BTC/USDT', positionSide: 'long', entryPrice: 50000, stopPrice: NaN } }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
+    assert.throws(() => s.apply({ type: 'position.plan.created', payload: { plan: { planId: 'p1', exchange: 'bitget', symbol: 'BTC/USDT', positionSide: 'long', entryPrice: 50000, stopPrice: NaN } }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any));
   });
   it('plan.updated with invalid stopPrice → throws', () => {
     const s = new PositionPlanStore();
@@ -127,14 +127,14 @@ describe('Plan event validation in store', () => {
     const p = mkPlan('active', 47500, 'long');
     s.apply({ type: 'position.plan.created', payload: { plan: p }, kernelLogicalSequence: 1, kernelEventId: 'e1' } as any);
     s.apply({ type: 'position.plan.updated', payload: { planId: p.planId, stopPrice: 47000 }, kernelLogicalSequence: 2, kernelEventId: 'e2' } as any);
-    assert.strictEqual(s.getActive('BTC/USDT')!.stopPrice, 47000);
+    assert.strictEqual(s.getActive('bitget', 'BTC/USDT')!.stopPrice, 47000);
   });
   it('stale sequence → no mutation', () => {
     const s = new PositionPlanStore();
     const p = mkPlan('active', 47500, 'long');
     s.apply({ type: 'position.plan.created', payload: { plan: p }, kernelLogicalSequence: 5, kernelEventId: 'e1' } as any);
     s.apply({ type: 'position.plan.updated', payload: { planId: p.planId, stopPrice: 99999 }, kernelLogicalSequence: 3, kernelEventId: 'e2' } as any);
-    assert.strictEqual(s.getActive('BTC/USDT')!.stopPrice, 47500);
+    assert.strictEqual(s.getActive('bitget', 'BTC/USDT')!.stopPrice, 47500);
   });
 });
 
