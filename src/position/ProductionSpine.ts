@@ -140,10 +140,17 @@ export async function executeThroughGateway(
   const positionResolved = positionStore.resolve(exchange, symbol);
   const hardRiskSnapshot = spine.privateConfig.hardRisk();
 
-  // Resolve position for Gateway (flat = never traded)
-  const pos = positionResolved?.status === 'open'
+  // Resolve position for Gateway — preserve factual semantics
+  // missing + action='open' → flat (trusted baseline: first trade is always allowed from nothing)
+  // missing + action='close' → missing (fail-closed: cannot close what was never opened)
+  const rawStatus = positionResolved?.status;
+  const isOpen = rawStatus === 'open';
+  const effectiveStatus: 'open' | 'flat' | 'missing' = isOpen ? 'open'
+    : action === 'open' ? 'flat'
+    : rawStatus === 'missing' ? 'missing' : 'flat';
+  const pos = isOpen
     ? { ...positionResolved, status: 'open' as const }
-    : { ...positionResolved, status: 'flat' as const, side: 'flat' as const, signedQuantity: 0, averageEntryPrice: 0, snapshot: null };
+    : { snapshot: null, status: effectiveStatus, side: 'flat' as const, signedQuantity: 0, averageEntryPrice: 0 };
 
   const gatewayInput: GatewayInput = {
     intent,

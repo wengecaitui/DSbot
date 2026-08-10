@@ -76,26 +76,28 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
   });
 
   // ── 4. Protective stop breach → protective close through Gateway ──────────
-  it('protective stop breach → Gateway → OMS → close fill', async () => {
+  it('protective stop breach → factual fill at breached price → position reduced', async () => {
     await init();
     // Open position
     const openIntent = makeIntent('prot-open', 'BTC/USDT', 'long', 5000);
     await executeThroughGateway(spine, openIntent, 'open', 5000);
     await new Promise(r => setTimeout(r, 100));
 
-    // Set stop at 47500 (5% below entry). Then publish market tick at 47000 (breached)
+    const before = spine.positionStore.resolve('bitget', 'BTC/USDT');
+    const beforeQty = before?.signedQuantity ?? 0;
+    assert.ok(beforeQty > 0, `position open before breach: qty=${beforeQty}`);
+
+    // Breach stop at 47000 (entry at 50000, stop at 47500 → 47000 < 47500 breached)
     await spine.kernel.publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 47000, bestBid: 46999, bestAsk: 47001, volume24h: 100, high24h: 48000, low24h: 46000, ts: Date.now() },
       receivedAt: Date.now(),
     });
     await new Promise(r => setTimeout(r, 800));
 
-    // Position should be reduced after protective stop
-    const pos = spine.positionStore.resolve('bitget', 'BTC/USDT');
-    assert.ok(pos, 'position still exists');
-    // Protection submitted at least once
-    const submitted = spine.protection.getSubmittedCount();
-    assert.ok(submitted > 0, `protection submitted ${submitted} orders`);
+    const after = spine.positionStore.resolve('bitget', 'BTC/USDT');
+    const afterQty = after?.signedQuantity ?? 0;
+    assert.ok(afterQty < beforeQty, `position reduced: ${beforeQty} → ${afterQty}`);
+    assert.ok(spine.protection.getSubmittedCount() > 0, 'protection submitted orders');
   });
 
   // ── 5. Risk rejection → zero OMS submission ───────────────────────────────
@@ -107,5 +109,30 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     assert.strictEqual(result.admitted, false, 'Gateway rejected');
     const after = spine.protection.getSubmittedCount();
     assert.strictEqual(after, before, 'no OMS submission for rejected intent');
+  });
+
+  // ── 6. Production market bridge: EventBus → kernel ─────────────────────────
+  it('production market bridge → kernel → store snapshot', async () => {
+    await init();
+    const { bridgeMarketToKernel } = require('../../src/position/MarketBridge');
+    const { TradingEventBus } = require('../../src/events/TradingEventBus');
+
+    const bus = new TradingEventBus();
+    const unbridge = bridgeMarketToKernel(bus, spine.kernel);
+
+    // Emit market tick through EventBus (simulating production collector)
+    (bus as any).publish('market.ticker.updated', {
+      exchange: 'bitget', symbol: 'SOL/USDT',
+      last: 150, bestBid: 149, bestAsk: 151,
+      volume24h: 1000, high24h: 160, low24h: 140, ts: Date.now(),
+    });
+
+    await new Promise(r => setTimeout(r, 50));
+
+    const snap = spine.marketStore.getSnapshot('bitget', 'SOL/USDT');
+    assert.ok(snap, 'market snapshot from production EventBus bridge');
+    assert.strictEqual(snap.ticker.ticker.last, 150, 'factual price through bridge');
+
+    unbridge();
   });
 });
