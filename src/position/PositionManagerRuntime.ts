@@ -93,8 +93,11 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       const planDelta = positionManager.onFill(position, exchange, symbol, seq, activePlan);
       if (!planDelta) return;
 
-      // New plan or flip (different planId) -> created
+      // New plan or flip (different planId) → created + old plan closed
       if (planDelta.status === 'active' && planDelta.planId !== activePlan?.planId) {
+        if (activePlan) {
+          try { kernel.publish('position.plan.closed', { planId: activePlan.planId }); } catch (_) {}
+        }
         try { kernel.publish('position.plan.created', { plan: planDelta }); } catch (_) {}
         submittedIntents.delete(activePlan?.planId ?? '');
       }
@@ -173,6 +176,8 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
 
     start(): void {
       if (started) return;
+      // PlanStore must subscribe before runtime so events project state
+      planStore.subscribeToKernel(kernel);
       kernel.subscribe('execution.fill.confirmed', onFillEvent);
       kernel.subscribe('market.ticker.updated', onMarketEvent);
       started = true;

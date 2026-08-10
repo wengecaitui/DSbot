@@ -94,11 +94,34 @@ export function createBinanceTradingRuntime(
   };
   const provider = createBinanceMarketDataProvider(providerOptions);
 
+  // Phase 4B: Production position protection bootstrap
+  let positionProtection = tradingOptions.positionProtection;
+  if (!positionProtection) {
+    try {
+      const { createTradingKernel } = require('../../kernel/TradingKernel');
+      const { createKernelPositionStateStore } = require('../../kernel/KernelPositionStateStore');
+      const { PositionPlanStore } = require('../../position/PositionPlanStore');
+      const { createPositionProtection } = require('../../position/PositionManagerRuntime');
+      const kernel = createTradingKernel({ exchange: 'binance' as any });
+      const positionStore = createKernelPositionStateStore();
+      const planStore = new PositionPlanStore();
+      kernel.subscribe('execution.fill.confirmed', (e: any) => positionStore.apply(e));
+      positionProtection = createPositionProtection({
+        kernel, positionStore, planStore,
+        hardRisk: () => ({ exchange: 'binance', locked: false, enabled: true, totalCapitalUsd: Infinity, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity } as any),
+        oms: undefined,
+      });
+    } catch (_) {
+      // Kernel-based protection unavailable — no-op
+    }
+  }
+
   const runtimeOptions: Omit<TradingRuntimeOptions, 'collectorFactory' | 'exchange'> = tradingOptions;
 
   return createTradingRuntime({
     ...runtimeOptions,
     exchange: 'binance',
     collectorFactory: (plan) => provider.createCollector(plan),
+    positionProtection,
   });
 }

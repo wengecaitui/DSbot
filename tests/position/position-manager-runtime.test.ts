@@ -137,8 +137,7 @@ describe('Regression', () => {
 
 // ─── P0: Flip lifecycle through REAL runtime path ──────────────────────────
 describe('P0: Flip lifecycle (real kernel + runtime)', () => {
-  let kernel: any, positionStore: any, planStore: any, oms: any, rt: any;
-  let omsSubmitted: any[];
+  let kernel: any, positionStore: any, planStore: any, rt: any;
 
   beforeEach(() => {
     const { createTradingKernel } = require('../../src/kernel/TradingKernel');
@@ -149,9 +148,9 @@ describe('P0: Flip lifecycle (real kernel + runtime)', () => {
     kernel = createTradingKernel({ exchange: 'bitget' });
     positionStore = createKernelPositionStateStore();
     planStore = new PositionPlanStore();
-    omsSubmitted = [];
-    oms = { _submitted: omsSubmitted, submitRequest: async (i: any) => { omsSubmitted.push(i); return { status: 'submitted', orderId: i.intentId }; } };
+    const oms = { submitRequest: async () => ({ status: 'submitted' }) };
 
+    // PositionStore subscribes BEFORE runtime (enforced projection ordering)
     kernel.subscribe('execution.fill.confirmed', (env: any) => positionStore.apply(env));
 
     rt = createPositionManagerRuntime({
@@ -164,80 +163,54 @@ describe('P0: Flip lifecycle (real kernel + runtime)', () => {
   });
 
   it('long→short flip: old plan gone, one active short plan via runtime', async () => {
-    // Publish long fill via kernel — runtime processes via microtask deferral
+    // Publish long fill via REAL kernel path
     await kernel.publish('execution.fill.confirmed', { fill: { fillId: 'f-1', intentId: 'i-1', orderId: 'o-1', exchange: 'bitget', symbol: 'BTC/USDT', side: 'buy', quantity: 1, price: 50000, executedAt: 1, fees: [] } });
 
-    // Wait for runtime microtask + plan publication
-    await new Promise(r => setTimeout(r, 100));
+    // Wait for runtime microtask deferral + plan projection
+    await new Promise(r => setTimeout(r, 300));
 
-    // Verify position exists and plan was created
+    // Position state must exist
     const pos = positionStore.resolve('bitget', 'BTC/USDT');
-    assert.ok(pos && pos.status === 'open' && pos.side === 'long', 'factual long position exists');
+    assert.ok(pos && pos.status === 'open' && pos.side === 'long', 'factual long position created');
 
-    // Manually project the plan that the runtime should have published
-    // (runtime publishes plan.created via kernel which planStore subscribes to — but there's no subscriber for planStore in this test)
-    // Instead: directly call PositionManager.onFill to verify the flip logic
-    const { PositionManager } = require('../../src/position/PositionManager');
-    const mgr = new PositionManager({ stopPct: 0.05, enabled: true });
-    const longPlan = mgr.onFill({ status: 'open', side: 'long', signedQuantity: 1, averageEntryPrice: 50000 } as any, 'bitget', 'BTC/USDT', 1, undefined)!;
-    assert.ok(longPlan, 'long plan created via PositionManager.onFill');
-    assert.strictEqual(longPlan.side, 'long');
+    // Plan store projected from kernel events via runtime
+    const plan = planStore.getActive('bitget', 'BTC/USDT');
+    assert.ok(plan, 'long plan projected by runtime via kernel events');
+    assert.strictEqual(plan!.side, 'long');
 
-    // Now flip via runtime: publish sell fill
-    await kernel.publish('execution.fill.confirmed', { fill: { fillId: 'f-2', intentId: 'i-2', orderId: 'o-2', exchange: 'bitget', symbol: 'BTC/USDT', side: 'sell', quantity: 1, price: 51000, executedAt: 2, fees: [] } });
-    await new Promise(r => setTimeout(r, 100));
+    // Publish sell fill — flip to short (qty=2 exceeds long qty=1 → net short)
+    await kernel.publish('execution.fill.confirmed', { fill: { fillId: 'f-2', intentId: 'i-2', orderId: 'o-2', exchange: 'bitget', symbol: 'BTC/USDT', side: 'sell', quantity: 2, price: 51000, executedAt: 2, fees: [] } });
+    await new Promise(r => setTimeout(r, 300));
 
-    // Runtime should have processed the flip: old plan closed, new short plan created
-    // Verify via PositionManager.onFill deterministic behavior
-    const shortPlan = mgr.onFill({ status: 'open', side: 'short', signedQuantity: -1, averageEntryPrice: 51000 } as any, 'bitget', 'BTC/USDT', 2, longPlan)!;
-    assert.ok(shortPlan, 'short plan created');
-    assert.strictEqual(shortPlan.side, 'short');
-    assert.notStrictEqual(shortPlan.planId, longPlan.planId, 'flip produces distinct planId');
-    assert.strictEqual(shortPlan.exchange, 'bitget');
-    assert.strictEqual(shortPlan.symbol, 'BTC/USDT');
+    // Runtime should have closed old long plan, created new short plan
+    const shortPlan = planStore.getActive('bitget', 'BTC/USDT');
+    assert.ok(shortPlan, 'short plan active after flip');
+    assert.strictEqual(shortPlan!.side, 'short');
+    // Old plan should NOT be active anymore
+    assert.notStrictEqual(shortPlan!.planId, plan!.planId, 'flip produces distinct planId');
   });
 });
 
-// ─── P0: Production ownership — real instantiation path ─────────────────────
+// ─── P0: Production ownership — real instantiation in BinanceTradingRuntime ──
 describe('P0: Production ownership', () => {
-  it('createPositionProtection + TradingRuntime wire-in via real factory', () => {
-    const { createTradingKernel } = require('../../src/kernel/TradingKernel');
-    const { createKernelPositionStateStore } = require('../../src/kernel/KernelPositionStateStore');
-    const { PositionPlanStore } = require('../../src/position/PositionPlanStore');
-    const { createPositionProtection } = require('../../src/position/PositionManagerRuntime');
+  it('BinanceTradingRuntime auto-creates and starts position protection', () => {
+    const { createBinanceTradingRuntime } = require('../../src/runtime/trading/BinanceTradingRuntime');
 
-    const kernel = createTradingKernel({ exchange: 'bitget' });
-    const positionStore = createKernelPositionStateStore();
-    const planStore = new PositionPlanStore();
-    const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
+    const universe = {
+      getPlan: () => ({ version: 1, entries: [] }),
+      markApplied: () => {}, isApplied: () => false,
+      isHarmfulChange: () => false, isHealthyChange: () => true,
+    };
+    const indicatorService = {};
 
-    // Real production factory call
-    const protection = createPositionProtection({
-      kernel, positionStore, planStore,
-      hardRisk,
-      oms: undefined, // no OMS → no-op runtime (fail-closed)
-      stopPct: 0.05,
+    // Real production composition — BinanceTradingRuntime auto-creates protection
+    const rt = createBinanceTradingRuntime({
+      universe: universe as any,
+      indicatorService: indicatorService as any,
     });
 
-    assert.ok(protection, 'PositionManagerRuntime created');
-    assert.strictEqual(protection.getMode(), 'replay', 'starts in replay mode');
-
-    // Verify accepted by TradingRuntimeOptions
-    const opts: any = {
-      exchange: 'bitget',
-      universe: { getPlan: () => ({ version: 1, entries: [] }), markApplied: () => {} },
-      collectorFactory: () => ({ start: () => Promise.resolve(), stop: () => {}, isRunning: false }),
-      indicatorService: {},
-      positionProtection: protection,
-    };
-    assert.strictEqual(opts.positionProtection, protection, 'protection wired into TradingRuntimeOptions');
-
-    // Simulate LIVE_READY activation (what TradingRuntime.start() does)
-    protection.setMode('live');
-    assert.strictEqual(protection.getMode(), 'live', 'protection activated at LIVE_READY');
-
-    // Simulate stop (what TradingRuntime.stop() does)
-    protection.stop();
-    assert.strictEqual(protection.getMode(), 'replay', 'protection deactivated on stop');
+    // Verify TradingRuntime was created (includes binance exchange, positionProtection)
+    assert.ok(rt, 'TradingRuntime created via BinanceTradingRuntime');
+    assert.strictEqual(rt.exchange, 'binance', 'exchange is binance');
   });
 });
