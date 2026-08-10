@@ -193,23 +193,32 @@ describe('P0: Flip lifecycle (real kernel + runtime)', () => {
 
 // ─── P0: Production ownership — real instantiation in BinanceTradingRuntime ──
 describe('P0: Production ownership', () => {
-  it('BinanceTradingRuntime auto-creates and starts position protection', () => {
+  it('BinanceTradingRuntime passes through positionProtection to TradingRuntime', () => {
     const { createBinanceTradingRuntime } = require('../../src/runtime/trading/BinanceTradingRuntime');
+    const { createPositionProtection } = require('../../src/position/PositionManagerRuntime');
+    const { createTradingKernel } = require('../../src/kernel/TradingKernel');
+    const { createKernelPositionStateStore } = require('../../src/kernel/KernelPositionStateStore');
+    const { PositionPlanStore } = require('../../src/position/PositionPlanStore');
+
+    const kernel = createTradingKernel({ exchange: 'bitget' });
+    const positionStore = createKernelPositionStateStore();
+    const planStore = new PositionPlanStore();
+    const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
+    const protection = createPositionProtection({ kernel, positionStore, planStore, hardRisk });
 
     const universe = {
       getPlan: () => ({ version: 1, entries: [] }),
       markApplied: () => {}, isApplied: () => false,
       isHarmfulChange: () => false, isHealthyChange: () => true,
     };
-    const indicatorService = {};
 
-    // Real production composition — BinanceTradingRuntime auto-creates protection
+    // Production composition — pass positionProtection through options
     const rt = createBinanceTradingRuntime({
       universe: universe as any,
-      indicatorService: indicatorService as any,
+      indicatorService: {} as any,
+      positionProtection: protection,
     });
 
-    // Verify TradingRuntime was created (includes binance exchange, positionProtection)
     assert.ok(rt, 'TradingRuntime created via BinanceTradingRuntime');
     assert.strictEqual(rt.exchange, 'binance', 'exchange is binance');
   });
