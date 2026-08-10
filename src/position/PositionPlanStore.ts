@@ -6,6 +6,7 @@ interface PlanRecord { snapshot: PositionPlan; }
 
 function validatePlan(plan: Record<string, unknown>): void {
   if (typeof plan.planId !== 'string' || !plan.planId) throw new Error('PLAN_STORE: planId required');
+  if (typeof plan.exchange !== 'string' || !plan.exchange) throw new Error('PLAN_STORE: exchange required');
   if (typeof plan.symbol !== 'string' || !plan.symbol) throw new Error('PLAN_STORE: symbol required');
   if (plan.positionSide !== 'long' && plan.positionSide !== 'short') throw new Error('PLAN_STORE: invalid positionSide');
   if (typeof plan.entryPrice !== 'number' || !Number.isFinite(plan.entryPrice) || plan.entryPrice <= 0) throw new Error('PLAN_STORE: invalid entryPrice');
@@ -65,10 +66,23 @@ export class PositionPlanStore {
     throw new Error(`PLAN_STORE: unknown event ${type}`);
   }
 
-  getActive(symbol: string): PositionPlan | undefined {
-    for (const r of this.plans.values()) if (r.snapshot.symbol === symbol && r.snapshot.status === 'active') return r.snapshot;
+  getActive(exchange: string, symbol: string): PositionPlan | undefined {
+    for (const r of this.plans.values())
+      if (r.snapshot.exchange === exchange && r.snapshot.symbol === symbol && r.snapshot.status === 'active')
+        return r.snapshot;
     return undefined;
   }
 
   get(planId: string): PositionPlan | undefined { return this.plans.get(planId)?.snapshot; }
+
+  /** Wire self to kernel — plan events project state into store. */
+  subscribeToKernel(rawKernel: { subscribe: (t: string, h: (e: KernelEventEnvelope) => void) => void }): this {
+    // Cast to any: TradingKernel.subscribe has typed event key but runtime uses string
+    const kernel = rawKernel as any;
+    kernel.subscribe('position.plan.created', (e: KernelEventEnvelope) => this.apply(e));
+    kernel.subscribe('position.plan.updated', (e: KernelEventEnvelope) => this.apply(e));
+    kernel.subscribe('position.plan.closed', (e: KernelEventEnvelope) => this.apply(e));
+    kernel.subscribe('position.plan.archived', (e: KernelEventEnvelope) => this.apply(e));
+    return this;
+  }
 }

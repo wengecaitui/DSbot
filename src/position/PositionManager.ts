@@ -36,7 +36,7 @@ export class PositionManager {
       if (!Number.isFinite(stopPrice)) return null;
       const planId = generatePlanId(exchange, symbol, side, position.averageEntryPrice, fillSequence);
       return {
-        planId, symbol, positionSide: side, side, entryPrice: position.averageEntryPrice,
+        planId, exchange, symbol, positionSide: side, side, entryPrice: position.averageEntryPrice,
         entryQuantity: Math.abs(position.signedQuantity), stopPrice,
         status: 'active', planVersion: 0, sourceKernelEventId: '',
       };
