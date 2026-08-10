@@ -19,7 +19,6 @@ export function bridgeMarketToKernel(
         ticker: {
           exchange: ticker.exchange,
           instId: ticker.instId,
-          symbol: ticker.symbol,
           channel: 'ticker' as const,
           last: ticker.last,
           bestBid: ticker.bestBid,
