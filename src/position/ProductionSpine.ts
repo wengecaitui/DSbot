@@ -141,9 +141,9 @@ export async function executeThroughGateway(
   const hardRiskSnapshot = spine.privateConfig.hardRisk();
 
   // Resolve position for Gateway (flat = never traded)
-  const pos: { status: string; side?: string; signedQuantity?: number } = positionResolved?.status === 'open'
-    ? { status: 'open', side: positionResolved.side, signedQuantity: positionResolved.signedQuantity }
-    : { status: 'flat' };
+  const pos = positionResolved?.status === 'open'
+    ? { ...positionResolved, status: 'open' as const }
+    : { ...positionResolved, status: 'flat' as const, side: 'flat' as const, signedQuantity: 0, averageEntryPrice: 0, snapshot: null };
 
   const gatewayInput: GatewayInput = {
     intent,
