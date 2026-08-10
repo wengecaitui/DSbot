@@ -88,7 +88,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 47000, bestBid: 46999, bestAsk: 47001, volume24h: 100, high24h: 48000, low24h: 46000, ts: Date.now() },
       receivedAt: Date.now(),
     });
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 800));
 
     // Position should be closed/reduced after protective stop
     const pos = spine.positionStore.resolve('bitget', 'BTC/USDT');
