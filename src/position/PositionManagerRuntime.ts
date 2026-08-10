@@ -49,6 +49,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       getSubmittedCount() { return 0; },
       clearSubmitted() {},
       positionManager,
+      kernel,
     };
   }
 
