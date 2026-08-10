@@ -44,7 +44,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       setMode(m) { mode = m; },
       getMode() { return mode; },
       start() {},
-      stop() {},
+      stop() { mode = 'replay'; },
       getSubmittedCount() { return 0; },
       clearSubmitted() {},
       positionManager,
