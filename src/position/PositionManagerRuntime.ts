@@ -37,6 +37,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
   const positionManager = new PositionManager({ stopPct: config.stopPct ?? 0.05, enabled: true });
   let mode: RuntimeMode = 'replay';
   const submittedIntents = new Set<string>();
+  const kernel = config.kernel;
   let started = false;
 
   // Fail-closed: no OMS -> no-op runtime
