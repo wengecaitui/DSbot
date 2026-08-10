@@ -19,8 +19,6 @@ import { PositionPlanStore } from './PositionPlanStore';
 import { systemDomainClock } from '../runtime/Clock';
 import { evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
 import type { GatewayInput } from '../risk/pretrade-risk-types';
-import type { PositionResolution } from '../types/position-types';
-import type { MarketSnapshot } from '../market/market-snapshot-types';
 import type { TradeIntent } from '../types/trade-intent';
 
 export interface ProductionSpineConfig {
@@ -133,7 +131,7 @@ export async function executeThroughGateway(
   action: 'open' | 'close',
   approvedUsd: number,
 ): Promise<ExecuteThroughGatewayResult> {
-  const { kernel, positionStore, marketStore, oms } = spine;
+  const { kernel, positionStore, marketStore, oms, adapter } = spine;
   const exchange = intent.exchange as any;
   const symbol = intent.symbol;
 
@@ -143,36 +141,35 @@ export async function executeThroughGateway(
   const hardRiskSnapshot = spine.privateConfig.hardRisk();
 
   // Resolve position for Gateway (flat = never traded)
-  const pos: PositionResolution = positionResolved?.status === 'open'
+  const pos: { status: string; side?: string; signedQuantity?: number } = positionResolved?.status === 'open'
     ? { status: 'open', side: positionResolved.side, signedQuantity: positionResolved.signedQuantity }
-    : positionResolved?.status === 'flat'
-      ? { status: 'flat' }
-      : { status: 'flat' }; // missing/undefined → flat (no position exists)
+    : { status: 'flat' };
 
   const gatewayInput: GatewayInput = {
     intent,
     action,
     marketSnapshot: marketSnapshot as any,
     positionResolution: pos,
-    policyResolution: { status: 'neutral', policy: null, allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'neutral', riskLevel: 'low', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } as any,
+    policyResolution: { status: 'active', policy: null, allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'neutral', riskLevel: 'low', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } as any,
     hardRisk: hardRiskSnapshot as any,
   };
 
   const riskResult = evaluatePreTradeRisk(gatewayInput);
-  if (riskResult !== 'APPROVED') {
-    return { admitted: false, riskCode: riskResult, action };
+  if (riskResult.decision !== 'ADMITTED') {
+    return { admitted: false, riskCode: riskResult.reasonCode, action };
   }
 
-  // Publish market ticker so market store has the latest price
+  // Use Gateway-authorised sizing, never caller-supplied size
+  const authorisedUsd = riskResult.approvedPositionUsd;
+
+  // Set factual market price before execution
   if (marketSnapshot?.ticker) {
-    await kernel.publish('market.ticker.updated', {
-      ticker: marketSnapshot.ticker,
-      receivedAt: Date.now(),
-    });
+    (adapter as any).params.markPriceUsd = (marketSnapshot as any).ticker?.ticker?.last ?? (marketSnapshot as any).ticker?.last ?? 0;
+    (adapter as any).params.executedAtMs = Date.now();
   }
 
-  // Execute through OMS
-  const omsResult = await oms.submitRequest(intent, action, approvedUsd);
+  // Execute through same OMS, using Gateway-approved size
+  const omsResult = await oms.submitRequest(intent, action, authorisedUsd);
 
   return {
     admitted: true,
