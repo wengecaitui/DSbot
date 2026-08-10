@@ -14,7 +14,7 @@ import { PaperExecutionAdapter } from '../oms/PaperExecutionAdapter';
 import { PaperExecutionService, type ExecuteParams } from '../paper/PaperExecutionService';
 import type { PaperBrokerPersistence } from '../paper/PaperBroker';
 import type { PaperAccountConfig } from '../types/paper-account';
-import type { HardRiskSnapshot } from '../router/KillSwitch';
+import type { RiskSnapshot } from '../router/KillSwitch';
 import { createPositionManagerRuntime } from './PositionManagerRuntime';
 import { PositionPlanStore } from './PositionPlanStore';
 
@@ -23,7 +23,7 @@ export interface ProductionSpineConfig {
   accountId?: string;
   paperAccount?: PaperAccountConfig;
   persistence?: PaperBrokerPersistence;
-  hardRisk: () => HardRiskSnapshot;
+  hardRisk: () => RiskSnapshot;
   stopPct?: number;
   journal?: any;
   clock?: any;
@@ -42,11 +42,10 @@ export interface ProductionSpine {
 }
 
 function inMemoryPersistence(): PaperBrokerPersistence {
-  let data: Record<string, string> = {};
+  let saved: any = null;
   return {
-    load(name: string) { return Promise.resolve(data[name] ?? null); },
-    save(name: string, value: string) { data[name] = value; return Promise.resolve(); },
-    wipe(name: string) { delete data[name]; return Promise.resolve(); },
+    load() { return Promise.resolve(saved); },
+    save(ledger: any) { saved = ledger; return Promise.resolve(); },
   };
 }
 
@@ -69,23 +68,17 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
   // OMS + adapter — per-request ExecuteParams via factory
   const defaultExecuteParams: ExecuteParams = {
-    exchange,
-    symbol: '',
-    side: 'buy',
-    quantity: 0,
-    orderType: 'market',
-    intentId: '',
-    markPriceUsd: 50000,  // default — overridden per-request
-    executedAtMs: Date.now(),
+    markPriceUsd: 50000,
     feeBps: 10,
     slippageBps: 0,
+    executedAtMs: Date.now(),
   };
   const adapter = new PaperExecutionAdapter(service, defaultExecuteParams);
   const oms = new OmsCore(kernel, adapter);
 
   // State stores
   const positionStore = createKernelPositionStateStore();
-  kernel.subscribe('execution.fill.confirmed', (e) => positionStore.apply(e));
+  kernel.subscribe('execution.fill.confirmed', (e) => { positionStore.apply(e); });
 
   const planStore = new PositionPlanStore();
 
@@ -96,7 +89,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     planStore,
     oms,
     marketStore: config.marketStore,
-    hardRisk: config.hardRisk,
+    hardRisk: config.hardRisk as any,
     stopPct: config.stopPct ?? 0.05,
   });
 
