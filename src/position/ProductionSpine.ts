@@ -99,6 +99,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // ── Position state store ──
   const positionStore = createKernelPositionStateStore();
   kernel.subscribe('execution.fill.confirmed', (e) => { positionStore.apply(e); });
+  kernel.subscribe('position.baseline.confirmed' as any, (e: any) => { positionStore.apply(e); });
 
   const planStore = new PositionPlanStore();
 

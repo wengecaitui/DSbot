@@ -30,6 +30,7 @@ export interface PositionManagerRuntime {
   getSubmittedCount(): number;
   clearSubmitted(planId: string): void;
   positionManager: PositionManager;
+  kernel: TradingKernel;
 }
 
 export function createPositionManagerRuntime(config: PositionManagerRuntimeConfig): PositionManagerRuntime {
