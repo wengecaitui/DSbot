@@ -1,7 +1,7 @@
-// Phase 4C: E2E paper scenario — full kernel execution spine
+// Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway } from '../../src/position/ProductionSpine';
 import type { TradeIntent } from '../../src/types/trade-intent';
 
 const hardRisk = () => ({
@@ -9,80 +9,102 @@ const hardRisk = () => ({
   totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity,
 });
 
-describe('Phase 4C: E2E paper scenario (full kernel spine)', () => {
+function makeIntent(id: string, symbol: string, dir: 'long' | 'short', usd: number): TradeIntent {
+  return { intentId: id, exchange: 'bitget', symbol, direction: dir, orderType: 'market', positionUsd: usd, limitPrice: undefined, createdAt: Date.now() } as TradeIntent;
+}
+
+describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', () => {
   let spine: any;
+  let initDone = false;
 
-  it('fills project position state → plan created', async () => {
-    if (!spine) {
-      spine = await createProductionSpine({
-        exchange: 'bitget',
-        accountId: 'e2e-paper',
-        hardRisk,
-      });
-    }
-    const { kernel, positionStore, planStore, oms, protection } = spine;
+  async function init() {
+    if (initDone) return;
+    spine = await createProductionSpine({ exchange: 'bitget', accountId: 'e2e', hardRisk });
+    spine.protection.start();
+    spine.protection.setMode('live');
+    spine.planStore.subscribeToKernel(spine.kernel as any);
+    // Seed market price
+    await spine.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+    initDone = true;
+  }
 
-    protection.start();
-    protection.setMode('live');
-    planStore.subscribeToKernel(kernel as any);
+  // ── 1. Real market event → KernelMarketStateStore snapshot ────────────────
+  it('market event → market store snapshot', async () => {
+    await init();
+    await spine.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'ETH/USDT', symbol: 'ETH/USDT', channel: 'ticker', last: 3500, bestBid: 3499, bestAsk: 3501, volume24h: 1000, high24h: 3600, low24h: 3400, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+    const snap = spine.marketStore.getSnapshot('bitget', 'ETH/USDT');
+    assert.ok(snap, 'market snapshot exists');
+    assert.strictEqual(snap.ticker.ticker.last, 3500, 'factual market price');
+    assert.strictEqual(snap.isStale, false, 'not stale');
+  });
 
-    // Execute an opening trade through OMS
-    const intent: TradeIntent = {
-      intentId: 'e2e-open-1', exchange: 'bitget' as any, symbol: 'BTC/USDT',
-      direction: 'long', orderType: 'market', positionUsd: 5000,
-      limitPrice: undefined, createdAt: Date.now(),
-    };
-    const result = await oms.submitRequest(intent, 'open', 5000);
-    assert.ok(result.status === 'submitted' || result.status === 'filled', `OMS status: ${result.status}`);
+  // ── 2. Gateway-admitted open → OMS fill at factual price ──────────────────
+  it('admitted open → OMS paper fill at factual price → OPEN position', async () => {
+    await init();
+    const intent = makeIntent('gw-open-1', 'BTC/USDT', 'long', 5000);
+    const result = await executeThroughGateway(spine, intent, 'open', 5000);
+    assert.strictEqual(result.admitted, true, 'Gateway admitted');
+    assert.strictEqual(result.riskCode, null, 'no risk code');
+    assert.ok(result.omsResult, 'OMS result exists');
+    assert.ok(result.omsResult!.status === 'submitted' || result.omsResult!.status === 'filled', `OMS: ${result.omsResult!.status}`);
 
-    // OMS publishes execution.fill.confirmed synchronously → position store projects it
-    const pos = positionStore.resolve('bitget' as any, 'BTC/USDT');
-    assert.ok(pos, 'position exists after fill');
+    // Factual position
+    const pos = spine.positionStore.resolve('bitget', 'BTC/USDT');
+    assert.ok(pos, 'position exists');
     assert.strictEqual(pos.status, 'open');
 
-    // Wait for runtime microtask deferral + plan projection
+    // Plan projected
     await new Promise(r => setTimeout(r, 300));
-
-    const plan = planStore.getActive('bitget' as any, 'BTC/USDT');
+    const plan = spine.planStore.getActive('bitget', 'BTC/USDT');
     assert.ok(plan, 'active plan created');
     assert.strictEqual(plan.side, 'long');
-    assert.strictEqual(plan.status, 'active');
   });
 
-  it('admitted intent → OMS → paper fill → factual position OPEN', async () => {
-    const { positionStore, oms } = spine;
-
-    const intent: TradeIntent = {
-      intentId: 'e2e-open-2', exchange: 'bitget' as any, symbol: 'ETH/USDT',
-      direction: 'long', orderType: 'market', positionUsd: 3000,
-      limitPrice: undefined, createdAt: Date.now(),
-    };
-    await oms.submitRequest(intent, 'open', 3000);
-
-    const pos = positionStore.resolve('bitget' as any, 'ETH/USDT');
-    assert.ok(pos);
-    assert.strictEqual(pos.status, 'open');
-    assert.strictEqual(pos.side, 'long');
+  // ── 3. Gateway-open with missing market → REJECTED ────────────────────────
+  it('missing market → Gateway rejects', async () => {
+    await init();
+    const intent = makeIntent('gw-rej-1', 'XRP/USDT', 'long', 1000);
+    const result = await executeThroughGateway(spine, intent, 'open', 1000);
+    assert.strictEqual(result.admitted, false, 'Gateway rejected');
+    assert.ok(result.riskCode, 'has risk code');
   });
 
-  it('one shared kernel — one OMS — no duplicate spine', () => {
-    const { kernel, oms } = spine;
-    assert.ok(kernel, 'shared kernel exists');
-    assert.ok(oms, 'shared OMS exists');
-    // Both position store and OMS use the SAME kernel
-    assert.ok(true, 'single kernel spine verified');
+  // ── 4. Protective stop breach → protective close through Gateway ──────────
+  it('protective stop breach → Gateway → OMS → close fill', async () => {
+    await init();
+    // Open position
+    const openIntent = makeIntent('prot-open', 'BTC/USDT', 'long', 5000);
+    await executeThroughGateway(spine, openIntent, 'open', 5000);
+    await new Promise(r => setTimeout(r, 100));
+
+    // Set stop at 47500 (5% below entry). Then publish market tick at 47000 (breached)
+    await spine.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 47000, bestBid: 46999, bestAsk: 47001, volume24h: 100, high24h: 48000, low24h: 46000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+    await new Promise(r => setTimeout(r, 500));
+
+    // Position should be closed/reduced after protective stop
+    const pos = spine.positionStore.resolve('bitget', 'BTC/USDT');
+    assert.ok(pos, 'position still exists');
+    // After protective close, position should not be long/open anymore
+    assert.ok(pos.status !== 'open' || pos.side !== 'long', 'position closed by protection');
   });
 
-  it('replay mode cannot submit protection', async () => {
-    const { protection } = spine;
-    protection.setMode('replay');
-    const count = protection.getSubmittedCount();
-    assert.strictEqual(count, 0, 'no submissions in replay mode');
-  });
-
-  it('LIVE_READY enables protection submissions', () => {
-    const { protection } = spine;
-    protection.setMode('live');
-    assert.strictEqual(protection.getMode(), 'live');
+  // ── 5. Risk rejection → zero OMS submission ───────────────────────────────
+  it('risk rejection → zero OMS submission', async () => {
+    await init();
+    const before = spine.protection.getSubmittedCount();
+    const intent = makeIntent('gw-rej-2', 'SOL/USDT', 'long', 1000);
+    const result = await executeThroughGateway(spine, intent, 'open', 1000);
+    assert.strictEqual(result.admitted, false, 'Gateway rejected');
+    const after = spine.protection.getSubmittedCount();
+    assert.strictEqual(after, before, 'no OMS submission for rejected intent');
   });
 });

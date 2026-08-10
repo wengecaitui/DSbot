@@ -1,14 +1,13 @@
 // Phase 4C: ProductionSpine — unified kernel-backed paper execution spine
 //
-// One shared TradingKernel powers the full execution chain:
-//   market data → KernelMarketStateStore
-//   execution.fill.confirmed → KernelPositionStateStore
-//   PreTradeRiskGateway → OmsCore → PaperExecutionAdapter → PaperExecutionService
-//   PositionManagerRuntime → real OMS (no more oms: undefined)
+// One shared TradingKernel powers:
+//   market.ticker.updated → KernelMarketStateStore
+//   PreTradeRiskGateway → OmsCore → PaperExecutionAdapter → factual fill
+//   execution.fill.confirmed → KernelPositionStateStore → PositionManagerRuntime
 
 import { createTradingKernel, type TradingKernel } from '../kernel/TradingKernel';
 import { createKernelPositionStateStore, type KernelPositionStateStore } from '../kernel/KernelPositionStateStore';
-import type { KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
+import { createKernelMarketStateStore, type KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
 import { OmsCore } from '../oms/OmsCore';
 import { PaperExecutionAdapter } from '../oms/PaperExecutionAdapter';
 import { PaperExecutionService, type ExecuteParams } from '../paper/PaperExecutionService';
@@ -17,6 +16,12 @@ import type { PaperAccountConfig } from '../types/paper-account';
 import type { RiskSnapshot } from '../router/KillSwitch';
 import { createPositionManagerRuntime } from './PositionManagerRuntime';
 import { PositionPlanStore } from './PositionPlanStore';
+import { systemDomainClock } from '../runtime/Clock';
+import { evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
+import type { GatewayInput } from '../risk/pretrade-risk-types';
+import type { PositionResolution } from '../types/position-types';
+import type { MarketSnapshot } from '../market/market-snapshot-types';
+import type { TradeIntent } from '../types/trade-intent';
 
 export interface ProductionSpineConfig {
   exchange: string;
@@ -27,18 +32,27 @@ export interface ProductionSpineConfig {
   stopPct?: number;
   journal?: any;
   clock?: any;
-  marketStore?: KernelMarketStateStore;
+  /** Market data staleness threshold in milliseconds. Default: 60000 (1 minute). */
+  marketStaleAfterMs?: number;
 }
 
 export interface ProductionSpine {
   kernel: TradingKernel;
   positionStore: KernelPositionStateStore;
-  marketStore: KernelMarketStateStore | undefined;
+  marketStore: KernelMarketStateStore;
   oms: OmsCore;
   planStore: PositionPlanStore;
   protection: ReturnType<typeof createPositionManagerRuntime>;
   adapter: PaperExecutionAdapter;
   service: PaperExecutionService;
+  privateConfig: { hardRisk: () => RiskSnapshot },
+}
+
+export interface ExecuteThroughGatewayResult {
+  admitted: boolean;
+  riskCode: string | null;
+  action: 'open' | 'close';
+  omsResult?: { status: string; order?: any; fill?: any; reason?: string };
 }
 
 function inMemoryPersistence(): PaperBrokerPersistence {
@@ -51,13 +65,21 @@ function inMemoryPersistence(): PaperBrokerPersistence {
 
 export async function createProductionSpine(config: ProductionSpineConfig): Promise<ProductionSpine> {
   const exchange = config.exchange as any;
+  const clock = config.clock ?? systemDomainClock;
   const kernel = createTradingKernel({
     exchange,
     journal: config.journal,
-    clock: config.clock,
+    clock,
   });
 
-  // Paper execution service
+  // ── Market state store (subscribed to kernel) ──
+  const marketStore = createKernelMarketStateStore({
+    clock,
+    staleAfterMs: config.marketStaleAfterMs ?? 60_000,
+  });
+  kernel.subscribe('market.ticker.updated', (e) => { marketStore.apply(e); });
+
+  // ── Paper execution service ──
   const paperConfig: PaperAccountConfig = config.paperAccount ?? {
     accountId: config.accountId ?? `${config.exchange}-paper`,
     exchange,
@@ -66,9 +88,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   const persistence = config.persistence ?? inMemoryPersistence();
   const service = await PaperExecutionService.open(paperConfig, persistence);
 
-  // OMS + adapter — per-request ExecuteParams via factory
+  // ── OMS + adapter (prices filled per-request from market store) ──
   const defaultExecuteParams: ExecuteParams = {
-    markPriceUsd: 50000,
+    markPriceUsd: 0, // filled per-request from market store
     feeBps: 10,
     slippageBps: 0,
     executedAtMs: Date.now(),
@@ -76,31 +98,89 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   const adapter = new PaperExecutionAdapter(service, defaultExecuteParams);
   const oms = new OmsCore(kernel, adapter);
 
-  // State stores
+  // ── Position state store ──
   const positionStore = createKernelPositionStateStore();
   kernel.subscribe('execution.fill.confirmed', (e) => { positionStore.apply(e); });
 
   const planStore = new PositionPlanStore();
 
-  // Position protection with REAL OMS
+  // ── Position protection with REAL OMS ──
   const protection = createPositionManagerRuntime({
     kernel,
     positionStore,
     planStore,
     oms,
-    marketStore: config.marketStore,
+    marketStore,
     hardRisk: config.hardRisk as any,
     stopPct: config.stopPct ?? 0.05,
   });
 
   return {
-    kernel,
-    positionStore,
-    marketStore: config.marketStore,
-    oms,
-    planStore,
-    protection,
-    adapter,
-    service,
+    kernel, positionStore, marketStore, oms, planStore, protection, adapter, service,
+    privateConfig: { hardRisk: config.hardRisk },
+  };
+}
+
+/**
+ * Execute a TradeIntent through PreTradeRiskGateway → OmsCore → PaperExecutionAdapter.
+ * Uses the factual market price from KernelMarketStateStore for the execution.
+ *
+ * Risk rejection returns { admitted: false, riskCode } without calling OMS.
+ */
+export async function executeThroughGateway(
+  spine: ProductionSpine,
+  intent: TradeIntent,
+  action: 'open' | 'close',
+  approvedUsd: number,
+): Promise<ExecuteThroughGatewayResult> {
+  const { kernel, positionStore, marketStore, oms } = spine;
+  const exchange = intent.exchange as any;
+  const symbol = intent.symbol;
+
+  // Factual market price
+  const marketSnapshot = marketStore.getSnapshot(exchange, symbol);
+  const positionResolved = positionStore.resolve(exchange, symbol);
+  const hardRiskSnapshot = spine.privateConfig.hardRisk();
+
+  // Resolve position for Gateway (flat = never traded)
+  const pos: PositionResolution = positionResolved?.status === 'open'
+    ? { status: 'open', side: positionResolved.side, signedQuantity: positionResolved.signedQuantity }
+    : positionResolved?.status === 'flat'
+      ? { status: 'flat' }
+      : { status: 'flat' }; // missing/undefined → flat (no position exists)
+
+  const gatewayInput: GatewayInput = {
+    intent,
+    action,
+    marketSnapshot: marketSnapshot as any,
+    positionResolution: pos,
+    policyResolution: { status: 'neutral', policy: null, allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'neutral', riskLevel: 'low', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } as any,
+    hardRisk: hardRiskSnapshot as any,
+  };
+
+  const riskResult = evaluatePreTradeRisk(gatewayInput);
+  if (riskResult !== 'APPROVED') {
+    return { admitted: false, riskCode: riskResult, action };
+  }
+
+  // Publish market ticker so market store has the latest price
+  if (marketSnapshot?.ticker) {
+    await kernel.publish('market.ticker.updated', {
+      ticker: marketSnapshot.ticker,
+      receivedAt: Date.now(),
+    });
+  }
+
+  // Execute through OMS
+  const omsResult = await oms.submitRequest(intent, action, approvedUsd);
+
+  return {
+    admitted: true,
+    riskCode: null,
+    action,
+    omsResult: {
+      status: omsResult.status,
+      reason: (omsResult as any).reason,
+    },
   };
 }
