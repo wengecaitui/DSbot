@@ -11,27 +11,28 @@ export function bridgeMarketToKernel(
   eventBus: TradingEventBus,
   kernel: TradingKernel,
 ): () => void {
-  const handler = (event: { type: string; payload: any }) => {
-    const p = event.payload;
+  const handler = (event: any) => {
+    const ticker = event.ticker;
+    if (!ticker) return;
     try {
       kernel.publish('market.ticker.updated', {
         ticker: {
-          exchange: p.exchange,
-          instId: p.symbol,
-          symbol: p.symbol,
+          exchange: ticker.exchange,
+          instId: ticker.instId,
+          symbol: ticker.symbol,
           channel: 'ticker' as const,
-          last: p.last,
-          bestBid: p.bestBid,
-          bestAsk: p.bestAsk,
-          volume24h: p.volume24h,
-          high24h: p.high24h,
-          low24h: p.low24h,
-          ts: p.ts,
+          last: ticker.last,
+          bestBid: ticker.bestBid,
+          bestAsk: ticker.bestAsk,
+          volume24h: ticker.volume24h,
+          high24h: ticker.high24h,
+          low24h: ticker.low24h,
+          ts: ticker.ts,
         },
         receivedAt: Date.now(),
       });
     } catch (_) {
-      // Fail-closed: don't break production data flow for kernel projection errors
+      // Fail-closed
     }
   };
 

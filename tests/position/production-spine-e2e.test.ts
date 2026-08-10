@@ -115,16 +115,15 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
   it('production market bridge → kernel → store snapshot', async () => {
     await init();
     const { bridgeMarketToKernel } = require('../../src/position/MarketBridge');
-    const { TradingEventBus } = require('../../src/events/TradingEventBus');
+    const { createTradingEventBus } = require('../../src/events/TradingEventBus');
 
-    const bus = new TradingEventBus();
+    const bus = createTradingEventBus();
     const unbridge = bridgeMarketToKernel(bus, spine.kernel);
 
-    // Emit market tick through EventBus (simulating production collector)
+    // Publish market ticker through EventBus with correct payload shape
     (bus as any).publish('market.ticker.updated', {
-      exchange: 'bitget', symbol: 'SOL/USDT',
-      last: 150, bestBid: 149, bestAsk: 151,
-      volume24h: 1000, high24h: 160, low24h: 140, ts: Date.now(),
+      ticker: { exchange: 'bitget', instId: 'SOL/USDT', symbol: 'SOL/USDT', channel: 'ticker', last: 150, bestBid: 149, bestAsk: 151, volume24h: 1000, high24h: 160, low24h: 140, ts: Date.now() },
+      receivedAt: Date.now(),
     });
 
     await new Promise(r => setTimeout(r, 50));
