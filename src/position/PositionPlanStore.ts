@@ -76,11 +76,13 @@ export class PositionPlanStore {
   get(planId: string): PositionPlan | undefined { return this.plans.get(planId)?.snapshot; }
 
   /** Wire self to kernel — plan events project state into store. */
-  subscribeToKernel(kernel: { subscribe: (t: string, h: (e: KernelEventEnvelope) => void) => void }): this {
-    kernel.subscribe('position.plan.created', (e) => this.apply(e));
-    kernel.subscribe('position.plan.updated', (e) => this.apply(e));
-    kernel.subscribe('position.plan.closed', (e) => this.apply(e));
-    kernel.subscribe('position.plan.archived', (e) => this.apply(e));
+  subscribeToKernel(rawKernel: { subscribe: (t: string, h: (e: KernelEventEnvelope) => void) => void }): this {
+    // Cast to any: TradingKernel.subscribe has typed event key but runtime uses string
+    const kernel = rawKernel as any;
+    kernel.subscribe('position.plan.created', (e: KernelEventEnvelope) => this.apply(e));
+    kernel.subscribe('position.plan.updated', (e: KernelEventEnvelope) => this.apply(e));
+    kernel.subscribe('position.plan.closed', (e: KernelEventEnvelope) => this.apply(e));
+    kernel.subscribe('position.plan.archived', (e: KernelEventEnvelope) => this.apply(e));
     return this;
   }
 }
