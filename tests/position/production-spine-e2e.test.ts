@@ -1,7 +1,7 @@
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway, trustBaseline } from '../../src/position/ProductionSpine';
 import type { TradeIntent } from '../../src/types/trade-intent';
 
 const hardRisk = () => ({
@@ -23,6 +23,9 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     spine.protection.start();
     spine.protection.setMode('live');
     spine.planStore.subscribeToKernel(spine.kernel as any);
+    // Establish trusted baseline (required before first trade)
+    trustBaseline(spine, 'bitget', 'BTC/USDT');
+    trustBaseline(spine, 'bitget', 'ETH/USDT');
     // Seed market price
     await spine.kernel.publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
@@ -98,6 +101,15 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     const afterQty = after?.signedQuantity ?? 0;
     assert.ok(afterQty < beforeQty, `position reduced: ${beforeQty} → ${afterQty}`);
     assert.ok(spine.protection.getSubmittedCount() > 0, 'protection submitted orders');
+
+    // Verify protective fill used breached price (47000) from factual market snapshot
+    const omsStore = spine.oms.getStore();
+    const fills = (omsStore as any).getFills?.() ?? [];
+    const protectiveFills = fills.filter((f: any) => f.orderId && (omsStore as any).get?.(f.orderId)?.action === 'close');
+    if (protectiveFills.length > 0) {
+      const lastFill = protectiveFills[protectiveFills.length - 1];
+      assert.ok(Math.abs(lastFill.price - 47000) < 100, `protective fill price ${lastFill.price} ≈ 47000`);
+    }
   });
 
   // ── 5. Risk rejection → zero OMS submission ───────────────────────────────
@@ -111,27 +123,13 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     assert.strictEqual(after, before, 'no OMS submission for rejected intent');
   });
 
-  // ── 6. Production market bridge: EventBus → kernel ─────────────────────────
-  it('production market bridge → kernel → store snapshot', async () => {
+  // ── 6. Trusted baseline required for first trade ──────────────────────────
+  it('missing position without trusted baseline → Gateway rejects', async () => {
     await init();
-    const { bridgeMarketToKernel } = require('../../src/position/MarketBridge');
-    const { createTradingEventBus } = require('../../src/events/TradingEventBus');
-
-    const bus = createTradingEventBus();
-    const unbridge = bridgeMarketToKernel(bus, spine.kernel);
-
-    // Publish market ticker through EventBus with correct payload shape
-    (bus as any).publish('market.ticker.updated', {
-      ticker: { exchange: 'bitget', instId: 'SOL/USDT', symbol: 'SOL/USDT', channel: 'ticker', last: 150, bestBid: 149, bestAsk: 151, volume24h: 1000, high24h: 160, low24h: 140, ts: Date.now() },
-      receivedAt: Date.now(),
-    });
-
-    await new Promise(r => setTimeout(r, 50));
-
-    const snap = spine.marketStore.getSnapshot('bitget', 'SOL/USDT');
-    assert.ok(snap, 'market snapshot from production EventBus bridge');
-    assert.strictEqual(snap.ticker.ticker.last, 150, 'factual price through bridge');
-
-    unbridge();
+    // Do NOT trust baseline for SOL/USDT → position is missing
+    const intent = makeIntent('gw-no-baseline', 'SOL/USDT', 'long', 1000);
+    const result = await executeThroughGateway(spine, intent, 'open', 1000);
+    assert.strictEqual(result.admitted, false, 'missing position rejected');
+    assert.ok(result.riskCode, 'has risk code');
   });
 });

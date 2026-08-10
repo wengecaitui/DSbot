@@ -141,13 +141,13 @@ export async function executeThroughGateway(
   const hardRiskSnapshot = spine.privateConfig.hardRisk();
 
   // Resolve position for Gateway — preserve factual semantics
-  // missing + action='open' → flat (trusted baseline: first trade is always allowed from nothing)
-  // missing + action='close' → missing (fail-closed: cannot close what was never opened)
+  // missing → fail-closed: requires trusted baseline before first trade
+  // flat → allowed: baseline has been established
   const rawStatus = positionResolved?.status;
   const isOpen = rawStatus === 'open';
   const effectiveStatus: 'open' | 'flat' | 'missing' = isOpen ? 'open'
-    : action === 'open' ? 'flat'
-    : rawStatus === 'missing' ? 'missing' : 'flat';
+    : rawStatus === 'missing' ? 'missing'
+    : 'flat';
   const pos = isOpen
     ? { ...positionResolved, status: 'open' as const }
     : { snapshot: null, status: effectiveStatus, side: 'flat' as const, signedQuantity: 0, averageEntryPrice: 0 };
@@ -187,4 +187,25 @@ export async function executeThroughGateway(
       reason: (omsResult as any).reason,
     },
   };
+}
+
+/**
+ * Establish a trusted flat baseline for the given exchange+symbol.
+ * Required before the first opening trade — missing positions reject at Gateway.
+ */
+export function trustBaseline(
+  spine: ProductionSpine,
+  exchange: string,
+  symbol: string,
+): void {
+  // Publish baseline through kernel so position store projects a flat state
+  spine.kernel.publish('position.baseline.confirmed' as any, {
+    baseline: {
+      exchange: exchange as any,
+      symbol,
+      side: 'flat',
+      signedQuantity: 0,
+      averageEntryPrice: 0,
+    },
+  });
 }

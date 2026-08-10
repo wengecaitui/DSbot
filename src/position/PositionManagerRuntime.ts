@@ -188,6 +188,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
     },
 
     positionManager,
+    kernel,
   };
 }
 
