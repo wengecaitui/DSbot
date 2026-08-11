@@ -47,6 +47,7 @@ export interface KernelPolicyStore {
   getLatest(exchange: ExchangeId): VersionedPolicySnapshot | undefined;
   getByVersion(exchange: ExchangeId, version: number): VersionedPolicySnapshot | undefined;
   resolve(exchange: ExchangeId, symbol: string): PolicyResolution;
+  digest(): string;
 }
 
 interface ExchangeState {

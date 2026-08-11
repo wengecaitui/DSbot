@@ -103,6 +103,7 @@ export interface KernelPositionStateStore {
   getLatest(exchange: ExchangeId, symbol: string): VersionedPositionSnapshot | undefined;
   getByVersion(exchange: ExchangeId, symbol: string, version: number): VersionedPositionSnapshot | undefined;
   resolve(exchange: ExchangeId, symbol: string): PositionResolution;
+  digest(): string;
 }
 
 interface PerSymbol {
@@ -244,9 +245,9 @@ export function createKernelPositionStateStore(config?: { maxSnapshotsPerSymbol?
 
     digest(): string {
       const entries = [...states.entries()]
-        .map(([k, v]) => [k, v.latest ?? null])
-        .filter(([_, v]) => v !== null)
-        .sort(([a], [b]) => a.localeCompare(b));
+        .map(([k, v]) => [k, v.latest] as [string, unknown])
+        .filter(([, v]) => v !== null)
+        .sort(([a], [b]) => (a as string).localeCompare(b as string));
       const { createHash } = require('node:crypto') as typeof import('node:crypto');
       return createHash('sha256').update(JSON.stringify(entries), 'utf8').digest('hex');
     },

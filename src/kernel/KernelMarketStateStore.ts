@@ -31,6 +31,7 @@ export interface KernelMarketStateStore {
   apply(envelope: KernelEventEnvelope): ApplyResult;
   getSnapshot(exchange: ExchangeId, symbol: string): MarketSnapshot | undefined;
   getAllSnapshots(): MarketSnapshot[];
+  digest(): string;
 }
 
 // ─── Internal ───────────────────────────────────────────────────────────────

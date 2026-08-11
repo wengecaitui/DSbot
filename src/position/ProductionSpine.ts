@@ -82,8 +82,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   const policyMaxLifetimeMs = config.policyMaxLifetimeMs ?? 3_600_000;
 
   // ── Durable journal ──
-  const journal: EventJournalPort = config.journal ??
-    (config.journalPath ? createFileEventJournal(config.journalPath) : undefined);
+  const journal: EventJournalPort = (config.journal ??
+    (config.journalPath ? createFileEventJournal(config.journalPath) : undefined))!;
 
   // ── TradingKernel with recovery sequence ──
   const kernel = createTradingKernel({
