@@ -106,7 +106,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // ── Dynamic-price OMS: updates execution params from factual market price ──
   const dynamicPriceOms = {
     ...oms,
-    submitRequest: (intent: TradeIntent, action: string, approvedUsd: number) => {
+    submitRequest: (intent: TradeIntent, action: any, approvedUsd: number) => {
       const snapshot = marketStore.getSnapshot(intent.exchange as any, intent.symbol);
       const price = snapshot?.ticker?.ticker?.last ?? (adapter as any).params.markPriceUsd;
       const p = (adapter as any).params;

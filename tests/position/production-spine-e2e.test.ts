@@ -80,35 +80,44 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
   // ── 4. Protective stop breach → protective close through Gateway ──────────
   it('protective stop breach → factual fill at breached price → position reduced', async () => {
-    await init();
+    // Fresh spine — avoid shared state pollution from test 2
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'prot-e2e', hardRisk });
+    s.protection.start();
+    s.protection.setMode('live');
+    s.planStore.subscribeToKernel(s.kernel as any);
+    trustBaseline(s, 'bitget', 'BTC/USDT');
+    await s.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+
     // Open position
     const openIntent = makeIntent('prot-open', 'BTC/USDT', 'long', 5000);
-    await executeThroughGateway(spine, openIntent, 'open', 5000);
-    await new Promise(r => setTimeout(r, 100));
+    await executeThroughGateway(s, openIntent, 'open', 5000);
+    await new Promise(r => setTimeout(r, 200));
 
-    const before = spine.positionStore.resolve('bitget', 'BTC/USDT');
+    const before = s.positionStore.resolve('bitget', 'BTC/USDT');
     const beforeQty = before?.signedQuantity ?? 0;
     assert.ok(beforeQty > 0, `position open before breach: qty=${beforeQty}`);
 
     // Capture protective fill price from kernel events
     let protectiveFillPrice: number | null = null;
-    const onFill = (e: any) => {
+    s.kernel.subscribe('execution.fill.confirmed', (e: any) => {
       const fill = e.payload?.fill;
       if (fill?.side === 'sell') protectiveFillPrice = fill.price;
-    };
-    spine.kernel.subscribe('execution.fill.confirmed', onFill);
+    });
 
     // Breach stop at 47000 (entry at 50000, stop at 47500 → 47000 < 47500 breached)
-    await spine.kernel.publish('market.ticker.updated', {
+    await s.kernel.publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 47000, bestBid: 46999, bestAsk: 47001, volume24h: 100, high24h: 48000, low24h: 46000, ts: Date.now() },
       receivedAt: Date.now(),
     });
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 1500));
 
-    const after = spine.positionStore.resolve('bitget', 'BTC/USDT');
+    const after = s.positionStore.resolve('bitget', 'BTC/USDT');
     const afterQty = after?.signedQuantity ?? 0;
     assert.ok(afterQty < beforeQty, `position reduced: ${beforeQty} → ${afterQty}`);
-    assert.ok(spine.protection.getSubmittedCount() > 0, 'protection submitted orders');
+    assert.ok(s.protection.getSubmittedCount() > 0, 'protection submitted orders');
 
     // Unconditional: protective fill executed at factual breached price
     assert.strictEqual(protectiveFillPrice, 47000, `protective fill price = ${protectiveFillPrice}, expected 47000`);
