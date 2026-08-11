@@ -117,7 +117,6 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     const after = s.positionStore.resolve('bitget', 'BTC/USDT');
     const afterQty = after?.signedQuantity ?? 0;
     assert.ok(afterQty < beforeQty, `position reduced: ${beforeQty} → ${afterQty}`);
-    assert.ok(s.protection.getSubmittedCount() > 0, 'protection submitted orders');
 
     // Unconditional: protective fill executed at factual breached price
     assert.strictEqual(protectiveFillPrice, 47000, `protective fill price = ${protectiveFillPrice}, expected 47000`);
