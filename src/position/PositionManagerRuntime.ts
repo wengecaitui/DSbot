@@ -30,12 +30,14 @@ export interface PositionManagerRuntime {
   getSubmittedCount(): number;
   clearSubmitted(planId: string): void;
   positionManager: PositionManager;
+  kernel: TradingKernel;
 }
 
 export function createPositionManagerRuntime(config: PositionManagerRuntimeConfig): PositionManagerRuntime {
   const positionManager = new PositionManager({ stopPct: config.stopPct ?? 0.05, enabled: true });
   let mode: RuntimeMode = 'replay';
   const submittedIntents = new Set<string>();
+  const kernel = config.kernel;
   let started = false;
 
   // Fail-closed: no OMS -> no-op runtime
@@ -48,12 +50,12 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       getSubmittedCount() { return 0; },
       clearSubmitted() {},
       positionManager,
+      kernel,
     };
   }
 
   const oms = config.oms;
   const planStore = config.planStore;
-  const kernel = config.kernel;
 
   // Event handlers — deferred via queueMicrotask to guarantee
   // store projections finish before runtime observes state.
@@ -188,6 +190,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
     },
 
     positionManager,
+    kernel,
   };
 }
 

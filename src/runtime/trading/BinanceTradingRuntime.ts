@@ -96,9 +96,20 @@ export function createBinanceTradingRuntime(
 
   const runtimeOptions: Omit<TradingRuntimeOptions, 'collectorFactory' | 'exchange'> = tradingOptions;
 
-  return createTradingRuntime({
+  const runtime = createTradingRuntime({
     ...runtimeOptions,
     exchange: 'binance',
     collectorFactory: (plan) => provider.createCollector(plan),
   });
+
+  // Phase 4C: Bridge production EventBus → shared spine kernel
+  const protection = tradingOptions.positionProtection;
+  if (protection) {
+    try {
+      const { bridgeMarketToKernel } = require('../../position/MarketBridge');
+      bridgeMarketToKernel(runtime.bus, (protection as any).kernel);
+    } catch (_) { /* bridge unavailable — protection operates standalone */ }
+  }
+
+  return runtime;
 }
