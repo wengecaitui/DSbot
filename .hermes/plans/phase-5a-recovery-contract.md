@@ -71,17 +71,26 @@ createProductionSpine(config) → {
 **Contract**:
 
 ```
-journal terminal sequence = N
-→ recovered kernel initialises at N
-→ first new event = N+1
+initialSequence = last committed Kernel logical sequence
 
-kernelLogicalSequence is never reset to 1 after a non-empty recovery.
-kernelLogicalSequence 1 means genuine cold start (no history).
+Cold start (empty journal):
+  journal.lastSequence = 0
+  TradingKernel initialSequence = 0
+  first new event = 1
+
+Recovery (non-empty journal):
+  journal.lastSequence = N
+  TradingKernel initialSequence = N
+  first new event = N+1
+
+kernelLogicalSequence is never reset.
+Sequence 1 after recovery means genuine cold start (no history survived).
+Sequence 1 after a non-empty journal → journal corruption; fail closed.
 ```
 
-**Current gap (P0)**: `InMemoryEventJournal` is volatile. On restart, sequence starts at 1 regardless of prior history. Need `FileEventJournal` that persists `lastSequence` and feeds it to TradingKernel initialisation so the sequence chain never breaks across restarts.
+**Current gap (P0)**: `InMemoryEventJournal` is volatile. On restart, sequence starts at 1 regardless of prior history. Need `FileEventJournal` that persists `lastSequence` and feeds it to TradingKernel initialisation.
 
-**Implementation**: `FileEventJournal` exposes `readonly lastSequence: number`. `TradingKernel` accepts `initialSequence?: number` in config (defaults to 1). After recovery, TradingKernel is created with `initialSequence: journal.lastSequence + 1`.
+**Implementation**: `FileEventJournal` exposes `readonly lastSequence: number` (0 if empty). `TradingKernel` accepts `initialSequence: number` in config. Cold: 0. Recovery: pass `journal.lastSequence`.
 
 ### 3.2 Durable journal is the sole factual authority
 
@@ -156,7 +165,7 @@ Replay calls store.apply() directly — never through kernel.publish().
 
 **Implementation**: `ReplayCoordinator` calls `store.apply(envelope)` directly. No kernel.publish path.
 
-### 3.6 Startup ordering is frozen
+### 3.6 Startup ordering is frozen — RECOVERY_VERIFIED is internal
 
 **Contract**:
 
@@ -165,11 +174,15 @@ One frozen startup sequence — no caller may deviate:
 
   1. Open durable journal
   2. Replay all events → all applicable projectors
-  3. Verify reconstructed state (digest comparison)
-  4. RECOVERY_VERIFIED gate
+  3. Verify reconstructed state (digest / checkpoint comparison)
+  4. RECOVERY_VERIFIED — set internally by RecoveryManager
   5. Production market data start
   6. Fresh market snapshots override replay-era market state
   7. LIVE_READY → entries and protection enabled
+
+RECOVERY_VERIFIED is granted only by the recovery/bootstrap owner (RecoveryManager).
+It is NOT a caller-supplied flag or forgeable boolean.
+No external caller may set or claim RECOVERY_VERIFIED.
 
 No caller may activate LIVE_READY before step 4.
 No caller may inject market data before step 5.
@@ -178,69 +191,90 @@ No caller may submit entries before step 7.
 
 **Current gap (P0)**: `RuntimeMode` only blocks protection, not entries. No `RECOVERY_VERIFIED` gate. No frozen ordering at spine level.
 
-**Implementation**: `RecoveryManager` owns steps 1–4. `ProductionSpine.start(options)` owns steps 5–7, gated by a `recoveryVerified: boolean` flag at the spine level.
+**Implementation**: `RecoveryManager` owns steps 1–4 and sets an internal `recoveryVerified` flag on `ProductionSpine` (read-only to callers). `ProductionSpine.start(options)` owns steps 5–7 and throws if `recoveryVerified` is not internally set. No caller-supplied `recoveryVerified` parameter exists.
 
-### 3.7 Verified recovery (PASSES — modified)
+### 3.7 Recovery checkpoint anchored to journal sequence
 
 **Contract**:
 
 ```
-After replay, store digests may be compared against a pre-shutdown digest
-if one was saved. This is verification, not recovery.
+An optional store digest/checkpoint must be anchored to the durable journal
+terminal sequence.
 
-On digest mismatch → RECOVERY_VERIFIED is NOT granted.
+  checkpoint.sequence === journal.lastSequence
+    → digest comparison is valid
+    → on match: RECOVERY_VERIFIED
+    → on mismatch: RECOVERY_VERIFIED denied
 
-A missing pre-shutdown digest (crash without graceful shutdown)
-does NOT block RECOVERY_VERIFIED. The journal alone is authoritative.
+  checkpoint.sequence < journal.lastSequence
+    → stale checkpoint (graceful shutdown from earlier point)
+    → journal remains authoritative — RECOVERY_VERIFIED still granted
 
-Store digest is a content-hash of all internal state records,
-not a snapshot import path.
+  checkpoint.sequence > journal.lastSequence
+    → inconsistent / corrupt — fail closed; no RECOVERY_VERIFIED
+
+Crash recovery without any checkpoint:
+  → RECOVERY_VERIFIED granted from journal alone
+
+A stale checkpoint must NOT fail recovery.
 ```
 
-**Current gap (P0)**: No verification mechanism. Stores have no digest export.
+**Current gap (P0)**: No checkpoint mechanism. Stores have no digest export.
 
-**Implementation**: Each store exposes `digest(): string` (deterministic hash of internal state). `RecoveryManager` computes post-replay digest. If a pre-shutdown `recovery-digest.json` exists, compares. Mismatch → fail. Missing file → pass (journal is authoritative).
+**Implementation**: Each store exposes `digest(): string` (deterministic hash of internal state). `RecoveryManager` saves `recovery-digest.json` with `sequence: journal.lastSequence` on graceful shutdown. On restart, compares checkpoint.sequence vs journal.lastSequence; only compares digests when sequences match exactly.
 
 ### 3.8 submission_unknown preserved (PASSES)
 
 OMS state machine: `SUBMITTED → SUBMISSION_UNKNOWN` is permitted. Terminal status. PositionManagerRuntime explicitly leaves submitted state for submission_unknown — no auto-retry. Durability layer must preserve SUBMISSION_UNKNOWN status across restart.
 
-### 3.9 Corrupt history fail-closed
+### 3.9 Journal record integrity and corrupt history fail-closed
 
 **Contract**:
 
 ```
-Any of these conditions → RECOVERY_VERIFIED is NOT granted:
+Each journal record carries a deterministic integrity checksum/digest
+computed over the serialised envelope content (excluding the checksum field).
 
+On read:
+  ✗ Checksum mismatch → corrupt record → fail closed
+  ✗ Missing checksum field → malformed record → fail closed
+
+Additionally:
   ✗ Duplicate kernelEventId in journal
   ✗ Non-contiguous kernelLogicalSequence
-  ✗ Malformed JSON line
-  ✗ Missing required fields on envelope
-  ✗ Event type validation failure
+  ✗ Malformed JSON line (unparseable)
+  ✗ Missing required fields on envelope (kernelEventId, kernelLogicalSequence,
+    kernelTimestamp, type, payload)
+  ✗ Event type not in known TradingEventType set
 
-FileEventJournal validates on read; ReplayCoordinator validates on apply.
+Any of these → RECOVERY_VERIFIED is NOT granted.
+
+Checksum algorithm must be deterministic and fast (SHA-256 of canonical JSON).
 ```
 
-**Current gap (P0)**: InMemoryEventJournal validates on append and read. FileEventJournal must add: line-level JSON parse validation, field presence checks, sequence continuity on read-all path.
-
-### 3.10 Policy path — real consumption, no fabrication
+### 3.10 Policy path — real consumption with max lifetime, no fabrication
 
 **Contract**:
 
 ```
 ProductionSpine must:
 
-  1. Accept validated policy.snapshot.published kernel events
-  2. Project them into KernelPolicyStore via apply()
-  3. In executeThroughGateway, consume policyStore.resolve(exchange, symbol)
+  1. Accept a valid policyMaxLifetimeMs configuration
+  2. Accept validated policy.snapshot.published kernel events
+  3. Project them into KernelPolicyStore via apply()
+  4. In executeThroughGateway, consume policyStore.resolve(exchange, symbol)
      for the gatewayInput.policyResolution field
 
 The fabricated { status: 'active', allowNewEntries: true, ... } is removed.
+
+policyMaxLifetimeMs gates: if the resolved policy snapshot exceeds
+policyMaxLifetimeMs in age (current time - snapshot.generatedAt), the
+policy is treated as stale → Gateway receives a stale/expired resolution.
 ```
 
-**Current gap (P0)**: `executeThroughGateway()` fabricates policy. `KernelPolicyStore` exists but is never wired into ProductionSpine or the gateway path.
+**Current gap (P0)**: `executeThroughGateway()` fabricates policy. `KernelPolicyStore` exists but is never wired into ProductionSpine or the gateway path. No `policyMaxLifetimeMs` configuration.
 
-**Implementation**: `KernelPolicyStore` is added to `ProductionSpine` and subscribed to kernel. `executeThroughGateway` passes `spine.policyStore.resolve(exchange, symbol)` into `gatewayInput.policyResolution`.
+**Implementation**: `KernelPolicyStore` is added to `ProductionSpine` and subscribed to kernel. `policyMaxLifetimeMs` is a `ProductionSpineConfig` field (default: 3600_000 = 1 hour). `executeThroughGateway` passes `spine.policyStore.resolve(exchange, symbol)` into `gatewayInput.policyResolution`. Stale resolution is a `PolicyStatus.STALE` gate in the Gateway.
 
 ### 3.11 One authoritative spine (PASSES)
 
@@ -330,6 +364,10 @@ interface FileEventJournal extends EventJournalPort {
   readonly eventCount: number;
   close(): void;
 }
+
+// Each journal line: { checksum: string, envelope: KernelEventEnvelope }
+// checksum = SHA-256(canonicalJSON(envelope))
+// On read: verify checksum; mismatch → corrupt → throw
 ```
 
 ### 6.2 ReplayCoordinator
@@ -354,26 +392,25 @@ interface ReplayReport {
 type RecoveryMode = 'verified' | 'failed' | 'no_history';
 
 interface RecoveryManager {
-  recover(journal: EventJournalPort, projectors: ProjectorMap): RecoveryResult;
+  recover(journal: EventJournalPort, checkpointPath?: string): RecoveryResult;
 }
 
 interface RecoveryResult {
   mode: RecoveryMode;
-  digestVerified: boolean;
-  preShutdownDigestAvailable: boolean;
+  checkpointComparison: 'match' | 'mismatch' | 'stale' | 'missing' | 'inconsistent';
 }
 ```
 
-### 6.4 ProductionSpine.start()
+### 6.4 ProductionSpine — no caller-supplied recoveryVerified
 
 ```typescript
 interface ProductionSpine {
   // ... existing members
+  readonly recoveryVerified: boolean;   // set internally by RecoveryManager; read-only
+
   start(options: {
-    recoveryVerified: boolean;      // must be true — set by RecoveryManager
     exchange: string;
-  }): Promise<void>;               // throws if !recoveryVerified
-  readonly recoveryVerified: boolean;
+  }): Promise<void>;                    // throws if !recoveryVerified
 }
 ```
 
@@ -391,7 +428,8 @@ interface KernelStore {
 ```typescript
 interface ProductionSpineConfig {
   // ... existing
-  policyStore?: KernelPolicyStore;  // if provided, must be subscribed to kernel
+  policyStore?: KernelPolicyStore;
+  policyMaxLifetimeMs?: number;    // default 3_600_000 (1 hour)
 }
 
 interface ProductionSpine {
@@ -401,7 +439,7 @@ interface ProductionSpine {
 
 // In executeThroughGateway:
 gatewayInput.policyResolution = spine.policyStore.resolve(
-  intent.exchange, intent.symbol,
+  intent.exchange, intent.symbol, spine.config.policyMaxLifetimeMs,
 );
 ```
 
@@ -442,20 +480,20 @@ tests/recovery/production-recovery.test.ts
 
 ## 9. STATUS
 
-```text
-PRE_HEAD = cbe832da691092b86f374fa57092ce5f1a6ef7f5
+```
+PRE_HEAD = a7df9fbf302ee168f35e54f62fa58ce53ff83de1
 
-KERNEL_SEQUENCE_RESUME = journal.lastSequence+1 → first new event; never reset to 1 after recovery
-RECOVERY_AUTHORITY = durable journal is sole factual authority; no snapshot import as second authority
-SNAPSHOT_IMPORT = NOT required for recovery; digest-only verification; missing pre-shutdown digest OK
-REPLAY_ROUTING = type→projector map; events route only to applicable stores
-STARTUP_OWNER = RecoveryManager → replay+verify → ProductionSpine.start → market → LIVE_READY
-LIVE_READY_ORDER = frozen: cannot activate before RECOVERY_VERIFIED
-POLICY_PUBLICATION = policy.snapshot.published → KernelPolicyStore.apply
-POLICY_GATEWAY_PATH = policyStore.resolve(exchange, symbol) → Gateway; no fabricated allow-all
+SEQUENCE_SEMANTICS = initialSequence = last committed sequence; cold:0→1, recovery:N→N+1
+RECOVERY_VERIFICATION_AUTHORITY = RecoveryManager internal; no caller-supplied forgeable flag
+LIVE_READY_AUTHORITY = RecoveryManager grants RECOVERY_VERIFIED internally; ProductionSpine.start throws if not set
+CHECKPOINT_SEQUENCE_ANCHOR = checkpoint.sequence == journal.lastSequence → valid comparison
+STALE_CHECKPOINT_BEHAVIOR = checkpoint.sequence < journal.lastSequence → journal authoritative, RECOVERY_VERIFIED still granted
+JOURNAL_RECORD_INTEGRITY = SHA-256 checksum per journal line; mismatch → corrupt → fail closed
+POLICY_MAX_LIFETIME = ProductionSpineConfig.policyMaxLifetimeMs (default 1 hour)
+POLICY_GATEWAY_PATH = policy.snapshot.published → KernelPolicyStore → policyStore.resolve → Gateway
 
 P0_CONTRACT_ISSUES_REMAINING = 0
 P1_CONTRACT_ISSUES_REMAINING = 0
 
-STATUS = CONTRACT_REPAIRED_AWAITING_REVIEW
+STATUS = CONTRACT_READY_FOR_IMPLEMENTATION
 ```
