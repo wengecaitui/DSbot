@@ -19,13 +19,27 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
   async function init() {
     if (initDone) return;
-    spine = await createProductionSpine({ exchange: 'bitget', accountId: 'e2e', hardRisk });
+    spine = await createProductionSpine({ exchange: 'bitget', accountId: 'e2e', hardRisk, policyMaxLifetimeMs: 3600_000 });
     spine.protection.start();
     spine.protection.setMode('live');
     spine.planStore.subscribeToKernel(spine.kernel as any);
-    // Establish trusted baseline (required before first trade)
+
+    // Establish trusted baseline FIRST (required so policy pub seq ≥ 2)
     trustBaseline(spine, 'bitget', 'BTC/USDT');
     trustBaseline(spine, 'bitget', 'ETH/USDT');
+
+    // Publish minimal valid policy (seq ≥ 2, sourceResearchSequence=1 < seq)
+    const now = Date.now();
+    spine.kernel.publish('policy.snapshot.published', {
+      policy: {
+        exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
+        compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000,
+        allowNewEntries: true, allowedSymbols: [], blockedSymbols: [],
+        allowedStrategyIds: [], blockedStrategyIds: [],
+        maxPositionMultiplier: 1, riskLevel: 'low' as const, directionBias: 'neutral' as const,
+        symbolRules: {}, reasonCodes: [],
+      },
+    });
     // Seed market price
     await spine.kernel.publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
@@ -81,10 +95,26 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
   // ── 4. Protective stop breach → protective close through Gateway ──────────
   it('protective stop breach → factual fill at breached price → position reduced', async () => {
     // Fresh spine — avoid shared state pollution from test 2
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'prot-e2e', hardRisk });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'prot-e2e', hardRisk, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
     s.protection.setMode('live');
     s.planStore.subscribeToKernel(s.kernel as any);
+
+    trustBaseline(s, 'bitget', 'BTC/USDT');
+
+    // Publish policy (baseline is seq 1, policy is seq 2)
+    const pNow = Date.now();
+    s.kernel.publish('policy.snapshot.published', {
+      policy: {
+        exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
+        compilerVersion: '1', compiledAt: pNow, effectiveAt: pNow, expiresAt: pNow + 3600_000,
+        allowNewEntries: true, allowedSymbols: [], blockedSymbols: [],
+        allowedStrategyIds: [], blockedStrategyIds: [],
+        maxPositionMultiplier: 1, riskLevel: 'low' as const, directionBias: 'neutral' as const,
+        symbolRules: {}, reasonCodes: [],
+      },
+    });
+
     trustBaseline(s, 'bitget', 'BTC/USDT');
     await s.kernel.publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
