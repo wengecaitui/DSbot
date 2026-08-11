@@ -56,7 +56,6 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
 
   const oms = config.oms;
   const planStore = config.planStore;
-  const kernel = config.kernel;
 
   // Event handlers — deferred via queueMicrotask to guarantee
   // store projections finish before runtime observes state.
