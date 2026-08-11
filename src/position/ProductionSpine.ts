@@ -103,19 +103,33 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
   const planStore = new PositionPlanStore();
 
+  // ── Dynamic-price OMS: updates execution params from factual market price ──
+  const dynamicPriceOms = {
+    ...oms,
+    submitRequest: (intent: TradeIntent, action: string, approvedUsd: number) => {
+      const snapshot = marketStore.getSnapshot(intent.exchange as any, intent.symbol);
+      const price = snapshot?.ticker?.ticker?.last ?? (adapter as any).params.markPriceUsd;
+      const p = (adapter as any).params;
+      p.markPriceUsd = price;
+      p.executedAtMs = Date.now();
+      return oms.submitRequest(intent, action, approvedUsd);
+    },
+    getStore: () => oms.getStore(),
+  } as typeof oms;
+
   // ── Position protection with REAL OMS ──
   const protection = createPositionManagerRuntime({
     kernel,
     positionStore,
     planStore,
-    oms,
+    oms: dynamicPriceOms,
     marketStore,
     hardRisk: config.hardRisk as any,
     stopPct: config.stopPct ?? 0.05,
   });
 
   return {
-    kernel, positionStore, marketStore, oms, planStore, protection, adapter, service,
+    kernel, positionStore, marketStore, oms: dynamicPriceOms, planStore, protection, adapter, service,
     privateConfig: { hardRisk: config.hardRisk },
   };
 }
