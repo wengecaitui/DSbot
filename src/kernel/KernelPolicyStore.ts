@@ -228,5 +228,12 @@ export function createKernelPolicyStore(config: {
       }
       return deepFreeze(buildResolution(state, symbol) as unknown as Record<string,unknown>) as unknown as PolicyResolution;
     },
+
+    digest(): string {
+      const sorted = [...states.entries()]
+        .sort(([a], [b]) => a.localeCompare(b));
+      const { createHash } = require('node:crypto') as typeof import('node:crypto');
+      return createHash('sha256').update(JSON.stringify(sorted), 'utf8').digest('hex');
+    },
   };
 }

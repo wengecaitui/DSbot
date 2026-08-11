@@ -65,4 +65,11 @@ export class OmsOrderStore {
     for (const r of this.orders.values()) if (r.snapshot.intentId === intentId) return r.snapshot;
     return undefined;
   }
+
+  digest(): string {
+    const { createHash } = require('node:crypto') as typeof import('node:crypto');
+    const sorted = [...this.orders.entries()]
+      .sort(([a], [b]) => a.localeCompare(b));
+    return createHash('sha256').update(JSON.stringify(sorted), 'utf8').digest('hex');
+  }
 }

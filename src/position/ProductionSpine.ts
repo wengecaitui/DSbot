@@ -1,13 +1,16 @@
-// Phase 4C: ProductionSpine — unified kernel-backed paper execution spine
+// Phase 4C + 5A: ProductionSpine — unified kernel-backed paper execution spine
+//   Phase 5A adds: durable journal, KernelPolicyStore, recovery verification, start() gate
 //
 // One shared TradingKernel powers:
 //   market.ticker.updated → KernelMarketStateStore
+//   policy.snapshot.published → KernelPolicyStore
 //   PreTradeRiskGateway → OmsCore → PaperExecutionAdapter → factual fill
 //   execution.fill.confirmed → KernelPositionStateStore → PositionManagerRuntime
 
 import { createTradingKernel, type TradingKernel } from '../kernel/TradingKernel';
 import { createKernelPositionStateStore, type KernelPositionStateStore } from '../kernel/KernelPositionStateStore';
 import { createKernelMarketStateStore, type KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
+import { createKernelPolicyStore, type KernelPolicyStore } from '../kernel/KernelPolicyStore';
 import { OmsCore } from '../oms/OmsCore';
 import { PaperExecutionAdapter } from '../oms/PaperExecutionAdapter';
 import { PaperExecutionService, type ExecuteParams } from '../paper/PaperExecutionService';
@@ -20,6 +23,8 @@ import { systemDomainClock } from '../runtime/Clock';
 import { evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
 import type { GatewayInput } from '../risk/pretrade-risk-types';
 import type { TradeIntent } from '../types/trade-intent';
+import type { EventJournalPort } from '../kernel/EventJournalPort';
+import { createFileEventJournal, type FileEventJournal } from '../recovery/FileEventJournal';
 
 export interface ProductionSpineConfig {
   exchange: string;
@@ -28,22 +33,32 @@ export interface ProductionSpineConfig {
   persistence?: PaperBrokerPersistence;
   hardRisk: () => RiskSnapshot;
   stopPct?: number;
-  journal?: any;
+  journal?: EventJournalPort;
+  /** Path to durable journal file. Creates FileEventJournal if provided. */
+  journalPath?: string;
   clock?: any;
-  /** Market data staleness threshold in milliseconds. Default: 60000 (1 minute). */
   marketStaleAfterMs?: number;
+  /** Policy max lifetime in ms. Required for policy.snapshot.published. Default: 3_600_000 (1 hour). */
+  policyMaxLifetimeMs?: number;
 }
 
 export interface ProductionSpine {
   kernel: TradingKernel;
   positionStore: KernelPositionStateStore;
   marketStore: KernelMarketStateStore;
+  policyStore: KernelPolicyStore;
   oms: OmsCore;
   planStore: PositionPlanStore;
   protection: ReturnType<typeof createPositionManagerRuntime>;
   adapter: PaperExecutionAdapter;
   service: PaperExecutionService;
-  privateConfig: { hardRisk: () => RiskSnapshot },
+  privateConfig: { hardRisk: () => RiskSnapshot };
+  /** Set internally by RecoveryManager — read-only to callers */
+  readonly recoveryVerified: boolean;
+  /** INTERNAL: RecoveryManager sets this after verification. Throws if already started. */
+  setRecoveryVerified(verified: boolean): void;
+  /** Start production: must be called after recovery verification */
+  start(options: { exchange: string }): Promise<void>;
 }
 
 export interface ExecuteThroughGatewayResult {
@@ -64,11 +79,24 @@ function inMemoryPersistence(): PaperBrokerPersistence {
 export async function createProductionSpine(config: ProductionSpineConfig): Promise<ProductionSpine> {
   const exchange = config.exchange as any;
   const clock = config.clock ?? systemDomainClock;
+  const policyMaxLifetimeMs = config.policyMaxLifetimeMs ?? 3_600_000;
+
+  // ── Durable journal ──
+  const journal: EventJournalPort = config.journal ??
+    (config.journalPath ? createFileEventJournal(config.journalPath) : undefined);
+
+  // ── TradingKernel with recovery sequence ──
   const kernel = createTradingKernel({
     exchange,
-    journal: config.journal,
+    journal,
     clock,
+    policyMaxLifetimeMs,
+    initialSequence: (journal as FileEventJournal)?.lastSequence ?? 0,
   });
+
+  // ── Policy store (subscribed to kernel) ──
+  const policyStore = createKernelPolicyStore({ maxLifetimeMs: policyMaxLifetimeMs });
+  kernel.subscribe('policy.snapshot.published', (e) => { policyStore.apply(e); });
 
   // ── Market state store (subscribed to kernel) ──
   const marketStore = createKernelMarketStateStore({
@@ -88,7 +116,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
   // ── OMS + adapter (prices filled per-request from market store) ──
   const defaultExecuteParams: ExecuteParams = {
-    markPriceUsd: 0, // filled per-request from market store
+    markPriceUsd: 0,
     feeBps: 10,
     slippageBps: 0,
     executedAtMs: Date.now(),
@@ -103,7 +131,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
   const planStore = new PositionPlanStore();
 
-  // ── Dynamic-price OMS: updates execution params from factual market price ──
+  // ── Dynamic-price OMS ──
   const dynamicPriceOms = {
     ...oms,
     submitRequest: (intent: TradeIntent, action: any, approvedUsd: number) => {
@@ -128,17 +156,36 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     stopPct: config.stopPct ?? 0.05,
   });
 
+  // ── Recovery state (internal) ──
+  let recoveryVerified = false;
+  let started = false;
+
   return {
-    kernel, positionStore, marketStore, oms: dynamicPriceOms, planStore, protection, adapter, service,
+    kernel, positionStore, marketStore, policyStore,
+    oms: dynamicPriceOms, planStore, protection, adapter, service,
     privateConfig: { hardRisk: config.hardRisk },
-  };
+
+    get recoveryVerified() { return recoveryVerified; },
+
+    setRecoveryVerified(verified: boolean) {
+      if (started) throw new Error('SPINE_ALREADY_STARTED: cannot modify recoveryVerified after start');
+      recoveryVerified = verified;
+    },
+
+    async start(options: { exchange: string }) {
+      if (started) return;
+      if (!recoveryVerified) throw new Error('SPINE_NOT_RECOVERY_VERIFIED: start requires RECOVERY_VERIFIED');
+      started = true;
+      // Production market start would happen here — market collectors start,
+      // then LIVE_READY gate activates protection
+      protection.setMode('live');
+    },
+  } as ProductionSpine;
 }
 
 /**
  * Execute a TradeIntent through PreTradeRiskGateway → OmsCore → PaperExecutionAdapter.
- * Uses the factual market price from KernelMarketStateStore for the execution.
- *
- * Risk rejection returns { admitted: false, riskCode } without calling OMS.
+ * Uses the factual market price and real policy resolution.
  */
 export async function executeThroughGateway(
   spine: ProductionSpine,
@@ -146,18 +193,15 @@ export async function executeThroughGateway(
   action: 'open' | 'close',
   approvedUsd: number,
 ): Promise<ExecuteThroughGatewayResult> {
-  const { kernel, positionStore, marketStore, oms, adapter } = spine;
+  const { kernel, positionStore, marketStore, oms, adapter, policyStore } = spine;
   const exchange = intent.exchange as any;
   const symbol = intent.symbol;
 
-  // Factual market price
   const marketSnapshot = marketStore.getSnapshot(exchange, symbol);
   const positionResolved = positionStore.resolve(exchange, symbol);
   const hardRiskSnapshot = spine.privateConfig.hardRisk();
 
-  // Resolve position for Gateway — preserve factual semantics
-  // missing → fail-closed: requires trusted baseline before first trade
-  // flat → allowed: baseline has been established
+  // Resolve position — preserve factual semantics
   const rawStatus = positionResolved?.status;
   const isOpen = rawStatus === 'open';
   const effectiveStatus: 'open' | 'flat' | 'missing' = isOpen ? 'open'
@@ -167,12 +211,13 @@ export async function executeThroughGateway(
     ? { ...positionResolved, status: 'open' as const }
     : { snapshot: null, status: effectiveStatus, side: 'flat' as const, signedQuantity: 0, averageEntryPrice: 0 };
 
+  // Real policy resolution from KernelPolicyStore — no fabricated allow-all
   const gatewayInput: GatewayInput = {
     intent,
     action,
     marketSnapshot: marketSnapshot as any,
-    positionResolution: pos,
-    policyResolution: { status: 'active', policy: null, allowNewEntries: true, maxPositionMultiplier: 1, directionBias: 'neutral', riskLevel: 'low', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } as any,
+    positionResolution: pos as any,
+    policyResolution: policyStore.resolve(exchange, symbol) as any,
     hardRisk: hardRiskSnapshot as any,
   };
 
@@ -181,7 +226,6 @@ export async function executeThroughGateway(
     return { admitted: false, riskCode: riskResult.reasonCode, action };
   }
 
-  // Use Gateway-authorised sizing, never caller-supplied size
   const authorisedUsd = riskResult.approvedPositionUsd;
 
   // Set factual market price before execution
@@ -190,7 +234,6 @@ export async function executeThroughGateway(
     (adapter as any).params.executedAtMs = Date.now();
   }
 
-  // Execute through same OMS, using Gateway-approved size
   const omsResult = await oms.submitRequest(intent, action, authorisedUsd);
 
   return {
@@ -206,14 +249,12 @@ export async function executeThroughGateway(
 
 /**
  * Establish a trusted flat baseline for the given exchange+symbol.
- * Required before the first opening trade — missing positions reject at Gateway.
  */
 export function trustBaseline(
   spine: ProductionSpine,
   exchange: string,
   symbol: string,
 ): void {
-  // Publish baseline through kernel so position store projects a flat state
   spine.kernel.publish('position.baseline.confirmed' as any, {
     baseline: {
       exchange: exchange as any,

@@ -113,8 +113,10 @@ export function createTradingKernel(config: {
   clock?: DomainClock;
   journal?: EventJournalPort;
   policyMaxLifetimeMs?: number;
+  /** Recovery: set initial sequence to journal.lastSequence so first new event is N+1 */
+  initialSequence?: number;
 }): TradingKernel {
-  let seq: number = 0;
+  let seq: number = config.initialSequence ?? 0;
   let journal: EventJournalPort = config.journal ?? createInMemoryEventJournal();
   const clock: DomainClock = config.clock ?? systemDomainClock;
   const subs = new Map<TradingEventType, KernelSubscriber[]>();

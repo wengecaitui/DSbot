@@ -241,5 +241,14 @@ export function createKernelPositionStateStore(config?: { maxSnapshotsPerSymbol?
       const status = s.side === 'flat' ? 'flat' : 'open';
       return deepFreeze({ status, snapshot: s, side: s.side, signedQuantity: s.signedQuantity, averageEntryPrice: s.averageEntryPrice } as PositionResolution);
     },
+
+    digest(): string {
+      const entries = [...states.entries()]
+        .map(([k, v]) => [k, v.latest ?? null])
+        .filter(([_, v]) => v !== null)
+        .sort(([a], [b]) => a.localeCompare(b));
+      const { createHash } = require('node:crypto') as typeof import('node:crypto');
+      return createHash('sha256').update(JSON.stringify(entries), 'utf8').digest('hex');
+    },
   };
 }
