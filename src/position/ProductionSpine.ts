@@ -95,7 +95,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   });
 
   // ── Policy store (subscribed to kernel) ──
-  const policyStore = createKernelPolicyStore({ maxLifetimeMs: policyMaxLifetimeMs });
+  const policyStore = createKernelPolicyStore({ clock, maxLifetimeMs: policyMaxLifetimeMs, maxVersionsPerExchange: 10 });
   kernel.subscribe('policy.snapshot.published', (e) => { policyStore.apply(e); });
 
   // ── Market state store (subscribed to kernel) ──
