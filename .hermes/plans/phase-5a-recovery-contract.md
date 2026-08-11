@@ -27,15 +27,15 @@ src/kernel/
 
 `createTradingKernel({ journal?, clock? })` accepts an optional journal. Default is `createInMemoryEventJournal()`.
 
-### 2.2 Stores — event-driven apply, no snapshot export
+### 2.2 Stores — event-driven apply
 
-| Store | Events consumed | Apply shape | Snapshot export? |
-|---|---|---|---|
-| KernelPositionStateStore | execution.fill.confirmed, position.baseline.confirmed | apply(e) → pos | No |
-| KernelMarketStateStore | market.ticker.updated | apply(e) → snapshot | No (getSnapshot is runtime only) |
-| KernelPolicyStore | policy.snapshot.published | apply(e) → resolution | No |
-| OmsOrderStore | order.*, execution.fill.confirmed | apply(e) → snapshot | No |
-| PositionPlanStore | position.plan.* | apply(e) → plan | No |
+| Store | Events consumed | Apply shape |
+|---|---|---|
+| KernelPositionStateStore | execution.fill.confirmed, position.baseline.confirmed | apply(e) → pos |
+| KernelMarketStateStore | market.ticker.updated | apply(e) → snapshot |
+| KernelPolicyStore | policy.snapshot.published | apply(e) → resolution |
+| OmsOrderStore | order.*, execution.fill.confirmed | apply(e) → snapshot |
+| PositionPlanStore | position.plan.* | apply(e) → plan |
 
 ### 2.3 RuntimeMode — natural LIVE_READY gate
 
@@ -43,8 +43,7 @@ src/kernel/
 type RuntimeMode = 'replay' | 'live';   // src/position/PositionManagerRuntime.ts:13
 ```
 
-- Default: `'replay'`
-- `onMarketEvent` / `onFillEvent` handlers check `mode !== 'live'` → return early
+- Default: `'replay'` — handlers return early, protection blocked
 - TradingRuntime sets `mode = 'live'` at LIVE_READY boundary (after market data starts)
 - `stop()` sets `mode = 'replay'`
 
@@ -65,246 +64,345 @@ createProductionSpine(config) → {
 
 ---
 
-## 3. INVARIANT-TO-INFRASTRUCTURE GAP ANALYSIS
+## 3. INVARIANTS
 
-### 3.1 Invariant 1 — Durable event survival (P0)
+### 3.1 Kernel sequence resumes where journal ends
 
-**Current**: `InMemoryEventJournal` — all events lost on restart. No file/disk journal exists.
+**Contract**:
 
-**Required**: `FileEventJournal` implementing `EventJournalPort` with append-only durability. Events must survive restart with preserved `kernelEventId`, `kernelLogicalSequence`, `kernelTimestamp`, and ordering.
+```
+journal terminal sequence = N
+→ recovered kernel initialises at N
+→ first new event = N+1
 
-### 3.2 Invariant 2 — Original event identity preserved (PASSES)
-
-KernelEventEnvelope has `kernelEventId`, `kernelLogicalSequence`, `kernelTimestamp`. `InMemoryEventJournal` enforces contiguous sequence and deep-clones. This invariant is already structurally satisfied. The durability layer must preserve it — no new identity fields needed.
-
-### 3.3 Invariant 3 — Startup reconstruction from factual history (P0)
-
-**Current**: No replay mechanism. Stores have `apply()` but no initialization path other than subscribing to live kernel events.
-
-**Required**: `ReplayCoordinator` that:
-1. Opens durable journal
-2. Reads all events in `kernelLogicalSequence` order
-3. Calls `store.apply(env)` on each store for each event
-4. Does NOT publish new kernel events (adapter-free)
-
-Stores must also expose a snapshot/import pair for recovery verification (see 3.6).
-
-### 3.4 Invariant 4 — Replay must not execute (P0)
-
-**Current**: No replay guard exists. OmsCore constructor subscribes store to kernel events. If replay publishes events through kernel, the adapter would be invoked.
-
-**Required**: `ReplayCoordinator` must call `store.apply()` directly, bypassing kernel.publish(). No execution adapter may be invoked during replay. No fills created. No orders submitted. No protective execution triggered.
-
-### 3.5 Invariant 5 — Entry blocking before verification (P0)
-
-**Current**: `RuntimeMode` starts as `'replay'` — protection is blocked. But kernel.publish() is still available. New entries can be published before recovery completes.
-
-**Required**: Before recovery verification, the spine must reject new trading entries. Options:
-1. Spine-level gate that blocks kernel.publish for trading events during recovery
-2. RuntimeMode extended to spine scope (not just protection)
-
-### 3.6 Invariant 6 — Verified recovery (P0)
-
-**Current**: No recovery verification exists. No snapshot/recovery-report comparison mechanism.
-
-**Required**: After replay:
-1. Take pre-shutdown snapshot of every store (position, OMS, plan, policy)
-2. After restart + replay, compute post-replay snapshot
-3. Compare: factual Position / OMS / active Plan / Policy state must match
-4. On mismatch → fail-closed (no LIVE_READY)
-
-### 3.7 Invariant 7 — submission_unknown preserved (PASSES)
-
-OMS state machine: `SUBMITTED → SUBMISSION_UNKNOWN` transition is permitted. After reaching SUBMISSION_UNKNOWN, status is terminal. The `.then()` handler in PositionManagerRuntime explicitly leaves submitted state for submission_unknown — no auto-retry.
-
-This invariant is already satisfied. The durability layer must preserve the SUBMISSION_UNKNOWN status across restart.
-
-### 3.8 Invariant 8 — Corrupt history fail-closed (P0)
-
-**Current**: `InMemoryEventJournal` throws on duplicate eventId and non-contiguous sequence. `FileEventJournal` must add: checksum verification, integrity header, EOF detection, gap detection. Any of these → fail-closed.
-
-### 3.9 Invariant 9 — Real policy consumption (P0)
-
-**Current**: `executeThroughGateway()` in ProductionSpine.ts fabricates policy:
-
-```typescript
-policyResolution: { status: 'active', policy: null, allowNewEntries: true, ... }
+kernelLogicalSequence is never reset to 1 after a non-empty recovery.
+kernelLogicalSequence 1 means genuine cold start (no history).
 ```
 
-`KernelPolicyStore` exists and is functional (consumes `policy.snapshot.published` events), but is never wired into the gateway path.
+**Current gap (P0)**: `InMemoryEventJournal` is volatile. On restart, sequence starts at 1 regardless of prior history. Need `FileEventJournal` that persists `lastSequence` and feeds it to TradingKernel initialisation so the sequence chain never breaks across restarts.
 
-**Required**: ProductionSpine must create `KernelPolicyStore`, subscribe it to kernel, and pass resolved policy into Gateway. The fabricated allow-all must be removed.
+**Implementation**: `FileEventJournal` exposes `readonly lastSequence: number`. `TradingKernel` accepts `initialSequence?: number` in config (defaults to 1). After recovery, TradingKernel is created with `initialSequence: journal.lastSequence + 1`.
 
-### 3.10 Invariant 10 — One authoritative spine (PASSES)
+### 3.2 Durable journal is the sole factual authority
 
-ProductionSpine creates one shared kernel, one OMS, one set of state stores. No disconnected universe. This invariant is already satisfied.
+**Contract**:
+
+```
+The durable factual journal is authoritative.
+
+Recovery does not require a graceful pre-shutdown snapshot.
+Crash recovery works from journal alone.
+
+Store digests may verify reconstructed state,
+but there is no second factual state authority.
+
+Snapshot import is NOT a recovery mechanism —
+it is a verification aid, not a state source.
+```
+
+**Current gap (P0)**: No durable journal exists. `InMemoryEventJournal` loses all data on restart.
+
+**Implementation**: `FileEventJournal` implementing `EventJournalPort` — append-only JSON Lines to a single file. Each line is one `KernelEventEnvelope` serialized as JSON. No rotation needed for MVP. Journal is the sole authoritative record.
+
+### 3.3 Original event identity preserved (PASSES)
+
+KernelEventEnvelope already has `kernelEventId`, `kernelLogicalSequence`, `kernelTimestamp`. `InMemoryEventJournal` enforces contiguous sequence and deep-clones. The durability layer must preserve these fields exactly — no new identity fields needed.
+
+### 3.4 Replay routes events to applicable projectors only
+
+**Contract**:
+
+```
+Replay must not broadcast every event to every store.
+
+Each event type has an authoritative set of projectors:
+
+  market.ticker.updated        → KernelMarketStateStore
+  execution.fill.confirmed     → KernelPositionStateStore, OmsOrderStore
+  position.baseline.confirmed  → KernelPositionStateStore
+  policy.snapshot.published    → KernelPolicyStore
+  order.created                → OmsOrderStore
+  order.submitted              → OmsOrderStore
+  order.rejected               → OmsOrderStore
+  order.submission.unknown     → OmsOrderStore
+  position.plan.created        → PositionPlanStore
+  position.plan.closed         → PositionPlanStore
+  position.plan.updated        → PositionPlanStore
+  position.plan.archived       → PositionPlanStore
+
+Replay calls store.apply(envelope) only on the target projectors for that event type.
+```
+
+**Current gap (P0)**: No replay mechanism exists. Need `ReplayCoordinator` that reads journal events and routes them by type → projector.
+
+**Implementation**: `ReplayCoordinator.replay(journal, projectors)` where `projectors` is a `Map<TradingEventType, KernelStore[]>` mapping each event type to its authoritative stores.
+
+### 3.5 Replay must never execute
+
+**Contract**:
+
+```
+During replay:
+  ✗ No execution adapter invocation
+  ✗ No new orders submitted
+  ✗ No synthetic fills created
+  ✗ No new trading intents created
+  ✗ No protective execution triggered
+
+Replay calls store.apply() directly — never through kernel.publish().
+```
+
+**Current gap (P0)**: No replay guard exists. OmsCore subscribes its store to kernel events — if replay published through kernel, the adapter would fire.
+
+**Implementation**: `ReplayCoordinator` calls `store.apply(envelope)` directly. No kernel.publish path.
+
+### 3.6 Startup ordering is frozen
+
+**Contract**:
+
+```
+One frozen startup sequence — no caller may deviate:
+
+  1. Open durable journal
+  2. Replay all events → all applicable projectors
+  3. Verify reconstructed state (digest comparison)
+  4. RECOVERY_VERIFIED gate
+  5. Production market data start
+  6. Fresh market snapshots override replay-era market state
+  7. LIVE_READY → entries and protection enabled
+
+No caller may activate LIVE_READY before step 4.
+No caller may inject market data before step 5.
+No caller may submit entries before step 7.
+```
+
+**Current gap (P0)**: `RuntimeMode` only blocks protection, not entries. No `RECOVERY_VERIFIED` gate. No frozen ordering at spine level.
+
+**Implementation**: `RecoveryManager` owns steps 1–4. `ProductionSpine.start(options)` owns steps 5–7, gated by a `recoveryVerified: boolean` flag at the spine level.
+
+### 3.7 Verified recovery (PASSES — modified)
+
+**Contract**:
+
+```
+After replay, store digests may be compared against a pre-shutdown digest
+if one was saved. This is verification, not recovery.
+
+On digest mismatch → RECOVERY_VERIFIED is NOT granted.
+
+A missing pre-shutdown digest (crash without graceful shutdown)
+does NOT block RECOVERY_VERIFIED. The journal alone is authoritative.
+
+Store digest is a content-hash of all internal state records,
+not a snapshot import path.
+```
+
+**Current gap (P0)**: No verification mechanism. Stores have no digest export.
+
+**Implementation**: Each store exposes `digest(): string` (deterministic hash of internal state). `RecoveryManager` computes post-replay digest. If a pre-shutdown `recovery-digest.json` exists, compares. Mismatch → fail. Missing file → pass (journal is authoritative).
+
+### 3.8 submission_unknown preserved (PASSES)
+
+OMS state machine: `SUBMITTED → SUBMISSION_UNKNOWN` is permitted. Terminal status. PositionManagerRuntime explicitly leaves submitted state for submission_unknown — no auto-retry. Durability layer must preserve SUBMISSION_UNKNOWN status across restart.
+
+### 3.9 Corrupt history fail-closed
+
+**Contract**:
+
+```
+Any of these conditions → RECOVERY_VERIFIED is NOT granted:
+
+  ✗ Duplicate kernelEventId in journal
+  ✗ Non-contiguous kernelLogicalSequence
+  ✗ Malformed JSON line
+  ✗ Missing required fields on envelope
+  ✗ Event type validation failure
+
+FileEventJournal validates on read; ReplayCoordinator validates on apply.
+```
+
+**Current gap (P0)**: InMemoryEventJournal validates on append and read. FileEventJournal must add: line-level JSON parse validation, field presence checks, sequence continuity on read-all path.
+
+### 3.10 Policy path — real consumption, no fabrication
+
+**Contract**:
+
+```
+ProductionSpine must:
+
+  1. Accept validated policy.snapshot.published kernel events
+  2. Project them into KernelPolicyStore via apply()
+  3. In executeThroughGateway, consume policyStore.resolve(exchange, symbol)
+     for the gatewayInput.policyResolution field
+
+The fabricated { status: 'active', allowNewEntries: true, ... } is removed.
+```
+
+**Current gap (P0)**: `executeThroughGateway()` fabricates policy. `KernelPolicyStore` exists but is never wired into ProductionSpine or the gateway path.
+
+**Implementation**: `KernelPolicyStore` is added to `ProductionSpine` and subscribed to kernel. `executeThroughGateway` passes `spine.policyStore.resolve(exchange, symbol)` into `gatewayInput.policyResolution`.
+
+### 3.11 One authoritative spine (PASSES)
+
+ProductionSpine creates one shared kernel, one OMS, one set of state stores. No disconnected universe.
 
 ---
 
-## 4. CONTRADICTIONS WITH PHASE 1–4C
+## 4. P0 CONTRADICTIONS (EXISTING CODE EVIDENCE)
 
-### 4.1 P0 — No durable journal (Invariant 1)
+### 4.1 P0 — No durable journal (Invariants 3.1, 3.2)
 
-**Evidence**: `src/kernel/InMemoryEventJournal.ts` — only implementation. `TradingKernel` accepts `journal?: EventJournalPort` but ProductionSpine never passes a durable one.
+**Evidence**: `src/kernel/InMemoryEventJournal.ts` — only implementation.
 
-**Impact**: All kernel state lost on restart.
+**Resolution**: `FileEventJournal` — append-only JSON Lines, single file, no rotation.
 
-**Resolution**: Implement `FileEventJournal` that writes append-only JSON lines to rotating files. Optional: SQLite-backed journal for transactional integrity.
+### 4.2 P0 — No replay routing (Invariants 3.4, 3.5)
 
-### 4.2 P0 — No snapshot export on stores (Invariant 6)
+**Evidence**: No `ReplayCoordinator` exists.
 
-**Evidence**: All five stores have `apply()` but no `snapshot()` or `import()`.
+**Resolution**: `ReplayCoordinator` with type→projector routing map. Direct `store.apply()` calls.
 
-```typescript
-// KernelPositionStateStore — no snapshot export
-// KernelMarketStateStore — no snapshot export (getSnapshot is runtime only, depends on clock)
-// KernelPolicyStore — no snapshot export
-// OmsOrderStore — no snapshot export
-// PositionPlanStore — no snapshot export
-```
+### 4.3 P0 — No frozen startup ordering (Invariant 3.6)
 
-**Impact**: Cannot compare pre/post restart state. Recovery verification impossible.
+**Evidence**: No `RecoveryManager`. `RuntimeMode` is position-only. No spine-level gate.
 
-**Resolution**: Add `snapshot(): StoreSnapshot` and `import(snapshot: StoreSnapshot): void` to each store. Ref: `StoreSnapshot` is a serializable representation of internal state.
+**Resolution**: `RecoveryManager` owns steps 1–4. `ProductionSpine.start()` owns steps 5–7, gated by `recoveryVerified`.
 
-### 4.3 P0 — Fabricated policy in gateway (Invariant 9)
+### 4.4 P0 — Fabricated policy (Invariant 3.10)
 
-**Evidence**: `src/position/ProductionSpine.ts:165-170`
+**Evidence**: `src/position/ProductionSpine.ts` fabricates `{ status: 'active', allowNewEntries: true, ... }`.
 
-```typescript
-policyResolution: {
-  status: 'active', policy: null, allowNewEntries: true,
-  maxPositionMultiplier: 1, directionBias: 'neutral', riskLevel: 'low',
-  allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: []
-} as any,
-```
+**Resolution**: Wire `KernelPolicyStore` into ProductionSpine and `executeThroughGateway`.
 
-`KernelPolicyStore` exists at `src/kernel/KernelPolicyStore.ts` with `resolve(exchange, symbol) → PolicyResolution`. It is never passed into ProductionSpine or executeThroughGateway.
+### 4.5 P0 — No recovery verification (Invariant 3.7)
 
-**Impact**: Every trade intent routes through Gateway with an always-admitted policy. Real policy snapshots (which could block entries) are ignored.
+**Evidence**: No digest mechanism on stores. No recovery-digest.json.
 
-**Resolution**: Add `policyStore: KernelPolicyStore` to `ProductionSpine`. Subscribe it to kernel. Pass `policyStore.resolve(exchange, symbol)` into `gatewayInput.policyResolution` in `executeThroughGateway`.
-
-### 4.4 P0 — No ReplayCoordinator (Invariants 3, 4)
-
-**Evidence**: No file `src/recovery/ReplayCoordinator.ts` or equivalent exists.
-
-**Impact**: Cannot reconstruct state from durable history. Cannot guarantee adapter-free replay.
-
-**Resolution**: Implement `ReplayCoordinator` that:
-- Takes journal + list of stores
-- Reads events in sequence order
-- Calls `store.apply(event)` on each store
-- Does not call kernel.publish or any adapter
-
-### 4.5 P0 — No entry blocking during recovery (Invariant 5)
-
-**Evidence**: `RuntimeMode` exists only on `PositionManagerRuntime`, not at spine level. `TradingKernel.publish()` has no recovery gate. `OmsCore.submitRequest()` has no recovery gate.
-
-**Impact**: New entries can arrive and execute before recovery verifies old state is correct.
-
-**Resolution**: Add spine-level `isRecoveryVerified` flag. Block kernel.publish for trading events until verified. Block OMS submissions until verified.
+**Resolution**: `digest(): string` on each store. `RecoveryManager` compares post-replay digest against optional pre-shutdown digest.
 
 ---
 
 ## 5. IMPLEMENTATION BOUNDARY
 
-The minimum repository-consistent implementation boundary:
-
 ### 5.1 New files
 
 ```
 src/recovery/
-├── FileEventJournal.ts         # append-only durability (JSON Lines, rotating)
-├── ReplayCoordinator.ts        # journal → stores replay, adapter-free
-├── RecoveryManager.ts          # snapshot → replay → verify → LIVE_READY
-├── RecoveryReport.ts           # pre/post snapshot comparison result
-└── recovery-contracts.ts       # type definitions: RecoveryMode, RecoveryReport, etc.
+├── FileEventJournal.ts         # append-only JSON Lines to single file
+├── ReplayCoordinator.ts        # type→projector routing, adapter-free
+├── RecoveryManager.ts          # open → replay → verify → RECOVERY_VERIFIED
+└── recovery-contracts.ts       # types: RecoveryMode, RecoveryReport, etc.
 ```
 
 ### 5.2 Files expected to change
 
 ```
-src/position/ProductionSpine.ts       # +KernelPolicyStore, +FileEventJournal, +RecoveryManager
-src/kernel/TradingKernel.ts           # journal capacity enforcement (no op change)
-tests/recovery/production-recovery.test.ts  # E2E recovery scenario
+src/position/ProductionSpine.ts         # +KernelPolicyStore, +FileEventJournal, +RecoveryManager
+src/kernel/TradingKernel.ts             # +initialSequence config, resume from journal+N
+src/kernel/KernelPositionStateStore.ts  # +digest() only
+src/kernel/KernelMarketStateStore.ts    # +digest() only  
+src/kernel/KernelPolicyStore.ts         # +digest() only
+src/oms/OmsOrderStore.ts               # +digest() only
+src/position/PositionPlanStore.ts       # +digest() only
+tests/recovery/production-recovery.test.ts
 ```
 
 ### 5.3 No changes to
 
 ```
-src/kernel/KernelPositionStateStore.ts  # add snapshot() only — no logic change
-src/kernel/KernelMarketStateStore.ts    # add snapshot() only — no logic change
-src/kernel/KernelPolicyStore.ts         # add snapshot() only — no logic change
-src/oms/OmsOrderStore.ts               # add snapshot() only — no logic change
-src/position/PositionPlanStore.ts       # add snapshot() only — no logic change
 src/risk/PreTradeRiskGateway.ts         # unchanged
-src/oms/OmsCore.ts                      # unchanged (entry blocking via spine, not OmsCore)
-src/position/PositionManagerRuntime.ts  # unchanged (protects via RuntimeMode)
+src/oms/OmsCore.ts                      # unchanged
+src/paper/PaperExecutionService.ts      # unchanged
+src/position/PositionManagerRuntime.ts  # unchanged (mode blocking works)
+src/position/PositionManager.ts         # unchanged
 ```
 
 ---
 
 ## 6. CONTRACT SIGNATURES
 
-### 6.1 FileEventJournal contract
+### 6.1 FileEventJournal
 
 ```typescript
 interface FileEventJournal extends EventJournalPort {
-  // Inherits: append, getByEventId, readFromLogicalSequence
   readonly filePath: string;
-  close(): void;
+  readonly lastSequence: number;     // terminal sequence, 0 if empty
   readonly eventCount: number;
-  readonly lastSequence: number;
+  close(): void;
 }
 ```
 
-**Failure modes**: disk full → throw on append. Corrupt line → fail-closed on read.
-
-### 6.2 ReplayCoordinator contract
+### 6.2 ReplayCoordinator
 
 ```typescript
+type ProjectorMap = Map<TradingEventType, KernelStore[]>;
+
 interface ReplayCoordinator {
-  replay(journal: EventJournalPort, stores: KernelStore[]): Promise<ReplayReport>;
+  replay(journal: EventJournalPort, projectors: ProjectorMap): ReplayReport;
 }
 
 interface ReplayReport {
   eventsReplayed: number;
   lastSequence: number;
   errors: ReplayError[];
-  success: boolean;
 }
 ```
 
-### 6.3 RecoveryManager contract
+### 6.3 RecoveryManager
 
 ```typescript
+type RecoveryMode = 'verified' | 'failed' | 'no_history';
+
 interface RecoveryManager {
-  recover(journal: EventJournalPort, spine: ProductionSpine): Promise<RecoveryResult>;
+  recover(journal: EventJournalPort, projectors: ProjectorMap): RecoveryResult;
 }
 
 interface RecoveryResult {
-  mode: 'verified' | 'failed' | 'no_history';
-  report: RecoveryReport;
-  verifiedAt: number;
-}
-
-interface RecoveryReport {
-  preShutdownSnapshot: SnapshotBundle | null;
-  postReplaySnapshot: SnapshotBundle;
-  matches: boolean;
-  discrepancies: string[];
+  mode: RecoveryMode;
+  digestVerified: boolean;
+  preShutdownDigestAvailable: boolean;
 }
 ```
 
-### 6.4 KernelPolicyStore snapshot contract
+### 6.4 ProductionSpine.start()
 
 ```typescript
-interface KernelPolicyStore {
-  // ... existing apply/resolve
-  snapshot(): StoreSnapshot<PolicySnapshot>;      // new
-  import(snapshot: StoreSnapshot<PolicySnapshot>): void;  // new — for recovery replay
+interface ProductionSpine {
+  // ... existing members
+  start(options: {
+    recoveryVerified: boolean;      // must be true — set by RecoveryManager
+    exchange: string;
+  }): Promise<void>;               // throws if !recoveryVerified
+  readonly recoveryVerified: boolean;
 }
+```
+
+### 6.5 Store digest contract
+
+```typescript
+interface KernelStore {
+  apply(envelope: KernelEventEnvelope): unknown;
+  digest(): string;                // deterministic hash of all internal state records
+}
+```
+
+### 6.6 Policy path contract
+
+```typescript
+interface ProductionSpineConfig {
+  // ... existing
+  policyStore?: KernelPolicyStore;  // if provided, must be subscribed to kernel
+}
+
+interface ProductionSpine {
+  // ... existing
+  policyStore: KernelPolicyStore;
+}
+
+// In executeThroughGateway:
+gatewayInput.policyResolution = spine.policyStore.resolve(
+  intent.exchange, intent.symbol,
+);
 ```
 
 ---
@@ -314,55 +412,50 @@ interface KernelPolicyStore {
 ```text
 tests/recovery/production-recovery.test.ts
 
-[REC-01] File journal survives restart with exact event identity, sequence, and ordering
-[REC-02] ReplayCoordinator replays events → stores without calling any adapter
-[REC-03] RecoveryManager prevents new entries during recovery
-[REC-04] RecoveryManager activates LIVE_READY after verified recovery
-[REC-05] Verified recovery → position/OMS/plan/policy match pre-restart state
-[REC-06] Corrupt journal → fail-closed (no LIVE_READY)
-[REC-07] Policy recovery resolves from real KernelPolicyStore, not fabricated allow-all
-[REC-08] submission_unknown preserved across restart (no auto-retry)
-[REC-09] Phase 4C protective stop → Gateway → OMS → paper fill path unchanged
-[REC-10] Phase 1-4 regression suite passes
+[REC-01] File journal survives restart — exact event identity, sequence, ordering
+[REC-02] ReplayCoordinator routes events to applicable projectors only
+[REC-03] ReplayCoordinator does not call any adapter
+[REC-04] RecoveryManager blocks LIVE_READY before verification
+[REC-05] Kernel sequence resumes at journal.terminalSequence + 1 after recovery
+[REC-06] Corrupt journal → fail-closed (no RECOVERY_VERIFIED)
+[REC-07] Missing pre-shutdown digest → RECOVERY_VERIFIED granted (journal authoritative)
+[REC-08] Digest mismatch → RECOVERY_VERIFIED denied
+[REC-09] Policy resolves from KernelPolicyStore, not fabricated allow-all
+[REC-10] submission_unknown preserved across restart (no auto-retry)
+[REC-11] Phase 4C protective stop → Gateway → OMS path unchanged
+[REC-12] Phase 1–4 regression suite passes
 ```
 
 ---
 
-## 8. NON-CONTRADICTIONS (EXISTING CONTRACTS PRESERVED)
+## 8. NON-CONTRADICTIONS
 
-- TradingKernel synchronous subscriber semantics: Replay calls `apply()` directly — no publish, no subscriber dispatch
+- TradingKernel synchronous subscriber semantics: Replay calls apply() directly — no publish, no dispatch
 - RuntimeMode 'replay' / 'live': Respected — protection blocked during recovery
 - submission_unknown no-auto-retry: Unchanged — terminal status preserved
 - Missing ≠ flat: Unchanged — trustBaseline still required
 - Gateway approved sizing: Unchanged — dynamicPriceOms wrapper preserved
 - One shared kernel / OMS / state stores: Unchanged — same ProductionSpine
+- InMemoryEventJournal capacity: Not a Phase 5A blocker — addressed by FileEventJournal at implementation time
 
 ---
 
 ## 9. STATUS
 
-```
-BASE_SHA = 93c3239e6571c5fa3ca559f3e989726b766b7e93
+```text
+PRE_HEAD = cbe832da691092b86f374fa57092ce5f1a6ef7f5
 
-CURRENT_RECOVERY_GAPS = 5 P0 (durable journal, snapshot export, policy consumption,
-  replay coordinator, entry blocking)
+KERNEL_SEQUENCE_RESUME = journal.lastSequence+1 → first new event; never reset to 1 after recovery
+RECOVERY_AUTHORITY = durable journal is sole factual authority; no snapshot import as second authority
+SNAPSHOT_IMPORT = NOT required for recovery; digest-only verification; missing pre-shutdown digest OK
+REPLAY_ROUTING = type→projector map; events route only to applicable stores
+STARTUP_OWNER = RecoveryManager → replay+verify → ProductionSpine.start → market → LIVE_READY
+LIVE_READY_ORDER = frozen: cannot activate before RECOVERY_VERIFIED
+POLICY_PUBLICATION = policy.snapshot.published → KernelPolicyStore.apply
+POLICY_GATEWAY_PATH = policyStore.resolve(exchange, symbol) → Gateway; no fabricated allow-all
 
-DURABLE_JOURNAL_CONTRACT = FileEventJournal implementing EventJournalPort
-REPLAY_ORDERING_CONTRACT = kernelLogicalSequence ordering preserved
-STATE_RECONSTRUCTION_CONTRACT = ReplayCoordinator.apply() on all 5 stores
-POLICY_RECOVERY_CONTRACT = KernelPolicyStore.resolve consumed by Gateway
-OMS_RECOVERY_CONTRACT = OmsOrderStore snapshot/import added
-POSITION_RECOVERY_CONTRACT = KernelPositionStateStore snapshot/import added
-PLAN_RECOVERY_CONTRACT = PositionPlanStore snapshot/import added
-SUBMISSION_UNKNOWN_CONTRACT = terminal state preserved across restart (already satisfied)
-LIVE_READY_CONTRACT = RuntimeMode replay→live only after verified recovery
-FAIL_CLOSED_CONTRACT = corrupt/incomplete/duplicate journal → no LIVE_READY
+P0_CONTRACT_ISSUES_REMAINING = 0
+P1_CONTRACT_ISSUES_REMAINING = 0
 
-IMPLEMENTATION_BOUNDARY = 5 new files + 2 modified files
-FILES_EXPECTED_TO_CHANGE = ProductionSpine.ts, TradingKernel.ts (capacity), 5 stores (snapshot only)
-
-P0_CONTRADICTIONS = 5 (above)
-P1_CONTRADICTIONS = 1 (InMemoryEventJournal no capacity limit — OOM risk, addressed by FileEventJournal)
-
-STATUS = CONTRACT_READY_FOR_REVIEW
+STATUS = CONTRACT_REPAIRED_AWAITING_REVIEW
 ```
