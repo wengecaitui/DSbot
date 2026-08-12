@@ -46,7 +46,7 @@ describe('Real store integration', () => {
 
   it('runtime respects stop evaluation (above stop → no submission)', async () => {
     await publishFill('buy', 1, 50000);
-    rt.setMode('live');
+    (rt as any)._setLive();
     // Market above stop → no action
     await kernel.publish('market.ticker.updated', { ticker: { exchange: 'bitget', symbol: 'BTC/USDT', last: 48000 } });
     assert.strictEqual(oms._submitted.length, 0, 'above stop → no OMS');
@@ -93,7 +93,7 @@ describe('Flip lifecycle + idempotency', () => {
 
   it('long open → flip to short → new plan, old gone', async () => {
     await publishFill('buy', 1, 50000);
-    rt.setMode('live');
+    (rt as any)._setLive();
     // Runtime processes fill → creates plan for long
     const mgr = rt.positionManager;
     const plan = mgr.onFill({ status: 'open', side: 'long', signedQuantity: 1, averageEntryPrice: 50000 } as any, 'bitget', 'BTC/USDT', 1, undefined)!;
@@ -120,7 +120,7 @@ describe('Flip lifecycle + idempotency', () => {
     await kernel.publish('position.plan.created', { plan: { planId: pid, exchange: 'bitget', symbol: 'BTC/USDT', positionSide: 'long', side: 'long', entryPrice: 50000, entryQuantity: 1, stopPrice: 47500, status: 'active', planVersion: 5, sourceKernelEventId: 'e5' } });
     planStore.apply({ type: 'position.plan.created', payload: { plan: { planId: pid, exchange: 'bitget', symbol: 'BTC/USDT', positionSide: 'long', side: 'long', entryPrice: 50000, entryQuantity: 1, stopPrice: 47500, status: 'active', planVersion: 5, sourceKernelEventId: 'e5' } }, kernelLogicalSequence: 5, kernelEventId: 'e5' } as any);
     await kernel.publish('execution.fill.confirmed', { fill: { fillId: 'f-r', intentId: 'i-r', orderId: 'o-r', exchange: 'bitget', symbol: 'BTC/USDT', side: 'buy', quantity: 1, price: 50000, executedAt: 1, fees: [] } });
-    rt.setMode('live');
+    (rt as any)._setLive();
     await kernel.publish('market.ticker.updated', { ticker: { exchange: 'bitget', symbol: 'BTC/USDT', last: 47499 } });
     // OMS rejected should clear intent → future protection possible
     // (Test verifies the runtime doesn't crash — real OMS rejection path tested via integration)
@@ -159,7 +159,7 @@ describe('P0: Flip lifecycle (real kernel + runtime)', () => {
       stopPct: 0.05,
     });
     rt.start();
-    rt.setMode('live');
+    (rt as any)._setLive();
   });
 
   it('long→short flip: old plan gone, one active short plan via runtime', async () => {

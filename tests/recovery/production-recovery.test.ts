@@ -13,13 +13,8 @@ import type { ProjectorMap } from '../../src/recovery/ReplayCoordinator';
 const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
 
 function freshMarket(spine: any) {
-  const { createTradingEventBus } = require('../../src/events/TradingEventBus');
-  const { connectProductionMarket } = require('../../src/position/ProductionSpine');
-  const bus = createTradingEventBus();
-  connectProductionMarket(spine, bus);
-  bus.publish('market.ticker.updated', {
-    ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
-  });
+  const { publishProductionMarket } = require('../../src/position/ProductionSpine');
+  publishProductionMarket(spine, { ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() } });
 }
 
 function makeIntent(id: string, symbol: string, dir: 'long' | 'short', usd: number) {
@@ -440,14 +435,9 @@ describe('Phase 5A — Production Recovery', () => {
       'direct kernel.publish cannot forge fresh market',
     );
 
-    // Use legitimate path (eventBus → bridge → kernel + freshness)
-    const { connectProductionMarket } = require('../../src/position/ProductionSpine');
-    const { createTradingEventBus } = require('../../src/events/TradingEventBus');
-    const bus = createTradingEventBus();
-    connectProductionMarket(s, bus);
-    bus.publish('market.ticker.updated', {
-      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
-    });
+    // Use legitimate path (owned production bus)
+    const { publishProductionMarket } = require('../../src/position/ProductionSpine');
+    publishProductionMarket(s, { ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() } });
     await activateLiveReadiness(s);
     assert.strictEqual(s.protection.getMode(), 'live');
 

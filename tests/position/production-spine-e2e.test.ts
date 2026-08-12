@@ -1,8 +1,7 @@
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, activateLiveReadiness, connectProductionMarket } from '../../src/position/ProductionSpine';
-import { createTradingEventBus } from '../../src/events/TradingEventBus';
+import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, activateLiveReadiness, publishProductionMarket } from '../../src/position/ProductionSpine';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -32,13 +31,8 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
     // Recovery + start (cold start → no_history → verified + live)
     await recoverAndStart(spine, journalPath);
-    // Wire production market bridge — only this path establishes freshness
-    const eventBus = createTradingEventBus();
-    connectProductionMarket(spine, eventBus);
-    // Publish fresh market through the bridge (simulating production ingestion)
-    eventBus.publish('market.ticker.updated', {
-      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
-    });
+    // Publish fresh market through owned production bus (non-injectable)
+    publishProductionMarket(spine, { ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() } });
     await activateLiveReadiness(spine);
 
     // Establish trusted baseline FIRST (required so policy pub seq ≥ 2)
@@ -120,12 +114,8 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
     // Recovery + start (cold start → verified + live)
     await recoverAndStart(s, protJournalPath);
-    // Wire production market bridge — only this path establishes freshness
-    const protBus = createTradingEventBus();
-    connectProductionMarket(s, protBus);
-    protBus.publish('market.ticker.updated', {
-      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
-    });
+    // Publish fresh market through owned production bus
+    publishProductionMarket(s, { ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() } });
     await activateLiveReadiness(s);
 
     trustBaseline(s, 'bitget', 'BTC/USDT');

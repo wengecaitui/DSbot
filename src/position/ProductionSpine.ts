@@ -26,6 +26,8 @@ import type { GatewayInput } from '../risk/pretrade-risk-types';
 import type { TradeIntent } from '../types/trade-intent';
 import type { EventJournalPort } from '../kernel/EventJournalPort';
 import { createFileEventJournal, type FileEventJournal } from '../recovery/FileEventJournal';
+import { bridgeMarketToKernel } from './MarketBridge';
+import { createTradingEventBus } from '../events/TradingEventBus';
 
 export interface ProductionSpineConfig {
   exchange: string;
@@ -163,6 +165,10 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   let started = false;
   let freshMarketObserved = false;  // Set by post-recovery kernel events only
 
+  // ── Owned production market bus (not caller-injectable) ──
+  const productionBus = createTradingEventBus();
+  bridgeMarketToKernel(productionBus, kernel, () => { freshMarketObserved = true; });
+
   const spine = {
     kernel, positionStore, marketStore, policyStore,
     oms: dynamicPriceOms, planStore, protection, adapter, service,
@@ -176,6 +182,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   };
 
   (spine as any)[SET_FRESH_MARKET] = () => { freshMarketObserved = true; };
+  (spine as any)[OWNED_BUS] = productionBus;
 
   // Internal: grant RECOVERY_VERIFIED (does NOT set LIVE_READY)
   (spine as any)[VERIFY_TOKEN] = async function() {
@@ -197,17 +204,15 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 const VERIFY_TOKEN = Symbol('verifyToken');
 const LIVE_TOKEN = Symbol('liveToken');
 const SET_FRESH_MARKET = Symbol('setFreshMarket');
+const OWNED_BUS = Symbol('ownedBus');
 
 /**
- * Connect the production market ingestion path.
- * Only events flowing through the TradingEventBus → bridgeMarketToKernel
- * establish market freshness. No exported helper can forge this.
+ * Publish market data through the spine's internally-owned production bus.
+ * Callers cannot inject arbitrary buses — the bus is owned by the runtime.
+ * Only this path (through the owned bus → bridgeMarketToKernel) marks freshness.
  */
-export function connectProductionMarket(spine: ProductionSpine, eventBus: any): () => void {
-  const { bridgeMarketToKernel } = require('../position/MarketBridge') as typeof import('../position/MarketBridge');
-  return bridgeMarketToKernel(eventBus, spine.kernel, () => {
-    (spine as any)[SET_FRESH_MARKET]();
-  });
+export function publishProductionMarket(spine: ProductionSpine, tickerData: { ticker: any }): void {
+  (spine as any)[OWNED_BUS].publish('market.ticker.updated', tickerData);
 }
 
 /**
