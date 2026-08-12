@@ -116,17 +116,24 @@ export function recoverFromJournal(
 export function saveRecoveryCheckpoint(
   checkpointPath: string,
   journal: FileEventJournal,
-  projectors: ProjectorMap,
+  digests: Record<string, string>,
 ): void {
-  const digests: Record<string, string> = {};
-  for (const [name, projList] of projectors) {
-    if (projList.length > 0) {
-      digests[name] = projList[0].digest();
-    }
-  }
   const cp: CheckpointFile = {
     sequence: journal.lastSequence,
     digests,
   };
   writeFileSync(checkpointPath, JSON.stringify(cp), 'utf8');
+}
+
+/** Validate checkpoint digests against required store names. */
+function validateCheckpointDigests(
+  cp: CheckpointFile,
+  expectedDigests: Record<string, string>,
+): boolean {
+  const required = ['position', 'market', 'policy', 'oms', 'plan'];
+  for (const name of required) {
+    if (!(name in cp.digests)) return false; // missing required store
+    if (cp.digests[name] !== expectedDigests[name]) return false; // mismatch
+  }
+  return true;
 }

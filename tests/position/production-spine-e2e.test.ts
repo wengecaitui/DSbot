@@ -1,7 +1,7 @@
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway, trustBaseline } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway, trustBaseline, verifyRecovery } from '../../src/position/ProductionSpine';
 import type { TradeIntent } from '../../src/types/trade-intent';
 
 const hardRisk = () => ({
@@ -45,6 +45,9 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
+    // Grant RECOVERY_VERIFIED so executeThroughGateway allows entries
+    verifyRecovery(spine);
+    await spine.start({ exchange: 'bitget' });
     initDone = true;
   }
 
@@ -120,6 +123,9 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
+
+    verifyRecovery(s);
+    await s.start({ exchange: 'bitget' });
 
     // Open position
     const openIntent = makeIntent('prot-open', 'BTC/USDT', 'long', 5000);

@@ -43,7 +43,12 @@ export function replayJournal(
       const type = envelope.type as TradingEventType;
       const targets = projectors.get(type);
       if (!targets || targets.length === 0) {
-        // Event type not mapped to any projector — skip silently
+        // Unknown/unprojected event type → fail closed
+        errors.push({
+          sequence: envelope.kernelLogicalSequence,
+          eventId: envelope.kernelEventId,
+          message: `REPLAY_UNKNOWN_EVENT_TYPE: no projector registered for type \"${type}\"`,
+        });
         fromSeq = envelope.kernelLogicalSequence + 1;
         eventsReplayed++;
         continue;

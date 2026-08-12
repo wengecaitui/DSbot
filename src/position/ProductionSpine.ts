@@ -55,8 +55,6 @@ export interface ProductionSpine {
   privateConfig: { hardRisk: () => RiskSnapshot };
   /** Set internally by RecoveryManager — read-only to callers */
   readonly recoveryVerified: boolean;
-  /** INTERNAL: RecoveryManager sets this after verification. Throws if already started. */
-  setRecoveryVerified(verified: boolean): void;
   /** Start production: must be called after recovery verification */
   start(options: { exchange: string }): Promise<void>;
 }
@@ -160,27 +158,39 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   let recoveryVerified = false;
   let started = false;
 
-  return {
+  function _setRecoveryVerified() {
+    if (started) throw new Error('SPINE_ALREADY_STARTED: cannot modify recoveryVerified after start');
+    recoveryVerified = true;
+  }
+
+  const spine = {
     kernel, positionStore, marketStore, policyStore,
     oms: dynamicPriceOms, planStore, protection, adapter, service,
     privateConfig: { hardRisk: config.hardRisk },
 
     get recoveryVerified() { return recoveryVerified; },
 
-    setRecoveryVerified(verified: boolean) {
-      if (started) throw new Error('SPINE_ALREADY_STARTED: cannot modify recoveryVerified after start');
-      recoveryVerified = verified;
-    },
-
     async start(options: { exchange: string }) {
       if (started) return;
       if (!recoveryVerified) throw new Error('SPINE_NOT_RECOVERY_VERIFIED: start requires RECOVERY_VERIFIED');
       started = true;
-      // Production market start would happen here — market collectors start,
-      // then LIVE_READY gate activates protection
       protection.setMode('live');
     },
-  } as ProductionSpine;
+  };
+
+  // Expose internal setter only to RecoveryManager via module-scope symbol
+  (spine as any)[RECOVERY_SET_SYMBOL] = _setRecoveryVerified;
+
+  return spine;
+}
+
+const RECOVERY_SET_SYMBOL = Symbol('recoverySet');
+
+/** Set RECOVERY_VERIFIED internally — only callable by RecoveryManager. */
+export function verifyRecovery(spine: ProductionSpine): void {
+  const fn = (spine as any)[RECOVERY_SET_SYMBOL];
+  if (typeof fn !== 'function') throw new Error('RECOVERY_AUTHORITY: spine has no internal recovery setter');
+  fn();
 }
 
 /**
@@ -193,6 +203,14 @@ export async function executeThroughGateway(
   action: 'open' | 'close',
   approvedUsd: number,
 ): Promise<ExecuteThroughGatewayResult> {
+  // Block entries before RECOVERY_VERIFIED
+  if (!spine.recoveryVerified) {
+    // Allow only baseline and market events — not trading entries
+    if (action === 'open' || action === 'close') {
+      return { admitted: false, riskCode: 'RECOVERY_NOT_VERIFIED', action };
+    }
+  }
+
   const { kernel, positionStore, marketStore, oms, adapter, policyStore } = spine;
   const exchange = intent.exchange as any;
   const symbol = intent.symbol;
