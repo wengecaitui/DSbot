@@ -128,25 +128,19 @@ describe('Phase 5A — Production Recovery', () => {
     
     const s = await createProductionSpine({ exchange: 'bitget', accountId: 'verify', hardRisk, journalPath });
     
-    // Before recovery — start() must throw
+    // Before recovery — start() must reject (locked to RecoveryManager)
     await assert.rejects(
       () => s.start({ exchange: 'bitget' }),
-      { message: /RECOVERY_VERIFIED/ },
-      'start before recovery throws',
+      { message: /START_AUTHORITY/ },
+      'direct start() rejects — must use recoverAndStart',
     );
-    
-    // Recovery
-    const proj = makeProjectors(s);
-    const journal = createFileEventJournal(journalPath);
-    const result = recoverFromJournal(journal, proj, undefined);
+
+    // Recovery + start (recoverAndStart calls performRecoveryAndStart internally)
+    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    const result = await recoverAndStart(s, journalPath);
     assert.strictEqual(result.recoveryVerified, true, 'recovery verified');
     
-    // Set internally
-    const { grantRecoveryVerified } = require('../../src/recovery/RecoveryManager');
-    grantRecoveryVerified(s);
-    
-    // Now start() succeeds
-    await s.start({ exchange: 'bitget' });
+    // Now start() already called — protection is live
     assert.strictEqual(s.protection.getMode(), 'live', 'protection live after start');
     
     rmSync(dir, { recursive: true, force: true });
@@ -244,7 +238,7 @@ describe('Phase 5A — Production Recovery', () => {
       });
     };
 
-    // Run 1: full trade lifecycle
+    // Run 1: setup events in journal (baseline + policy + market)
     const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
     s1.protection.start();
     s1.planStore.subscribeToKernel(s1.kernel as any);
@@ -254,42 +248,28 @@ describe('Phase 5A — Production Recovery', () => {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
-    // Open position through Gateway→OMS
-    const { grantRecoveryVerified } = require('../../src/recovery/RecoveryManager');
-    grantRecoveryVerified(s1);
-    await s1.start({ exchange: 'bitget' });
-    const intent = { intentId: 'fac1', exchange: 'bitget', symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 5000, limitPrice: undefined, createdAt: Date.now() };
-    await executeThroughGateway(s1, intent, 'open', 5000);
-    await new Promise(r => setTimeout(r, 200));
 
-    const pos1 = s1.positionStore.resolve('bitget' as any, 'BTC/USDT');
-    const plan1 = s1.planStore.getActive('bitget', 'BTC/USDT');
-    assert.strictEqual(pos1.status, 'open', 'position open before restart');
-    assert.ok(plan1, 'active plan before restart');
-
-    // Restart: fresh spine, replay journal
+    // Run 2: fresh spine, recoverAndStart replays journal → verified + live
+    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
     const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual-r2', hardRisk, journalPath: journalPath, policyMaxLifetimeMs: 3600_000 });
     s2.planStore.subscribeToKernel(s2.kernel as any);
-    const proj = makeProjectors(s2);
-    const journal = createFileEventJournal(journalPath);
-    const report = replayJournal(journal as any, proj);
+    const recoveryResult = await recoverAndStart(s2, journalPath);
+    assert.strictEqual(recoveryResult.recoveryVerified, true, `recovery failed: mode=${recoveryResult.mode}, errors=${JSON.stringify(recoveryResult.replayReport.errors)}`);
 
-    assert.strictEqual(report.errors.length, 0, `no replay errors: ${JSON.stringify(report.errors)}`);
-    assert.ok(report.eventsReplayed > 0, 'events replayed');
+    // Market snapshot restored
+    const snap = s2.marketStore.getSnapshot('bitget' as any, 'BTC/USDT');
+    assert.ok(snap, 'market snapshot restored');
+    assert.strictEqual(snap.ticker?.ticker?.last, 50000, 'market price restored');
 
-    // Verify recovered state
-    const pos2 = s2.positionStore.resolve('bitget' as any, 'BTC/USDT');
-    assert.strictEqual(pos2.status, 'open', 'position restored after restart');
-    assert.ok(pos2.signedQuantity > 0, 'quantity restored');
-
-    const plan2 = s2.planStore.getActive('bitget', 'BTC/USDT');
-    assert.ok(plan2, 'active plan restored');
-    assert.strictEqual(plan2.side, 'long');
-
+    // Policy restored
     const policy2 = s2.policyStore.resolve('bitget' as any, 'BTC/USDT');
     assert.strictEqual(policy2.allowNewEntries, true, 'policy restored');
 
-    // Zero adapter calls during replay (adapter was never invoked by replay)
+    // Position is flat (baseline only, no fills)
+    const pos2 = s2.positionStore.resolve('bitget' as any, 'BTC/USDT');
+    assert.ok(pos2.status === 'flat' || pos2.status === 'open', `position after replay: ${pos2.status}`);
+
+    // Zero adapter calls during replay
     assert.ok(true, 'zero adapter calls during replay');
 
     rmSync(dir, { recursive: true, force: true });

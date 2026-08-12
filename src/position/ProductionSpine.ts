@@ -158,11 +158,6 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   let recoveryVerified = false;
   let started = false;
 
-  function _setRecoveryVerified() {
-    if (started) throw new Error('SPINE_ALREADY_STARTED: cannot modify recoveryVerified after start');
-    recoveryVerified = true;
-  }
-
   const spine = {
     kernel, positionStore, marketStore, policyStore,
     oms: dynamicPriceOms, planStore, protection, adapter, service,
@@ -171,23 +166,35 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     get recoveryVerified() { return recoveryVerified; },
 
     async start(options: { exchange: string }) {
-      if (started) return;
-      if (!recoveryVerified) throw new Error('SPINE_NOT_RECOVERY_VERIFIED: start requires RECOVERY_VERIFIED');
-      started = true;
-      protection.setMode('live');
+      // This is the public start — must not be callable directly.
+      // It's bound to START_TOKEN internally.
+      throw new Error('START_AUTHORITY: use performRecoveryAndStart');
     },
   };
 
-  // Expose internal setter only to RecoveryManager via module-scope symbol
-  (spine as any)[RECOVERY_SET_SYMBOL] = _setRecoveryVerified;
+  // Internal start accessible only via performRecoveryAndStart → START_TOKEN
+  (spine as any)[START_TOKEN] = async function() {
+    if (started) return;
+    recoveryVerified = true;
+    started = true;
+    protection.setMode('live');
+  };
 
   return spine;
 }
 
-const RECOVERY_SET_SYMBOL = Symbol('recoverySet');
+const START_TOKEN = Symbol('startToken');
 
-/** INTERNAL: exported for RecoveryManager only — sets RECOVERY_VERIFIED on a spine. */
-export const INTERNAL_RECOVERY_SET_SYMBOL = RECOVERY_SET_SYMBOL;
+/** Perform full recovery + start. Internal — called only by RecoveryManager. */
+export async function performRecoveryAndStart(
+  spine: ProductionSpine,
+  recoveryResult: { recoveryVerified: boolean },
+): Promise<void> {
+  if (!recoveryResult.recoveryVerified) throw new Error('RECOVERY_NOT_VERIFIED: start requires verification');
+  const fn = (spine as any)[START_TOKEN];
+  if (typeof fn !== 'function') throw new Error('START_AUTHORITY: no internal start');
+  await fn();
+}
 
 /**
  * Execute a TradeIntent through PreTradeRiskGateway → OmsCore → PaperExecutionAdapter.
@@ -199,11 +206,10 @@ export async function executeThroughGateway(
   action: 'open' | 'close',
   approvedUsd: number,
 ): Promise<ExecuteThroughGatewayResult> {
-  // Block entries before RECOVERY_VERIFIED
-  if (!spine.recoveryVerified) {
-    // Allow only baseline and market events — not trading entries
+  // Block entries before LIVE_READY (protection mode !== 'live')
+  if (spine.protection.getMode() !== 'live') {
     if (action === 'open' || action === 'close') {
-      return { admitted: false, riskCode: 'RECOVERY_NOT_VERIFIED', action };
+      return { admitted: false, riskCode: 'NOT_LIVE_READY', action };
     }
   }
 

@@ -2,7 +2,8 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import type { FileEventJournal } from './FileEventJournal';
 import { replayJournal, type ProjectorMap, type ReplayReport, type ReplayError } from './ReplayCoordinator';
-import { INTERNAL_RECOVERY_SET_SYMBOL, type ProductionSpine } from '../position/ProductionSpine';
+import { createFileEventJournal } from './FileEventJournal';
+import { performRecoveryAndStart, type ProductionSpine } from '../position/ProductionSpine';
 
 export type RecoveryMode = 'verified' | 'failed' | 'no_history';
 
@@ -117,14 +118,36 @@ export function recoverFromJournal(
 }
 
 /**
- * Set RECOVERY_VERIFIED on a ProductionSpine.
- * Only RecoveryManager should call this — the symbol is exported
- * to prevent caller forgery.
+ * Full recovery + start flow:
+ *   journal → replay → verify → RECOVERY_VERIFIED → LIVE_READY
+ * Returns the spine ready for production.
  */
-export function grantRecoveryVerified(spine: ProductionSpine): void {
-  const fn = (spine as any)[INTERNAL_RECOVERY_SET_SYMBOL];
-  if (typeof fn !== 'function') throw new Error('RECOVERY_AUTHORITY: spine has no internal recovery setter');
-  fn();
+export async function recoverAndStart(
+  spine: ProductionSpine,
+  journalPath: string,
+  checkpointPath?: string,
+  storeDigests?: Record<string, string>,
+): Promise<RecoveryResult> {
+  const journal = createFileEventJournal(journalPath);
+  const projectors = buildProjectorMap(spine);
+  const result = recoverFromJournal(journal, projectors, checkpointPath, storeDigests);
+
+  if (result.recoveryVerified) {
+    await performRecoveryAndStart(spine, result);
+  }
+
+  return result;
+}
+
+function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
+  const m: ProjectorMap = new Map();
+  m.set('position.baseline.confirmed', [spine.positionStore]);
+  m.set('execution.fill.confirmed', [spine.positionStore, spine.oms.getStore()]);
+  m.set('market.ticker.updated', [spine.marketStore]);
+  m.set('policy.snapshot.published', [spine.policyStore]);
+  m.set('position.plan.created', [spine.planStore]);
+  m.set('position.plan.closed', [spine.planStore]);
+  return m;
 }
 
 /** Save checkpoint for graceful shutdown verification. */

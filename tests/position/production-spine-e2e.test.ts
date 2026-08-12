@@ -2,7 +2,13 @@
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { createProductionSpine, executeThroughGateway, trustBaseline } from '../../src/position/ProductionSpine';
+import { mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import type { TradeIntent } from '../../src/types/trade-intent';
+
+const tmpDir = mkdtempSync(join(tmpdir(), 'p4c-e2e-'));
+const journalPath = join(tmpDir, 'journal.jsonl');
 
 const hardRisk = () => ({
   exchange: 'bitget', locked: false, enabled: true,
@@ -19,7 +25,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
   async function init() {
     if (initDone) return;
-    spine = await createProductionSpine({ exchange: 'bitget', accountId: 'e2e', hardRisk, policyMaxLifetimeMs: 3600_000 });
+    spine = await createProductionSpine({ exchange: 'bitget', accountId: 'e2e', hardRisk, policyMaxLifetimeMs: 3600_000, journalPath });
     spine.protection.start();
     spine.protection.setMode('live');
     spine.planStore.subscribeToKernel(spine.kernel as any);
@@ -45,10 +51,9 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
-    // Grant RECOVERY_VERIFIED so executeThroughGateway allows entries
-    const { grantRecoveryVerified } = require('../../src/recovery/RecoveryManager');
-    grantRecoveryVerified(spine);
-    await spine.start({ exchange: 'bitget' });
+    // Recovery + start (recoverAndStart calls performRecoveryAndStart internally)
+    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    await recoverAndStart(spine, journalPath);
     initDone = true;
   }
 
@@ -125,9 +130,8 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       receivedAt: Date.now(),
     });
 
-    const { grantRecoveryVerified } = require('../../src/recovery/RecoveryManager');
-    grantRecoveryVerified(s);
-    await s.start({ exchange: 'bitget' });
+    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    await recoverAndStart(s, journalPath);
 
     // Open position
     const openIntent = makeIntent('prot-open', 'BTC/USDT', 'long', 5000);
