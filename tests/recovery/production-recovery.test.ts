@@ -136,8 +136,9 @@ describe('Phase 5A — Production Recovery', () => {
     );
 
     // Recovery + start (recoverAndStart calls performRecoveryAndStart internally)
-    const { recoverAndStart } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const result = await recoverAndStart(s, journalPath);
+    await activateLiveReadiness(s);
     assert.strictEqual(result.recoveryVerified, true, 'recovery verified');
     
     // Now start() already called — protection is live
@@ -250,10 +251,11 @@ describe('Phase 5A — Production Recovery', () => {
     });
 
     // Run 2: fresh spine, recoverAndStart replays journal → verified + live
-    const { recoverAndStart } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual-r2', hardRisk, journalPath: journalPath, policyMaxLifetimeMs: 3600_000 });
     s2.planStore.subscribeToKernel(s2.kernel as any);
     const recoveryResult = await recoverAndStart(s2, journalPath);
+    await activateLiveReadiness(s2);
     assert.strictEqual(recoveryResult.recoveryVerified, true, `recovery failed: mode=${recoveryResult.mode}, errors=${JSON.stringify(recoveryResult.replayReport.errors)}`);
 
     // Market snapshot restored
@@ -311,16 +313,39 @@ describe('Phase 5A — Production Recovery', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('P0: recovery verification alone does NOT permit entry', async () => {
+  it('P0: RECOVERY_VERIFIED ≠ LIVE_READY — entry blocked between recovery and live', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0entry-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0entry', hardRisk, journalPath });
-    // Recovery verified but not started → getMode is still 'replay'
-    // (verified state set only during start → setLive happens there)
+    // Setup: spine that writes to journal
+    const sSetup = await createProductionSpine({ exchange: 'bitget', accountId: 'p0entrysetup', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    trustBaseline(sSetup, 'bitget', 'BTC/USDT');
+    const now = Date.now();
+    sSetup.kernel.publish('policy.snapshot.published', {
+      policy: { exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1, compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000, allowNewEntries: true, allowedSymbols: [], blockedSymbols: [], allowedStrategyIds: [], blockedStrategyIds: [], maxPositionMultiplier: 1, riskLevel: 'low' as const, directionBias: 'neutral' as const, symbolRules: {}, reasonCodes: [] },
+    });
+
+    // Recover: verified but NOT live
+    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0entry', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    s.protection.start();
+    s.planStore.subscribeToKernel(s.kernel as any);
+    await recoverAndStart(s, journalPath);
+    assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
+    assert.strictEqual(s.protection.getMode(), 'replay', 'NOT live after recovery');
+
+    // Entry blocked before LIVE_READY
     const intent = { intentId: 'nope', exchange: 'bitget', symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 1000, limitPrice: undefined, createdAt: Date.now() };
     const r = await executeThroughGateway(s, intent, 'open', 1000);
     assert.strictEqual(r.admitted, false, 'not live → entry blocked');
     assert.strictEqual(r.riskCode, 'NOT_LIVE_READY');
+
+    // Activate live
+    await activateLiveReadiness(s);
+    assert.strictEqual(s.protection.getMode(), 'live', 'live after activateLiveReadiness');
+
+    // Now entry works
+    const r2 = await executeThroughGateway(s, intent, 'open', 1000);
+    assert.ok(r2.admitted, 'entry admitted when LIVE_READY');
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -360,8 +385,9 @@ describe('Phase 5A — Production Recovery', () => {
     const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0liveok', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
-    const { recoverAndStart } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
+    await activateLiveReadiness(s);
     // Now LIVE_READY
     assert.strictEqual(s.protection.getMode(), 'live');
     // Entry works

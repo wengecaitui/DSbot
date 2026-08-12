@@ -1,7 +1,7 @@
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway, trustBaseline } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, activateLiveReadiness } from '../../src/position/ProductionSpine';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -30,8 +30,8 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     spine.planStore.subscribeToKernel(spine.kernel as any);
 
     // Recovery + start (cold start → no_history → verified + live)
-    const { recoverAndStart } = require('../../src/position/ProductionSpine');
     await recoverAndStart(spine, journalPath);
+    await activateLiveReadiness(spine);
 
     // Establish trusted baseline FIRST (required so policy pub seq ≥ 2)
     trustBaseline(spine, 'bitget', 'BTC/USDT');
@@ -103,14 +103,16 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
   // ── 4. Protective stop breach → protective close through Gateway ──────────
   it('protective stop breach → factual fill at breached price → position reduced', async () => {
-    // Fresh spine — avoid shared state pollution from test 2
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'prot-e2e', hardRisk, policyMaxLifetimeMs: 3600_000 });
+    // Fresh spine with fresh journal
+    const protDir = mkdtempSync(join(tmpdir(), 'p4c-prot-'));
+    const protJournalPath = join(protDir, 'journal.jsonl');
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'prot-e2e', hardRisk, policyMaxLifetimeMs: 3600_000, journalPath: protJournalPath });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
 
     // Recovery + start (cold start → verified + live)
-    const { recoverAndStart } = require('../../src/position/ProductionSpine');
-    await recoverAndStart(s, journalPath);
+    await recoverAndStart(s, protJournalPath);
+    await activateLiveReadiness(s);
 
     trustBaseline(s, 'bitget', 'BTC/USDT');
 

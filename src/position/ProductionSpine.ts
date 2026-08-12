@@ -170,36 +170,38 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     get recoveryVerified() { return recoveryVerified; },
 
     async start(options: { exchange: string }) {
-      // This is the public start — must not be callable directly.
-      // It's bound to START_TOKEN internally.
-      throw new Error('START_AUTHORITY: use performRecoveryAndStart');
+      throw new Error('START_AUTHORITY: use recoverAndStart + activateLiveReadiness');
     },
   };
 
-  // Internal start accessible only via performRecoveryAndStart → START_TOKEN
-  (spine as any)[START_TOKEN] = async function() {
+  // Internal: grant RECOVERY_VERIFIED (does NOT set LIVE_READY)
+  (spine as any)[VERIFY_TOKEN] = async function() {
     if (started) return;
     recoveryVerified = true;
     started = true;
+  };
+
+  // Internal: grant LIVE_READY (requires recoveryVerified)
+  (spine as any)[LIVE_TOKEN] = async function() {
+    if (!recoveryVerified) throw new Error('LIVE_READY_REQUIRES_RECOVERY');
     _setLive();
   };
 
   return spine;
 }
 
-const START_TOKEN = Symbol('startToken');
+const VERIFY_TOKEN = Symbol('verifyToken');
+const LIVE_TOKEN = Symbol('liveToken');
 
 /**
- * Full recovery + start: journal → replay → verify → RECOVERY_VERIFIED → LIVE_READY.
- * This is the ONLY path to RECOVERY_VERIFIED and LIVE_READY.
- * No exported token, symbol, or method can bypass this flow.
+ * Full recovery: journal → replay → verify → RECOVERY_VERIFIED.
+ * Does NOT grant LIVE_READY — call activateLiveReadiness() after market data is fresh.
  */
 export async function recoverAndStart(
   spine: ProductionSpine,
   journalPath: string,
   checkpointPath?: string,
 ): Promise<{ recoveryVerified: boolean; mode: string; errors: any[] }> {
-  // Lazy-import RecoveryManager to avoid circular deps
   const { recoverFromJournal } = require('../recovery/RecoveryManager') as typeof import('../recovery/RecoveryManager');
   const { createFileEventJournal } = require('../recovery/FileEventJournal') as typeof import('../recovery/FileEventJournal');
 
@@ -215,11 +217,21 @@ export async function recoverAndStart(
   const result = recoverFromJournal(journal, projectors, checkpointPath, storeDigests);
 
   if (result.recoveryVerified) {
-    const fn = (spine as any)[START_TOKEN];
+    const fn = (spine as any)[VERIFY_TOKEN];
     if (typeof fn === 'function') await fn();
   }
 
   return { recoveryVerified: result.recoveryVerified, mode: result.mode, errors: result.replayReport.errors };
+}
+
+/**
+ * Grant LIVE_READY after successful recovery AND fresh market data availability.
+ * Requires recoverAndStart to have been called first (recoveryVerified must be true).
+ */
+export async function activateLiveReadiness(spine: ProductionSpine): Promise<void> {
+  const fn = (spine as any)[LIVE_TOKEN];
+  if (typeof fn !== 'function') throw new Error('LIVE_AUTHORITY: no internal live token');
+  await fn();
 }
 
 function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
