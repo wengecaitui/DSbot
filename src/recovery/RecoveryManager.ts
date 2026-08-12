@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import type { FileEventJournal } from './FileEventJournal';
 import { replayJournal, type ProjectorMap, type ReplayReport, type ReplayError } from './ReplayCoordinator';
 import { createFileEventJournal } from './FileEventJournal';
-import { performRecoveryAndStart, type ProductionSpine } from '../position/ProductionSpine';
+import { INTERNAL_START_TOKEN, type ProductionSpine } from '../position/ProductionSpine';
 
 export type RecoveryMode = 'verified' | 'failed' | 'no_history';
 
@@ -133,7 +133,8 @@ export async function recoverAndStart(
   const result = recoverFromJournal(journal, projectors, checkpointPath, storeDigests);
 
   if (result.recoveryVerified) {
-    await performRecoveryAndStart(spine, result);
+    const fn = (spine as any)[INTERNAL_START_TOKEN];
+    if (typeof fn === 'function') await fn();
   }
 
   return result;

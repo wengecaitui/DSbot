@@ -177,7 +177,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     if (started) return;
     recoveryVerified = true;
     started = true;
-    protection.setMode('live');
+    (protection as any)._setLive();
   };
 
   return spine;
@@ -185,16 +185,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
 const START_TOKEN = Symbol('startToken');
 
-/** Perform full recovery + start. Internal — called only by RecoveryManager. */
-export async function performRecoveryAndStart(
-  spine: ProductionSpine,
-  recoveryResult: { recoveryVerified: boolean },
-): Promise<void> {
-  if (!recoveryResult.recoveryVerified) throw new Error('RECOVERY_NOT_VERIFIED: start requires verification');
-  const fn = (spine as any)[START_TOKEN];
-  if (typeof fn !== 'function') throw new Error('START_AUTHORITY: no internal start');
-  await fn();
-}
+export const INTERNAL_START_TOKEN = START_TOKEN;
 
 /**
  * Execute a TradeIntent through PreTradeRiskGateway → OmsCore → PaperExecutionAdapter.

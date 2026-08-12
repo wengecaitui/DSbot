@@ -27,8 +27,11 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     if (initDone) return;
     spine = await createProductionSpine({ exchange: 'bitget', accountId: 'e2e', hardRisk, policyMaxLifetimeMs: 3600_000, journalPath });
     spine.protection.start();
-    spine.protection.setMode('live');
     spine.planStore.subscribeToKernel(spine.kernel as any);
+
+    // Recovery + start (cold start → no_history → verified + live)
+    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    await recoverAndStart(spine, journalPath);
 
     // Establish trusted baseline FIRST (required so policy pub seq ≥ 2)
     trustBaseline(spine, 'bitget', 'BTC/USDT');
@@ -51,9 +54,6 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
-    // Recovery + start (recoverAndStart calls performRecoveryAndStart internally)
-    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
-    await recoverAndStart(spine, journalPath);
     initDone = true;
   }
 
@@ -106,8 +106,11 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     // Fresh spine — avoid shared state pollution from test 2
     const s = await createProductionSpine({ exchange: 'bitget', accountId: 'prot-e2e', hardRisk, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
-    s.protection.setMode('live');
     s.planStore.subscribeToKernel(s.kernel as any);
+
+    // Recovery + start (cold start → verified + live)
+    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    await recoverAndStart(s, journalPath);
 
     trustBaseline(s, 'bitget', 'BTC/USDT');
 
@@ -129,9 +132,6 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
-
-    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
-    await recoverAndStart(s, journalPath);
 
     // Open position
     const openIntent = makeIntent('prot-open', 'BTC/USDT', 'long', 5000);

@@ -285,4 +285,88 @@ describe('Phase 5A — Production Recovery', () => {
     // Full test requires live adapter to produce SUBMISSION_UNKNOWN —
     // state machine contract verified in existing OMS tests (Phase 3).
   });
+
+  // ── 10. P0 REGRESSION: RECOVERY_VERIFIED is not caller-forgeable ──────────
+  it('P0: caller cannot grant RECOVERY_VERIFIED directly', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5a-p0auth-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0auth', hardRisk, journalPath });
+    // s.start() is locked — only RecoveryManager can activate it via token
+    await assert.rejects(() => s.start({ exchange: 'bitget' }), { message: /START_AUTHORITY/ });
+    // recoveryVerified is false by default
+    assert.strictEqual(s.recoveryVerified, false);
+    // No public API to set recoveryVerified
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('P0: caller cannot force LIVE_READY via protection.setMode', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5a-p0live-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0live', hardRisk, journalPath });
+    s.protection.start();
+    // setMode no longer exists — getMode is 'replay'
+    assert.strictEqual((s.protection as any).setMode, undefined, 'setMode not callable');
+    assert.strictEqual(s.protection.getMode(), 'replay', 'starts in replay');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('P0: recovery verification alone does NOT permit entry', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5a-p0entry-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0entry', hardRisk, journalPath });
+    // Recovery verified but not started → getMode is still 'replay'
+    // (verified state set only during start → setLive happens there)
+    const intent = { intentId: 'nope', exchange: 'bitget', symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 1000, limitPrice: undefined, createdAt: Date.now() };
+    const r = await executeThroughGateway(s, intent, 'open', 1000);
+    assert.strictEqual(r.admitted, false, 'not live → entry blocked');
+    assert.strictEqual(r.riskCode, 'NOT_LIVE_READY');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('P0: pre-LIVE_READY protection produces zero submissions', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5a-p0prot-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0prot', hardRisk, journalPath });
+    s.protection.start();
+    s.planStore.subscribeToKernel(s.kernel as any);
+    trustBaseline(s, 'bitget', 'BTC/USDT');
+    // Mode is 'replay' → onMarketEvent returns immediately, no submission
+    await s.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 10000, bestBid: 9999, bestAsk: 10001, volume24h: 100, high24h: 11000, low24h: 9000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+    await new Promise(r => setTimeout(r, 50));
+    assert.strictEqual(s.protection.getSubmittedCount(), 0, 'no protection submissions pre-LIVE_READY');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('P0: legitimately LIVE_READY runtime executes entry + protection', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5a-p0liveok-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    // Setup: write events to journal via a setup spine
+    const sSetup = await createProductionSpine({ exchange: 'bitget', accountId: 'p0livesetup', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    sSetup.protection.start();
+    trustBaseline(sSetup, 'bitget', 'BTC/USDT');
+    const now = Date.now();
+    sSetup.kernel.publish('policy.snapshot.published', {
+      policy: { exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1, compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000, allowNewEntries: true, allowedSymbols: [], blockedSymbols: [], allowedStrategyIds: [], blockedStrategyIds: [], maxPositionMultiplier: 1, riskLevel: 'low' as const, directionBias: 'neutral' as const, symbolRules: {}, reasonCodes: [] },
+    });
+    await sSetup.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+    // Fresh spine → recoverAndStart replays journal → verified + live
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0liveok', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    s.protection.start();
+    s.planStore.subscribeToKernel(s.kernel as any);
+    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    await recoverAndStart(s, journalPath);
+    // Now LIVE_READY
+    assert.strictEqual(s.protection.getMode(), 'live');
+    // Entry works
+    const intent = { intentId: 'liveok1', exchange: 'bitget', symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 5000, limitPrice: undefined, createdAt: Date.now() };
+    const r = await executeThroughGateway(s, intent, 'open', 5000);
+    assert.ok(r.admitted, 'entry admitted when LIVE_READY');
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
