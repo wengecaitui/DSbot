@@ -13,7 +13,8 @@ import type { ProjectorMap } from '../../src/recovery/ReplayCoordinator';
 const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
 
 function freshMarket(spine: any) {
-  spine.kernel.publish('market.ticker.updated', {
+  const { publishFreshMarket } = require('../../src/position/ProductionSpine');
+  publishFreshMarket(spine, {
     ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
     receivedAt: Date.now(),
   });
@@ -408,6 +409,43 @@ describe('Phase 5A — Production Recovery', () => {
     const intent = { intentId: 'liveok1', exchange: 'bitget', symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 5000, limitPrice: undefined, createdAt: Date.now() };
     const r = await executeThroughGateway(s, intent, 'open', 5000);
     assert.ok(r.admitted, 'entry admitted when LIVE_READY');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ── P0: direct kernel.publish cannot forge fresh market provenance ────────
+  it('P0: direct kernel.publish("market.ticker.updated") does NOT grant freshness', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5a-p0fake-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0fake', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    s.protection.start();
+    s.planStore.subscribeToKernel(s.kernel as any);
+
+    // Recovery
+    const { recoverAndStart, activateLiveReadiness, publishFreshMarket } = require('../../src/position/ProductionSpine');
+    await recoverAndStart(s, journalPath);
+    assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
+
+    // Forge: publish market event directly (no provenance token)
+    s.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+
+    // activateLiveReadiness must reject — direct publish doesn't carry FRESH_MARKET_TOKEN
+    await assert.rejects(
+      () => activateLiveReadiness(s),
+      { message: /FRESH_MARKET/ },
+      'direct kernel.publish cannot forge fresh market',
+    );
+
+    // Use legitimate path
+    publishFreshMarket(s, {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+    await activateLiveReadiness(s);
+    assert.strictEqual(s.protection.getMode(), 'live');
+
     rmSync(dir, { recursive: true, force: true });
   });
 });

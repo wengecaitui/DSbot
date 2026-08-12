@@ -1,7 +1,7 @@
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, activateLiveReadiness } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, activateLiveReadiness, publishFreshMarket } from '../../src/position/ProductionSpine';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -32,7 +32,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     // Recovery + start (cold start → no_history → verified + live)
     await recoverAndStart(spine, journalPath);
     // Publish fresh market event to satisfy LIVE_READY freshness gate
-    spine.kernel.publish('market.ticker.updated', {
+    publishFreshMarket(spine, {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -118,7 +118,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     // Recovery + start (cold start → verified + live)
     await recoverAndStart(s, protJournalPath);
     // Publish fresh market event to satisfy LIVE_READY freshness gate
-    s.kernel.publish('market.ticker.updated', {
+    publishFreshMarket(s, {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });

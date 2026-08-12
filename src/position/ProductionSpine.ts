@@ -175,13 +175,13 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     },
   };
 
+  (spine as any)[SET_FRESH_MARKET] = () => { freshMarketObserved = true; };
+
   // Internal: grant RECOVERY_VERIFIED (does NOT set LIVE_READY)
-  // Subscribes to market.ticker.updated so post-recovery events mark freshMarketObserved
   (spine as any)[VERIFY_TOKEN] = async function() {
     if (started) return;
     recoveryVerified = true;
     started = true;
-    kernel.subscribe('market.ticker.updated', () => { freshMarketObserved = true; });
   };
 
   // Internal: grant LIVE_READY (requires recoveryVerified + fresh post-recovery market)
@@ -196,6 +196,17 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
 const VERIFY_TOKEN = Symbol('verifyToken');
 const LIVE_TOKEN = Symbol('liveToken');
+const SET_FRESH_MARKET = Symbol('setFreshMarket');
+
+/**
+ * Publish a fresh market event through the legitimate market ingestion path.
+ * Only events published through this function satisfy the LIVE_READY freshness gate.
+ * Direct kernel.publish('market.ticker.updated', ...) calls do NOT carry FRESH_MARKET_TOKEN.
+ */
+export function publishFreshMarket(spine: ProductionSpine, payload: any): void {
+  spine.kernel.publish('market.ticker.updated', payload);
+  (spine as any)[SET_FRESH_MARKET]();
+}
 
 /**
  * Full recovery: journal → replay → verify → RECOVERY_VERIFIED.
