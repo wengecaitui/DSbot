@@ -199,13 +199,15 @@ const LIVE_TOKEN = Symbol('liveToken');
 const SET_FRESH_MARKET = Symbol('setFreshMarket');
 
 /**
- * Publish a fresh market event through the legitimate market ingestion path.
- * Only events published through this function satisfy the LIVE_READY freshness gate.
- * Direct kernel.publish('market.ticker.updated', ...) calls do NOT carry FRESH_MARKET_TOKEN.
+ * Connect the production market ingestion path.
+ * Only events flowing through the TradingEventBus → bridgeMarketToKernel
+ * establish market freshness. No exported helper can forge this.
  */
-export function publishFreshMarket(spine: ProductionSpine, payload: any): void {
-  spine.kernel.publish('market.ticker.updated', payload);
-  (spine as any)[SET_FRESH_MARKET]();
+export function connectProductionMarket(spine: ProductionSpine, eventBus: any): () => void {
+  const { bridgeMarketToKernel } = require('../position/MarketBridge') as typeof import('../position/MarketBridge');
+  return bridgeMarketToKernel(eventBus, spine.kernel, () => {
+    (spine as any)[SET_FRESH_MARKET]();
+  });
 }
 
 /**

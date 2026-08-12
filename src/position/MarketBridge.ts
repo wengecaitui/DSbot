@@ -10,6 +10,7 @@ import type { TradingKernel } from '../kernel/TradingKernel';
 export function bridgeMarketToKernel(
   eventBus: TradingEventBus,
   kernel: TradingKernel,
+  onFreshMarket?: () => void,
 ): () => void {
   const handler = (event: any) => {
     const ticker = event.ticker;
@@ -30,6 +31,7 @@ export function bridgeMarketToKernel(
         },
         receivedAt: Date.now(),
       });
+      onFreshMarket?.();
     } catch (_) {
       // Fail-closed
     }
