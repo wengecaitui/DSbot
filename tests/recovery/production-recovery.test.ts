@@ -12,6 +12,13 @@ import type { ProjectorMap } from '../../src/recovery/ReplayCoordinator';
 
 const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
 
+function freshMarket(spine: any) {
+  spine.kernel.publish('market.ticker.updated', {
+    ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+    receivedAt: Date.now(),
+  });
+}
+
 function makeIntent(id: string, symbol: string, dir: 'long' | 'short', usd: number) {
   return { intentId: id, exchange: 'bitget', symbol, direction: dir, orderType: 'market', positionUsd: usd, limitPrice: undefined, createdAt: Date.now() };
 }
@@ -138,6 +145,8 @@ describe('Phase 5A — Production Recovery', () => {
     // Recovery + start (recoverAndStart calls performRecoveryAndStart internally)
     const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const result = await recoverAndStart(s, journalPath);
+    // Publish fresh market to satisfy LIVE_READY freshness gate
+    freshMarket(s);
     await activateLiveReadiness(s);
     assert.strictEqual(result.recoveryVerified, true, 'recovery verified');
     
@@ -255,8 +264,10 @@ describe('Phase 5A — Production Recovery', () => {
     const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual-r2', hardRisk, journalPath: journalPath, policyMaxLifetimeMs: 3600_000 });
     s2.planStore.subscribeToKernel(s2.kernel as any);
     const recoveryResult = await recoverAndStart(s2, journalPath);
+    // Publish fresh market → s2 now has freshMarketObserved
+    freshMarket(s2);
     await activateLiveReadiness(s2);
-    assert.strictEqual(recoveryResult.recoveryVerified, true, `recovery failed: mode=${recoveryResult.mode}, errors=${JSON.stringify(recoveryResult.replayReport.errors)}`);
+    assert.strictEqual(recoveryResult.recoveryVerified, true, `recovery failed: mode=${recoveryResult.mode}, errors=${JSON.stringify(recoveryResult.errors)}`);
 
     // Market snapshot restored
     const snap = s2.marketStore.getSnapshot('bitget' as any, 'BTC/USDT');
@@ -339,7 +350,8 @@ describe('Phase 5A — Production Recovery', () => {
     assert.strictEqual(r.admitted, false, 'not live → entry blocked');
     assert.strictEqual(r.riskCode, 'NOT_LIVE_READY');
 
-    // Activate live
+    // Activate live after fresh market event
+    freshMarket(s);
     await activateLiveReadiness(s);
     assert.strictEqual(s.protection.getMode(), 'live', 'live after activateLiveReadiness');
 
@@ -387,6 +399,8 @@ describe('Phase 5A — Production Recovery', () => {
     s.planStore.subscribeToKernel(s.kernel as any);
     const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
+    // Publish fresh market → LIVE_READY freshness gate satisfied
+    freshMarket(s);
     await activateLiveReadiness(s);
     // Now LIVE_READY
     assert.strictEqual(s.protection.getMode(), 'live');

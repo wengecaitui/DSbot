@@ -161,6 +161,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // ── Recovery state (internal) ──
   let recoveryVerified = false;
   let started = false;
+  let freshMarketObserved = false;  // Set by post-recovery kernel events only
 
   const spine = {
     kernel, positionStore, marketStore, policyStore,
@@ -175,15 +176,18 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   };
 
   // Internal: grant RECOVERY_VERIFIED (does NOT set LIVE_READY)
+  // Subscribes to market.ticker.updated so post-recovery events mark freshMarketObserved
   (spine as any)[VERIFY_TOKEN] = async function() {
     if (started) return;
     recoveryVerified = true;
     started = true;
+    kernel.subscribe('market.ticker.updated', () => { freshMarketObserved = true; });
   };
 
-  // Internal: grant LIVE_READY (requires recoveryVerified)
+  // Internal: grant LIVE_READY (requires recoveryVerified + fresh post-recovery market)
   (spine as any)[LIVE_TOKEN] = async function() {
     if (!recoveryVerified) throw new Error('LIVE_READY_REQUIRES_RECOVERY');
+    if (!freshMarketObserved) throw new Error('LIVE_READY_REQUIRES_FRESH_MARKET');
     _setLive();
   };
 

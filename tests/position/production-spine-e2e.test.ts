@@ -31,6 +31,11 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
     // Recovery + start (cold start → no_history → verified + live)
     await recoverAndStart(spine, journalPath);
+    // Publish fresh market event to satisfy LIVE_READY freshness gate
+    spine.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
     await activateLiveReadiness(spine);
 
     // Establish trusted baseline FIRST (required so policy pub seq ≥ 2)
@@ -112,6 +117,11 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
     // Recovery + start (cold start → verified + live)
     await recoverAndStart(s, protJournalPath);
+    // Publish fresh market event to satisfy LIVE_READY freshness gate
+    s.kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
     await activateLiveReadiness(s);
 
     trustBaseline(s, 'bitget', 'BTC/USDT');
