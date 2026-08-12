@@ -306,7 +306,7 @@ describe('Phase 5A — Production Recovery', () => {
     s.protection.start();
     // setMode no longer exists — getMode is 'replay'
     assert.strictEqual((s.protection as any).setMode, undefined, 'setMode not callable');
-    assert.strictEqual((s.protection as any)._setLive, undefined, '_setLive not callable');
+    assert.strictEqual((s.protection as any)._setLive, undefined, '_setLive deleted — not callable');
     assert.strictEqual(s.protection.getMode(), 'replay', 'starts in replay');
     rmSync(dir, { recursive: true, force: true });
   });

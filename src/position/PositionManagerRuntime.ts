@@ -23,6 +23,8 @@ export interface PositionManagerRuntimeConfig {
 }
 
 export interface PositionManagerRuntime {
+  /** @internal — captured and deleted by ProductionSpine, not callable by users */
+  _setLive?(): void;
   getMode(): RuntimeMode;
   start(): void;
   stop(): void;
