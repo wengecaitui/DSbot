@@ -1,7 +1,7 @@
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway, trustBaseline, verifyRecovery } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway, trustBaseline } from '../../src/position/ProductionSpine';
 import type { TradeIntent } from '../../src/types/trade-intent';
 
 const hardRisk = () => ({
@@ -46,7 +46,8 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       receivedAt: Date.now(),
     });
     // Grant RECOVERY_VERIFIED so executeThroughGateway allows entries
-    verifyRecovery(spine);
+    const { grantRecoveryVerified } = require('../../src/recovery/RecoveryManager');
+    grantRecoveryVerified(spine);
     await spine.start({ exchange: 'bitget' });
     initDone = true;
   }
@@ -124,7 +125,8 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       receivedAt: Date.now(),
     });
 
-    verifyRecovery(s);
+    const { grantRecoveryVerified } = require('../../src/recovery/RecoveryManager');
+    grantRecoveryVerified(s);
     await s.start({ exchange: 'bitget' });
 
     // Open position

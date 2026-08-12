@@ -186,12 +186,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
 const RECOVERY_SET_SYMBOL = Symbol('recoverySet');
 
-/** Set RECOVERY_VERIFIED internally — only callable by RecoveryManager. */
-export function verifyRecovery(spine: ProductionSpine): void {
-  const fn = (spine as any)[RECOVERY_SET_SYMBOL];
-  if (typeof fn !== 'function') throw new Error('RECOVERY_AUTHORITY: spine has no internal recovery setter');
-  fn();
-}
+/** INTERNAL: exported for RecoveryManager only — sets RECOVERY_VERIFIED on a spine. */
+export const INTERNAL_RECOVERY_SET_SYMBOL = RECOVERY_SET_SYMBOL;
 
 /**
  * Execute a TradeIntent through PreTradeRiskGateway → OmsCore → PaperExecutionAdapter.

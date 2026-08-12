@@ -1,7 +1,8 @@
 // Phase 5A: RecoveryManager — open→replay→verify→RECOVERY_VERIFIED
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import type { FileEventJournal } from './FileEventJournal';
-import { replayJournal, type ProjectorMap, type ReplayReport } from './ReplayCoordinator';
+import { replayJournal, type ProjectorMap, type ReplayReport, type ReplayError } from './ReplayCoordinator';
+import { INTERNAL_RECOVERY_SET_SYMBOL, type ProductionSpine } from '../position/ProductionSpine';
 
 export type RecoveryMode = 'verified' | 'failed' | 'no_history';
 
@@ -19,15 +20,17 @@ interface CheckpointFile {
 
 /**
  * Recovery flow:
- *   1. Open journal → load all events
+ *   1. Open journal → validate all envelopes
  *   2. Replay → route to projectors
- *   3. Load optional checkpoint, compare anchored to journal sequence
- *   4. Set recoveryVerified internally
+ *   3. Load optional checkpoint, compare digests by store name
+ *   4. Set recoveryVerified internally on spine
+ *   5. Caller then calls spine.start()
  */
 export function recoverFromJournal(
   journal: FileEventJournal,
   projectors: ProjectorMap,
   checkpointPath?: string,
+  storeDigests?: Record<string, string>,
 ): RecoveryResult {
   // Empty journal → no_history
   if (journal.lastSequence === 0) {
@@ -35,7 +38,18 @@ export function recoverFromJournal(
       mode: 'no_history',
       checkpointComparison: 'missing',
       replayReport: { eventsReplayed: 0, lastSequence: 0, errors: [] },
-      recoveryVerified: true, // cold start is verified
+      recoveryVerified: true,
+    };
+  }
+
+  // Validate journal envelopes
+  const validationErrors = validateJournal(journal);
+  if (validationErrors.length > 0) {
+    return {
+      mode: 'failed',
+      checkpointComparison: 'missing',
+      replayReport: { eventsReplayed: 0, lastSequence: journal.lastSequence, errors: validationErrors },
+      recoveryVerified: false,
     };
   }
 
@@ -52,7 +66,7 @@ export function recoverFromJournal(
     };
   }
 
-  // Checkpoint validation
+  // Checkpoint validation using store-name digests
   let checkpointComparison: RecoveryResult['checkpointComparison'] = 'missing';
   if (checkpointPath && existsSync(checkpointPath)) {
     let cp: CheckpointFile;
@@ -78,20 +92,10 @@ export function recoverFromJournal(
 
     if (cp.sequence < journal.lastSequence) {
       checkpointComparison = 'stale';
-      // Stale checkpoint → journal authoritative, still verified
     } else {
-      // Sequence match → compare digests
-      let allMatch = true;
-      for (const [name, projList] of projectors) {
-        for (const proj of projList) {
-          const digest = proj.digest();
-          const key = `${name}:${digest}`; // simple composite
-          // Compare by iterating all projector digests
-          if (cp.digests[name] && cp.digests[name] !== digest) {
-            allMatch = false;
-          }
-        }
-      }
+      // Sequence match → compare store-name digests
+      const digests = storeDigests ?? {};
+      const allMatch = validateCheckpointDigests(cp, digests);
       checkpointComparison = allMatch ? 'match' : 'mismatch';
       if (!allMatch) {
         return {
@@ -110,6 +114,17 @@ export function recoverFromJournal(
     replayReport,
     recoveryVerified: true,
   };
+}
+
+/**
+ * Set RECOVERY_VERIFIED on a ProductionSpine.
+ * Only RecoveryManager should call this — the symbol is exported
+ * to prevent caller forgery.
+ */
+export function grantRecoveryVerified(spine: ProductionSpine): void {
+  const fn = (spine as any)[INTERNAL_RECOVERY_SET_SYMBOL];
+  if (typeof fn !== 'function') throw new Error('RECOVERY_AUTHORITY: spine has no internal recovery setter');
+  fn();
 }
 
 /** Save checkpoint for graceful shutdown verification. */
@@ -136,4 +151,33 @@ function validateCheckpointDigests(
     if (cp.digests[name] !== expectedDigests[name]) return false; // mismatch
   }
   return true;
+}
+
+/** Validate journal envelopes: identity, sequence, timestamp, known type, payload. */
+function validateJournal(journal: FileEventJournal): ReplayError[] {
+  const errors: ReplayError[] = [];
+  const envelopes = journal.readFromLogicalSequence(1, 1_000_000);
+  for (const env of envelopes) {
+    // Valid identity
+    if (!env.kernelEventId || typeof env.kernelEventId !== 'string' || env.kernelEventId.length === 0) {
+      errors.push({ sequence: env.kernelLogicalSequence, eventId: env.kernelEventId ?? 'missing', message: 'INVALID_ENVELOPE: missing kernelEventId' });
+    }
+    // Valid sequence
+    if (typeof env.kernelLogicalSequence !== 'number' || env.kernelLogicalSequence < 1 || !Number.isSafeInteger(env.kernelLogicalSequence)) {
+      errors.push({ sequence: env.kernelLogicalSequence, eventId: env.kernelEventId ?? 'missing', message: `INVALID_ENVELOPE: invalid kernelLogicalSequence=${env.kernelLogicalSequence}` });
+    }
+    // Valid timestamp
+    if (typeof env.kernelTimestamp !== 'number' || env.kernelTimestamp <= 0) {
+      errors.push({ sequence: env.kernelLogicalSequence, eventId: env.kernelEventId ?? 'missing', message: `INVALID_ENVELOPE: invalid kernelTimestamp=${env.kernelTimestamp}` });
+    }
+    // Valid event type
+    if (!env.type || typeof env.type !== 'string' || env.type.length === 0) {
+      errors.push({ sequence: env.kernelLogicalSequence, eventId: env.kernelEventId, message: 'INVALID_ENVELOPE: missing event type' });
+    }
+    // Valid payload — must be an object (null is not valid)
+    if (env.payload === null || env.payload === undefined || typeof env.payload !== 'object') {
+      errors.push({ sequence: env.kernelLogicalSequence, eventId: env.kernelEventId, message: `INVALID_ENVELOPE: payload is ${env.payload === null ? 'null' : typeof env.payload}` });
+    }
+  }
+  return errors;
 }

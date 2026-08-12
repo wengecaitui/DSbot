@@ -142,8 +142,8 @@ describe('Phase 5A — Production Recovery', () => {
     assert.strictEqual(result.recoveryVerified, true, 'recovery verified');
     
     // Set internally
-    const { verifyRecovery } = require('../../src/position/ProductionSpine');
-    verifyRecovery(s);
+    const { grantRecoveryVerified } = require('../../src/recovery/RecoveryManager');
+    grantRecoveryVerified(s);
     
     // Now start() succeeds
     await s.start({ exchange: 'bitget' });
@@ -255,8 +255,8 @@ describe('Phase 5A — Production Recovery', () => {
       receivedAt: Date.now(),
     });
     // Open position through Gateway→OMS
-    const { verifyRecovery } = require('../../src/position/ProductionSpine');
-    verifyRecovery(s1);
+    const { grantRecoveryVerified } = require('../../src/recovery/RecoveryManager');
+    grantRecoveryVerified(s1);
     await s1.start({ exchange: 'bitget' });
     const intent = { intentId: 'fac1', exchange: 'bitget', symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 5000, limitPrice: undefined, createdAt: Date.now() };
     await executeThroughGateway(s1, intent, 'open', 5000);
