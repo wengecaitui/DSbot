@@ -30,7 +30,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     spine.planStore.subscribeToKernel(spine.kernel as any);
 
     // Recovery + start (cold start → no_history → verified + live)
-    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    const { recoverAndStart } = require('../../src/position/ProductionSpine');
     await recoverAndStart(spine, journalPath);
 
     // Establish trusted baseline FIRST (required so policy pub seq ≥ 2)
@@ -109,7 +109,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     s.planStore.subscribeToKernel(s.kernel as any);
 
     // Recovery + start (cold start → verified + live)
-    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    const { recoverAndStart } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
 
     trustBaseline(s, 'bitget', 'BTC/USDT');

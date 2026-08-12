@@ -2,8 +2,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import type { FileEventJournal } from './FileEventJournal';
 import { replayJournal, type ProjectorMap, type ReplayReport, type ReplayError } from './ReplayCoordinator';
-import { createFileEventJournal } from './FileEventJournal';
-import { INTERNAL_START_TOKEN, type ProductionSpine } from '../position/ProductionSpine';
 
 export type RecoveryMode = 'verified' | 'failed' | 'no_history';
 
@@ -115,40 +113,6 @@ export function recoverFromJournal(
     replayReport,
     recoveryVerified: true,
   };
-}
-
-/**
- * Full recovery + start flow:
- *   journal → replay → verify → RECOVERY_VERIFIED → LIVE_READY
- * Returns the spine ready for production.
- */
-export async function recoverAndStart(
-  spine: ProductionSpine,
-  journalPath: string,
-  checkpointPath?: string,
-  storeDigests?: Record<string, string>,
-): Promise<RecoveryResult> {
-  const journal = createFileEventJournal(journalPath);
-  const projectors = buildProjectorMap(spine);
-  const result = recoverFromJournal(journal, projectors, checkpointPath, storeDigests);
-
-  if (result.recoveryVerified) {
-    const fn = (spine as any)[INTERNAL_START_TOKEN];
-    if (typeof fn === 'function') await fn();
-  }
-
-  return result;
-}
-
-function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
-  const m: ProjectorMap = new Map();
-  m.set('position.baseline.confirmed', [spine.positionStore]);
-  m.set('execution.fill.confirmed', [spine.positionStore, spine.oms.getStore()]);
-  m.set('market.ticker.updated', [spine.marketStore]);
-  m.set('policy.snapshot.published', [spine.policyStore]);
-  m.set('position.plan.created', [spine.planStore]);
-  m.set('position.plan.closed', [spine.planStore]);
-  return m;
 }
 
 /** Save checkpoint for graceful shutdown verification. */

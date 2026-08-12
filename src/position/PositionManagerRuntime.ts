@@ -23,8 +23,6 @@ export interface PositionManagerRuntimeConfig {
 }
 
 export interface PositionManagerRuntime {
-  /** Internal: set mode to 'live' — only called by ProductionSpine token path */
-  _setLive?(): void;
   getMode(): RuntimeMode;
   start(): void;
   stop(): void;
@@ -45,7 +43,6 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
   if (!config.oms) {
     return {
       getMode() { return mode; },
-      _setLive() { mode = 'live'; },
       start() {},
       stop() { mode = 'replay'; },
       getSubmittedCount() { return 0; },

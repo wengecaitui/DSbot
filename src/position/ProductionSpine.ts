@@ -12,6 +12,7 @@ import { createKernelPositionStateStore, type KernelPositionStateStore } from '.
 import { createKernelMarketStateStore, type KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
 import { createKernelPolicyStore, type KernelPolicyStore } from '../kernel/KernelPolicyStore';
 import { OmsCore } from '../oms/OmsCore';
+import type { ProjectorMap } from '../recovery/ReplayCoordinator';
 import { PaperExecutionAdapter } from '../oms/PaperExecutionAdapter';
 import { PaperExecutionService, type ExecuteParams } from '../paper/PaperExecutionService';
 import type { PaperBrokerPersistence } from '../paper/PaperBroker';
@@ -153,6 +154,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     hardRisk: config.hardRisk as any,
     stopPct: config.stopPct ?? 0.05,
   });
+  // Strip _setLive from public interface — captured for internal use only
+  const _setLive = (protection as any)._setLive as () => void;
+  delete (protection as any)._setLive;
 
   // ── Recovery state (internal) ──
   let recoveryVerified = false;
@@ -177,7 +181,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     if (started) return;
     recoveryVerified = true;
     started = true;
-    (protection as any)._setLive();
+    _setLive();
   };
 
   return spine;
@@ -185,7 +189,49 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
 const START_TOKEN = Symbol('startToken');
 
-export const INTERNAL_START_TOKEN = START_TOKEN;
+/**
+ * Full recovery + start: journal → replay → verify → RECOVERY_VERIFIED → LIVE_READY.
+ * This is the ONLY path to RECOVERY_VERIFIED and LIVE_READY.
+ * No exported token, symbol, or method can bypass this flow.
+ */
+export async function recoverAndStart(
+  spine: ProductionSpine,
+  journalPath: string,
+  checkpointPath?: string,
+): Promise<{ recoveryVerified: boolean; mode: string; errors: any[] }> {
+  // Lazy-import RecoveryManager to avoid circular deps
+  const { recoverFromJournal } = require('../recovery/RecoveryManager') as typeof import('../recovery/RecoveryManager');
+  const { createFileEventJournal } = require('../recovery/FileEventJournal') as typeof import('../recovery/FileEventJournal');
+
+  const journal = createFileEventJournal(journalPath);
+  const projectors = buildProjectorMap(spine);
+  const storeDigests = {
+    position: spine.positionStore.digest(),
+    market: spine.marketStore.digest(),
+    policy: spine.policyStore.digest(),
+    oms: spine.oms.getStore().digest(),
+    plan: spine.planStore.digest(),
+  };
+  const result = recoverFromJournal(journal, projectors, checkpointPath, storeDigests);
+
+  if (result.recoveryVerified) {
+    const fn = (spine as any)[START_TOKEN];
+    if (typeof fn === 'function') await fn();
+  }
+
+  return { recoveryVerified: result.recoveryVerified, mode: result.mode, errors: result.replayReport.errors };
+}
+
+function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
+  const m: ProjectorMap = new Map();
+  m.set('position.baseline.confirmed', [spine.positionStore]);
+  m.set('execution.fill.confirmed', [spine.positionStore, spine.oms.getStore()]);
+  m.set('market.ticker.updated', [spine.marketStore]);
+  m.set('policy.snapshot.published', [spine.policyStore]);
+  m.set('position.plan.created', [spine.planStore]);
+  m.set('position.plan.closed', [spine.planStore]);
+  return m;
+}
 
 /**
  * Execute a TradeIntent through PreTradeRiskGateway → OmsCore → PaperExecutionAdapter.

@@ -136,7 +136,7 @@ describe('Phase 5A — Production Recovery', () => {
     );
 
     // Recovery + start (recoverAndStart calls performRecoveryAndStart internally)
-    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    const { recoverAndStart } = require('../../src/position/ProductionSpine');
     const result = await recoverAndStart(s, journalPath);
     assert.strictEqual(result.recoveryVerified, true, 'recovery verified');
     
@@ -250,7 +250,7 @@ describe('Phase 5A — Production Recovery', () => {
     });
 
     // Run 2: fresh spine, recoverAndStart replays journal → verified + live
-    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    const { recoverAndStart } = require('../../src/position/ProductionSpine');
     const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual-r2', hardRisk, journalPath: journalPath, policyMaxLifetimeMs: 3600_000 });
     s2.planStore.subscribeToKernel(s2.kernel as any);
     const recoveryResult = await recoverAndStart(s2, journalPath);
@@ -306,6 +306,7 @@ describe('Phase 5A — Production Recovery', () => {
     s.protection.start();
     // setMode no longer exists — getMode is 'replay'
     assert.strictEqual((s.protection as any).setMode, undefined, 'setMode not callable');
+    assert.strictEqual((s.protection as any)._setLive, undefined, '_setLive not callable');
     assert.strictEqual(s.protection.getMode(), 'replay', 'starts in replay');
     rmSync(dir, { recursive: true, force: true });
   });
@@ -359,7 +360,7 @@ describe('Phase 5A — Production Recovery', () => {
     const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0liveok', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
-    const { recoverAndStart } = require('../../src/recovery/RecoveryManager');
+    const { recoverAndStart } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
     // Now LIVE_READY
     assert.strictEqual(s.protection.getMode(), 'live');
