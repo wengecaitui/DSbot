@@ -12,9 +12,29 @@ import type { ProjectorMap } from '../../src/recovery/ReplayCoordinator';
 
 const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
 
-function freshMarket(spine: any) {
-  const { publishProductionMarket } = require('../../src/position/ProductionSpine');
-  publishProductionMarket(spine, { ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() } });
+// Production market ingestion: MarketDataRuntime owns a collector that feeds its bus.
+// Tests simulate the real collector — NOT a public ticker-injection helper.
+function btcTicker() {
+  return { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() };
+}
+
+/** Create a spine wired to a MarketDataRuntime (production market path). */
+async function createSpineWithMarket(overrides: any = {}) {
+  const { createMarketDataRuntime } = require('../../src/runtime/market/MarketDataRuntime');
+  let tickerHandler: ((t: any) => void) | null = null;
+  const collector = {
+    start: async () => {},
+    stop: () => {},
+    onTicker: (h: any) => { tickerHandler = h; },
+    onKline: (_h: any) => {},
+  };
+  const marketRuntime = createMarketDataRuntime({ collectorFactory: () => collector });
+  const spine = await createProductionSpine({ exchange: 'bitget', hardRisk, ...overrides, marketRuntime });
+  await marketRuntime.start();
+  return {
+    spine,
+    emitTicker: () => { tickerHandler?.(btcTicker()); },
+  };
 }
 
 function makeIntent(id: string, symbol: string, dir: 'long' | 'short', usd: number) {
@@ -131,7 +151,7 @@ describe('Phase 5A — Production Recovery', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-verify-'));
     const journalPath = join(dir, 'journal.jsonl');
     
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'verify', hardRisk, journalPath });
+    const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'verify', journalPath });
     
     // Before recovery — start() must reject (locked to RecoveryManager)
     await assert.rejects(
@@ -143,8 +163,8 @@ describe('Phase 5A — Production Recovery', () => {
     // Recovery + start (recoverAndStart calls performRecoveryAndStart internally)
     const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const result = await recoverAndStart(s, journalPath);
-    // Publish fresh market to satisfy LIVE_READY freshness gate
-    freshMarket(s);
+    // Fresh market through production collector satisfies LIVE_READY freshness gate
+    emitTicker();
     await activateLiveReadiness(s);
     assert.strictEqual(result.recoveryVerified, true, 'recovery verified');
     
@@ -259,11 +279,11 @@ describe('Phase 5A — Production Recovery', () => {
 
     // Run 2: fresh spine, recoverAndStart replays journal → verified + live
     const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual-r2', hardRisk, journalPath: journalPath, policyMaxLifetimeMs: 3600_000 });
+    const { spine: s2, emitTicker } = await createSpineWithMarket({ accountId: 'factual-r2', journalPath: journalPath, policyMaxLifetimeMs: 3600_000 });
     s2.planStore.subscribeToKernel(s2.kernel as any);
     const recoveryResult = await recoverAndStart(s2, journalPath);
-    // Publish fresh market → s2 now has freshMarketObserved
-    freshMarket(s2);
+    // Fresh market through production collector → s2 now has freshMarketObserved
+    emitTicker();
     await activateLiveReadiness(s2);
     assert.strictEqual(recoveryResult.recoveryVerified, true, `recovery failed: mode=${recoveryResult.mode}, errors=${JSON.stringify(recoveryResult.errors)}`);
 
@@ -335,7 +355,7 @@ describe('Phase 5A — Production Recovery', () => {
 
     // Recover: verified but NOT live
     const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0entry', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'p0entry', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
     await recoverAndStart(s, journalPath);
@@ -348,8 +368,8 @@ describe('Phase 5A — Production Recovery', () => {
     assert.strictEqual(r.admitted, false, 'not live → entry blocked');
     assert.strictEqual(r.riskCode, 'NOT_LIVE_READY');
 
-    // Activate live after fresh market event
-    freshMarket(s);
+    // Activate live after fresh market event via production collector
+    emitTicker();
     await activateLiveReadiness(s);
     assert.strictEqual(s.protection.getMode(), 'live', 'live after activateLiveReadiness');
 
@@ -392,13 +412,13 @@ describe('Phase 5A — Production Recovery', () => {
       receivedAt: Date.now(),
     });
     // Fresh spine → recoverAndStart replays journal → verified + live
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0liveok', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'p0liveok', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
     const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
-    // Publish fresh market → LIVE_READY freshness gate satisfied
-    freshMarket(s);
+    // Fresh market through production collector → LIVE_READY freshness gate satisfied
+    emitTicker();
     await activateLiveReadiness(s);
     // Now LIVE_READY
     assert.strictEqual(s.protection.getMode(), 'live');
@@ -413,34 +433,60 @@ describe('Phase 5A — Production Recovery', () => {
   it('P0: direct kernel.publish("market.ticker.updated") does NOT grant freshness', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0fake-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0fake', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'p0fake', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
 
     // Recovery
-    const { recoverAndStart, activateLiveReadiness, publishFreshMarket } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
     assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
 
-    // Forge: publish market event directly (no provenance token)
+    // Forge: publish market event directly to kernel (bypasses production bus)
     s.kernel.publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
 
-    // activateLiveReadiness must reject — direct publish doesn't carry FRESH_MARKET_TOKEN
+    // activateLiveReadiness must reject — direct kernel.publish does not establish freshness
     await assert.rejects(
       () => activateLiveReadiness(s),
       { message: /FRESH_MARKET/ },
       'direct kernel.publish cannot forge fresh market',
     );
 
-    // Use legitimate path (owned production bus)
-    const { publishProductionMarket } = require('../../src/position/ProductionSpine');
-    publishProductionMarket(s, { ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() } });
+    // Legitimate path: production collector feeds the market bus → freshness
+    emitTicker();
     await activateLiveReadiness(s);
     assert.strictEqual(s.protection.getMode(), 'live');
 
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ── P0: no public helper can inject ticker data ───────────────────────────
+  it('P0: no exported/public capability can inject arbitrary ticker data', async () => {
+    const { createProductionSpine: cps } = require('../../src/position/ProductionSpine');
+    // The only freshness-granting capability is a config-time MarketDataRuntime wiring.
+    // There must be NO exported publishProductionMarket / connectProductionMarket / setFreshMarket.
+    const spineModule = require('../../src/position/ProductionSpine');
+    assert.strictEqual(spineModule.publishProductionMarket, undefined, 'publishProductionMarket not exported');
+    assert.strictEqual(spineModule.connectProductionMarket, undefined, 'connectProductionMarket not exported');
+    assert.strictEqual(spineModule.setFreshMarket, undefined, 'setFreshMarket not exported');
+    assert.strictEqual(spineModule.publishFreshMarket, undefined, 'publishFreshMarket not exported');
+    assert.strictEqual(spineModule.INTERNAL_START_TOKEN, undefined, 'INTERNAL_START_TOKEN not exported');
+
+    // A spine with NO marketRuntime can never become LIVE_READY (fail-closed)
+    const dir = mkdtempSync(join(tmpdir(), 'p5a-p0nobus-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0nobus', hardRisk, journalPath });
+    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    await recoverAndStart(s, journalPath);
+    assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
+    await assert.rejects(
+      () => activateLiveReadiness(s),
+      { message: /FRESH_MARKET/ },
+      'no market runtime → cannot reach LIVE_READY',
+    );
     rmSync(dir, { recursive: true, force: true });
   });
 });

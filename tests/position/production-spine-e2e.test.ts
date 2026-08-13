@@ -1,7 +1,7 @@
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, activateLiveReadiness, publishProductionMarket } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, activateLiveReadiness } from '../../src/position/ProductionSpine';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -15,6 +15,29 @@ const hardRisk = () => ({
   totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity,
 });
 
+function btcTicker() {
+  return { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() };
+}
+
+/** Create a spine wired to a MarketDataRuntime (production market path). */
+async function createSpineWithMarket(overrides: any = {}) {
+  const { createMarketDataRuntime } = require('../../src/runtime/market/MarketDataRuntime');
+  let tickerHandler: ((t: any) => void) | null = null;
+  const collector = {
+    start: async () => {},
+    stop: () => {},
+    onTicker: (h: any) => { tickerHandler = h; },
+    onKline: (_h: any) => {},
+  };
+  const marketRuntime = createMarketDataRuntime({ collectorFactory: () => collector });
+  const s = await createProductionSpine({ exchange: 'bitget', hardRisk, ...overrides, marketRuntime });
+  await marketRuntime.start();
+  return {
+    spine: s,
+    emitTicker: () => { tickerHandler?.(btcTicker()); },
+  };
+}
+
 function makeIntent(id: string, symbol: string, dir: 'long' | 'short', usd: number): TradeIntent {
   return { intentId: id, exchange: 'bitget', symbol, direction: dir, orderType: 'market', positionUsd: usd, limitPrice: undefined, createdAt: Date.now() } as TradeIntent;
 }
@@ -25,14 +48,15 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
   async function init() {
     if (initDone) return;
-    spine = await createProductionSpine({ exchange: 'bitget', accountId: 'e2e', hardRisk, policyMaxLifetimeMs: 3600_000, journalPath });
+    const m = await createSpineWithMarket({ accountId: 'e2e', policyMaxLifetimeMs: 3600_000, journalPath });
+    spine = m.spine;
     spine.protection.start();
     spine.planStore.subscribeToKernel(spine.kernel as any);
 
     // Recovery + start (cold start → no_history → verified + live)
     await recoverAndStart(spine, journalPath);
-    // Publish fresh market through owned production bus (non-injectable)
-    publishProductionMarket(spine, { ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() } });
+    // Fresh market through production collector
+    m.emitTicker();
     await activateLiveReadiness(spine);
 
     // Establish trusted baseline FIRST (required so policy pub seq ≥ 2)
@@ -108,14 +132,15 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     // Fresh spine with fresh journal
     const protDir = mkdtempSync(join(tmpdir(), 'p4c-prot-'));
     const protJournalPath = join(protDir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'prot-e2e', hardRisk, policyMaxLifetimeMs: 3600_000, journalPath: protJournalPath });
+    const m = await createSpineWithMarket({ accountId: 'prot-e2e', policyMaxLifetimeMs: 3600_000, journalPath: protJournalPath });
+    const s = m.spine;
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
 
     // Recovery + start (cold start → verified + live)
     await recoverAndStart(s, protJournalPath);
-    // Publish fresh market through owned production bus
-    publishProductionMarket(s, { ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() } });
+    // Fresh market through production collector
+    m.emitTicker();
     await activateLiveReadiness(s);
 
     trustBaseline(s, 'bitget', 'BTC/USDT');

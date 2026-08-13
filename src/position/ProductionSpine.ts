@@ -27,7 +27,7 @@ import type { TradeIntent } from '../types/trade-intent';
 import type { EventJournalPort } from '../kernel/EventJournalPort';
 import { createFileEventJournal, type FileEventJournal } from '../recovery/FileEventJournal';
 import { bridgeMarketToKernel } from './MarketBridge';
-import { createTradingEventBus } from '../events/TradingEventBus';
+import type { MarketDataRuntime } from '../runtime/market/MarketDataRuntime';
 
 export interface ProductionSpineConfig {
   exchange: string;
@@ -43,6 +43,12 @@ export interface ProductionSpineConfig {
   marketStaleAfterMs?: number;
   /** Policy max lifetime in ms. Required for policy.snapshot.published. Default: 3_600_000 (1 hour). */
   policyMaxLifetimeMs?: number;
+  /**
+   * Production market runtime ownership (MarketDataRuntime).
+   * ONLY market data flowing through this runtime's collector → bus → bridge
+   * can establish LIVE_READY freshness. No public helper injects tickers.
+   */
+  marketRuntime?: MarketDataRuntime;
 }
 
 export interface ProductionSpine {
@@ -163,11 +169,13 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // ── Recovery state (internal) ──
   let recoveryVerified = false;
   let started = false;
-  let freshMarketObserved = false;  // Set by post-recovery kernel events only
+  let freshMarketObserved = false;  // Set by production market bus events only
 
-  // ── Owned production market bus (not caller-injectable) ──
-  const productionBus = createTradingEventBus();
-  bridgeMarketToKernel(productionBus, kernel, () => { freshMarketObserved = true; });
+  // ── Production market ingestion (runtime ownership: MarketDataRuntime) ──
+  // Only market data through the production runtime's collector → bus can establish freshness.
+  if (config.marketRuntime) {
+    bridgeMarketToKernel(config.marketRuntime.bus, kernel, () => { freshMarketObserved = true; });
+  }
 
   const spine = {
     kernel, positionStore, marketStore, policyStore,
@@ -181,10 +189,6 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     },
   };
 
-  (spine as any)[SET_FRESH_MARKET] = () => { freshMarketObserved = true; };
-  (spine as any)[OWNED_BUS] = productionBus;
-
-  // Internal: grant RECOVERY_VERIFIED (does NOT set LIVE_READY)
   (spine as any)[VERIFY_TOKEN] = async function() {
     if (started) return;
     recoveryVerified = true;
@@ -203,17 +207,6 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
 const VERIFY_TOKEN = Symbol('verifyToken');
 const LIVE_TOKEN = Symbol('liveToken');
-const SET_FRESH_MARKET = Symbol('setFreshMarket');
-const OWNED_BUS = Symbol('ownedBus');
-
-/**
- * Publish market data through the spine's internally-owned production bus.
- * Callers cannot inject arbitrary buses — the bus is owned by the runtime.
- * Only this path (through the owned bus → bridgeMarketToKernel) marks freshness.
- */
-export function publishProductionMarket(spine: ProductionSpine, tickerData: { ticker: any }): void {
-  (spine as any)[OWNED_BUS].publish('market.ticker.updated', tickerData);
-}
 
 /**
  * Full recovery: journal → replay → verify → RECOVERY_VERIFIED.
