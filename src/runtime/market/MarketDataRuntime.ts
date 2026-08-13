@@ -37,6 +37,12 @@ export interface MarketDataRuntime {
   readonly isRunning: boolean;
   start(): Promise<void>;
   stop(): void;
+  /**
+   * Subscribe to collector-originated ticker ingestion — the provenance authority.
+   * Fires ONLY when the active collector ingests a ticker (before bus publication).
+   * Direct writes to `bus` never reach this path.
+   */
+  onTickerIngested(handler: (ticker: WsTicker) => void): () => void;
 }
 
 export interface MarketDataRuntimeOptions {
@@ -74,6 +80,24 @@ export function createMarketDataRuntime(
   let unsubStoreTicker: (() => void) | null = null;
   let unsubStoreKline: (() => void) | null = null;
   let cycleToken = 0;
+
+  // — Collector provenance observers ----------------------------------------
+  // Fires only on collector ingestion (not on direct bus writes).
+  const tickerIngestionHandlers: Array<(ticker: WsTicker) => void> = [];
+
+  function onTickerIngested(handler: (ticker: WsTicker) => void): () => void {
+    tickerIngestionHandlers.push(handler);
+    return () => {
+      const i = tickerIngestionHandlers.indexOf(handler);
+      if (i >= 0) tickerIngestionHandlers.splice(i, 1);
+    };
+  }
+
+  function notifyTickerIngested(ticker: WsTicker): void {
+    for (const handler of tickerIngestionHandlers) {
+      try { handler(ticker); } catch { /* never break ingestion */ }
+    }
+  }
 
   // — Safe error reporting --------------------------------------------------
 
@@ -149,6 +173,7 @@ export function createMarketDataRuntime(
     get store(): MarketSnapshotStore { return store; },
     get candleStore(): CandleSeriesStore { return candleStore; },
     get isRunning(): boolean { return running; },
+    onTickerIngested,
 
     start(): Promise<void> {
       if (startPromise !== null) return startPromise;
@@ -165,6 +190,8 @@ export function createMarketDataRuntime(
 
         collector.onTicker((ticker) => {
           if (generation !== myGen || collector !== activeCollector) return;
+          // Collector provenance: notify ingestion observers BEFORE bus publish.
+          notifyTickerIngested(ticker);
           try {
             const receivedAt = clock.now();
             const result = bus.publish('market.ticker.updated', { ticker, receivedAt });

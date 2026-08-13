@@ -172,9 +172,11 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   let freshMarketObserved = false;  // Set by production market bus events only
 
   // ── Production market ingestion (runtime ownership: MarketDataRuntime) ──
-  // Only market data through the production runtime's collector → bus can establish freshness.
+  // Market data still bridges to the kernel (positions/stores), but freshness
+  // provenance comes ONLY from collector ingestion — never a direct bus write.
   if (config.marketRuntime) {
-    bridgeMarketToKernel(config.marketRuntime.bus, kernel, () => { freshMarketObserved = true; });
+    bridgeMarketToKernel(config.marketRuntime.bus, kernel);
+    config.marketRuntime.onTickerIngested(() => { freshMarketObserved = true; });
   }
 
   const spine = {

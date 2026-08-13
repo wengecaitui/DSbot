@@ -33,6 +33,7 @@ async function createSpineWithMarket(overrides: any = {}) {
   await marketRuntime.start();
   return {
     spine,
+    marketRuntime,
     emitTicker: () => { tickerHandler?.(btcTicker()); },
   };
 }
@@ -487,6 +488,39 @@ describe('Phase 5A — Production Recovery', () => {
       { message: /FRESH_MARKET/ },
       'no market runtime → cannot reach LIVE_READY',
     );
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ── P0: direct marketRuntime.bus.publish cannot forge freshness ───────────
+  it('P0: marketRuntime.bus.publish(fake ticker) does NOT grant freshness', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5a-p0bus-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const { spine: s, marketRuntime, emitTicker } = await createSpineWithMarket({ accountId: 'p0bus', journalPath, policyMaxLifetimeMs: 3600_000 });
+    s.protection.start();
+    s.planStore.subscribeToKernel(s.kernel as any);
+
+    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    await recoverAndStart(s, journalPath);
+    assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
+
+    // Forge: write directly to the public bus (bypasses the collector)
+    marketRuntime.bus.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
+      receivedAt: Date.now(),
+    });
+
+    // activateLiveReadiness must reject — bus write does not carry collector provenance
+    await assert.rejects(
+      () => activateLiveReadiness(s),
+      { message: /FRESH_MARKET/ },
+      'direct bus write cannot forge fresh market',
+    );
+
+    // Legitimate: collector ingestion (not bus write) establishes freshness
+    emitTicker();
+    await activateLiveReadiness(s);
+    assert.strictEqual(s.protection.getMode(), 'live', 'collector ingestion → LIVE_READY');
+
     rmSync(dir, { recursive: true, force: true });
   });
 });
