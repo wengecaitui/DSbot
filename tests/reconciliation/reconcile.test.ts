@@ -359,4 +359,191 @@ describe('Phase 5B — reconciliation core', () => {
     assert.strictEqual(JSON.stringify(local), localJson);
     assert.strictEqual(JSON.stringify(external), externalJson);
   });
+
+  // ── P0-1: position factual semantics ──────────────────────────────────────
+
+  it('P0-1: local missing + no external position → NOT MATCH', () => {
+    const report = reconcile(
+      localSnap({ positions: [localPosition({ status: 'missing', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 })] }),
+      truth(),
+    );
+    assert.strictEqual(report.outcome, 'POSITION_MISMATCH');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-1: local flat + no external open position may MATCH', () => {
+    const report = reconcile(
+      localSnap({ positions: [localPosition({ status: 'flat', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 })] }),
+      truth(),
+    );
+    assert.strictEqual(report.outcome, 'MATCH');
+    assert.strictEqual(report.reconciliationVerified, true);
+  });
+
+  it('P0-1: same side/qty but different averageEntryPrice → POSITION_MISMATCH', () => {
+    const report = reconcile(
+      localSnap({ positions: [localPosition({ status: 'open', side: 'long', signedQuantity: 1, averageEntryPrice: 50000 })] }),
+      truth({ positions: [extPosition({ side: 'long', signedQuantity: 1, averageEntryPrice: 51000 })] }),
+    );
+    assert.strictEqual(report.outcome, 'POSITION_MISMATCH');
+    assert.ok(report.issues.some((i) => i.outcome === 'POSITION_MISMATCH' && /average entry/.test(i.reason)));
+  });
+
+  it('P0-1: same side/qty and same averageEntryPrice → MATCH', () => {
+    const report = reconcile(
+      localSnap({
+        positions: [localPosition({ status: 'open', side: 'long', signedQuantity: 1, averageEntryPrice: 50000 })],
+        plans: [localPlan({ positionSide: 'long', status: 'active' })],
+      }),
+      truth({ positions: [extPosition({ side: 'long', signedQuantity: 1, averageEntryPrice: 50000 })] }),
+    );
+    assert.strictEqual(report.outcome, 'MATCH');
+  });
+
+  // ── P0-2: order fact contradictions ───────────────────────────────────────
+
+  it('P0-2: local CREATED + external OPEN → not MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ status: 'CREATED' })] }),
+      truth({ orders: [extOrder({ status: 'OPEN' })] }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-2: local REJECTED + external OPEN → not MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ status: 'REJECTED' })] }),
+      truth({ orders: [extOrder({ status: 'OPEN' })] }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-2: local SUBMITTED + external CANCELLED → not MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ status: 'SUBMITTED' })] }),
+      truth({ orders: [extOrder({ status: 'CANCELLED' })] }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-2: same orderId but wrong symbol → not MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', symbol: 'BTC/USDT', status: 'SUBMITTED' })] }),
+      truth({ orders: [extOrder({ orderId: 'o1', symbol: 'ETH/USDT', status: 'OPEN' })] }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+    assert.ok(report.issues.some((i) => i.outcome === 'UNKNOWN_ORDER' && /attribution/.test(i.reason)));
+  });
+
+  it('P0-2: same orderId but wrong side → not MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', side: 'buy', status: 'SUBMITTED' })] }),
+      truth({ orders: [extOrder({ orderId: 'o1', side: 'sell', status: 'OPEN' })] }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+  });
+
+  it('P0-2: same orderId but wrong exchange → not MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', exchange: 'bitget', status: 'SUBMITTED' })] }),
+      truth({ orders: [extOrder({ orderId: 'o1', exchange: 'binance', status: 'OPEN' })] }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+  });
+
+  // ── P0-3: inconsistent truth / order invariance ───────────────────────────
+
+  it('P0-3: conflicting duplicate external orderId → UNTRUSTED_STATE', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', status: 'SUBMITTED' })] }),
+      truth({ orders: [
+        extOrder({ orderId: 'o1', status: 'OPEN' }),
+        extOrder({ orderId: 'o1', status: 'CANCELLED' }),
+      ] }),
+    );
+    assert.strictEqual(report.outcome, 'UNTRUSTED_STATE');
+  });
+
+  it('P0-3: conflicting duplicate external fillId → UNTRUSTED_STATE', () => {
+    const report = reconcile(
+      localSnap(),
+      truth({ fills: [
+        extFill({ fillId: 'f1', orderId: 'o1', price: 50000 }),
+        extFill({ fillId: 'f1', orderId: 'o1', price: 51000 }),
+      ] }),
+    );
+    assert.strictEqual(report.outcome, 'UNTRUSTED_STATE');
+  });
+
+  it('P0-3: conflicting duplicate external position → UNTRUSTED_STATE', () => {
+    const report = reconcile(
+      localSnap({ positions: [localPosition({ status: 'open', signedQuantity: 1 })] }),
+      truth({ positions: [
+        extPosition({ signedQuantity: 1 }),
+        extPosition({ signedQuantity: 2 }),
+      ] }),
+    );
+    assert.strictEqual(report.outcome, 'UNTRUSTED_STATE');
+  });
+
+  it('P0-3: conflicting duplicate local order → UNTRUSTED_STATE', () => {
+    const report = reconcile(
+      localSnap({ orders: [
+        localOrder({ orderId: 'o1', status: 'SUBMITTED' }),
+        localOrder({ orderId: 'o1', status: 'REJECTED' }),
+      ] }),
+      truth(),
+    );
+    assert.strictEqual(report.outcome, 'UNTRUSTED_STATE');
+  });
+
+  it('P0-3: exact duplicate facts canonical-dedupe (no UNTRUSTED, no double issue)', () => {
+    const dup = extOrder({ orderId: 'o-orphan', status: 'OPEN' });
+    const report = reconcile(
+      localSnap(),
+      truth({ orders: [dup, { ...dup }] }),
+    );
+    assert.strictEqual(report.outcome, 'ORPHAN_ORDER');
+    assert.strictEqual(report.issues.filter((i) => i.orderId === 'o-orphan').length, 1);
+  });
+
+  it('P0-3: reordering external arrays does not change outcome/issues/digests', () => {
+    const local = localSnap({
+      orders: [localOrder({ orderId: 'o1', status: 'FILLED', fillId: 'f1' })],
+      positions: [localPosition({ status: 'open', signedQuantity: 1 })],
+    });
+    const externalA = truth({
+      orders: [extOrder({ orderId: 'o1', status: 'FILLED' }), extOrder({ orderId: 'o-orphan', status: 'OPEN' })],
+      fills: [extFill({ fillId: 'f1', orderId: 'o1' })],
+      positions: [extPosition({ signedQuantity: 1 })],
+    });
+    const externalB = truth({
+      orders: [extOrder({ orderId: 'o-orphan', status: 'OPEN' }), extOrder({ orderId: 'o1', status: 'FILLED' })],
+      fills: [extFill({ fillId: 'f1', orderId: 'o1' })],
+      positions: [extPosition({ signedQuantity: 1 })],
+    });
+    const a = reconcile(local, externalA);
+    const b = reconcile(local, externalB);
+    assert.strictEqual(a.outcome, b.outcome);
+    assert.deepStrictEqual(a.issues, b.issues);
+    assert.strictEqual(a.externalDigest, b.externalDigest);
+    assert.strictEqual(a.localDigest, b.localDigest);
+  });
+
+  // ── P1: immutable report ──────────────────────────────────────────────────
+
+  it('P1: report and individual issues are frozen at runtime', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ status: 'SUBMITTED' })] }),
+      truth(),
+    );
+    assert.ok(Object.isFrozen(report), 'report frozen');
+    assert.ok(Object.isFrozen(report.issues), 'issues array frozen');
+    for (const issue of report.issues) {
+      assert.ok(Object.isFrozen(issue), 'each issue frozen');
+    }
+  });
 });

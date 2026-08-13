@@ -25,7 +25,7 @@ import type {
 } from './reconciliation-types';
 import { OUTCOME_PRIORITY } from './reconciliation-types';
 
-// ─── Deterministic serialization (for evidence digests) ─────────────────────
+// ─── Deterministic serialization (for evidence digests + equality) ──────────
 
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -41,22 +41,46 @@ function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-// ─── Order / fill matching ──────────────────────────────────────────────────
+// ─── Issue sink ─────────────────────────────────────────────────────────────
 
 interface IssueSink {
   push(issue: ReconciliationIssue): void;
 }
 
-function externalFilledForOrder(orderId: string, orders: ReadonlyMap<string, ExternalOrder>, fills: ReadonlyMap<string, readonly ExternalFill[]>): boolean {
-  const order = orders.get(orderId);
-  if (order && order.status === 'FILLED') return true;
-  const fs = fills.get(orderId);
-  return !!fs && fs.length > 0;
+// ─── Keyed indexing with fail-closed conflict detection ─────────────────────
+// A keyed fact index must NOT use input ordering as authority. Exact duplicates
+// may canonical-dedupe; the same identity with conflicting values is
+// UNTRUSTED_STATE, never last-write-wins.
+
+interface IndexResult<T> {
+  map: Map<string, T>;
+  conflictKey: string | null;
 }
+
+function indexKeyed<T>(items: readonly T[], keyOf: (item: T) => string): IndexResult<T> {
+  const map = new Map<string, T>();
+  for (const item of items) {
+    const key = keyOf(item);
+    if (!map.has(key)) {
+      map.set(key, item);
+    } else if (stableStringify(map.get(key)) !== stableStringify(item)) {
+      return { map, conflictKey: key };
+    }
+    // exact duplicate → canonical dedupe
+  }
+  return { map, conflictKey: null };
+}
+
+function positionKey(exchange: string, symbol: string): string {
+  return `${exchange}\u0000${symbol}`;
+}
+
+// ─── Order / fill matching ──────────────────────────────────────────────────
 
 /**
  * Reconcile each local order against external order/fill truth.
- * Emits UNKNOWN_ORDER / MISSING_FILL for the frozen taxonomy.
+ * A correlated orderId is NOT sufficient for agreement: attribution
+ * (exchange/symbol/side) and lifecycle compatibility are also enforced.
  */
 function reconcileOrders(
   localOrders: readonly LocalOrder[],
@@ -68,8 +92,19 @@ function reconcileOrders(
     const extOrder = externalOrders.get(lo.orderId);
     const extFills = externalFills.get(lo.orderId) ?? [];
 
-    // Does external truth say this order filled (by status or by a fill record)?
-    const extFilled = externalFilledForOrder(lo.orderId, externalOrders, externalFills);
+    // P0-2 attribution: a correlated orderId must agree on exchange/symbol/side.
+    if (extOrder && (extOrder.exchange !== lo.exchange || extOrder.symbol !== lo.symbol || extOrder.side !== lo.side)) {
+      sink.push({
+        outcome: 'UNKNOWN_ORDER',
+        reason: `order ${lo.orderId} attribution mismatch: local (${lo.exchange},${lo.symbol},${lo.side}) vs external (${extOrder.exchange},${extOrder.symbol},${extOrder.side})`,
+        exchange: lo.exchange,
+        symbol: lo.symbol,
+        orderId: lo.orderId,
+      });
+      continue;
+    }
+
+    const extFilled = (extOrder !== undefined && extOrder.status === 'FILLED') || extFills.length > 0;
 
     if (lo.status === 'FILLED') {
       // Local recorded a fill. It must be confirmed by an external fill with
@@ -88,23 +123,8 @@ function reconcileOrders(
       continue;
     }
 
-    if (lo.status === 'REJECTED') {
-      // Local says rejected. External must NOT report a fill for this order.
-      if (extFilled) {
-        sink.push({
-          outcome: 'MISSING_FILL',
-          reason: `external truth reports a fill for local order ${lo.orderId} recorded as REJECTED`,
-          exchange: lo.exchange,
-          symbol: lo.symbol,
-          orderId: lo.orderId,
-        });
-      }
-      continue;
-    }
-
-    // CREATED / SUBMITTED / SUBMISSION_UNKNOWN — non-terminal local states.
+    // External says filled; local has not recorded the fill → MISSING_FILL.
     if (extFilled) {
-      // External says filled; local has not recorded the fill.
       sink.push({
         outcome: 'MISSING_FILL',
         reason: `external truth reports order ${lo.orderId} filled but local fill is absent (local status=${lo.status})`,
@@ -115,22 +135,58 @@ function reconcileOrders(
       continue;
     }
 
-    // Not filled on either side. Only SUBMITTED / SUBMISSION_UNKNOWN can be
-    // UNKNOWN_ORDER when the broker has no conclusive record of the order.
-    if (lo.status === 'SUBMITTED' || lo.status === 'SUBMISSION_UNKNOWN') {
-      if (!extOrder || extOrder.status === 'NOT_FOUND') {
+    // Not filled on either side. Lifecycle compatibility for non-filled states.
+    if (lo.status === 'REJECTED') {
+      // Local rejected (dead, no fill). External must not still hold it open.
+      if (extOrder !== undefined && extOrder.status === 'OPEN') {
         sink.push({
           outcome: 'UNKNOWN_ORDER',
-          reason: `local order ${lo.orderId} (status=${lo.status}) cannot be conclusively established from external truth`,
+          reason: `local order ${lo.orderId} REJECTED but external reports OPEN`,
           exchange: lo.exchange,
           symbol: lo.symbol,
           orderId: lo.orderId,
         });
       }
-      // extOrder OPEN / CANCELLED → broker knows it and has not filled it:
-      // consistent with a local non-filled state (no fill discrepancy).
+      // CANCELLED / NOT_FOUND / absent → consistent (no fill on both sides).
+      continue;
     }
-    // CREATED with no external fill/record → never reached the broker; consistent.
+
+    if (lo.status === 'CREATED') {
+      // Local only created, never submitted. External must not hold it open.
+      if (extOrder !== undefined && extOrder.status === 'OPEN') {
+        sink.push({
+          outcome: 'UNKNOWN_ORDER',
+          reason: `local order ${lo.orderId} CREATED (never submitted) but external reports OPEN`,
+          exchange: lo.exchange,
+          symbol: lo.symbol,
+          orderId: lo.orderId,
+        });
+      }
+      continue;
+    }
+
+    // SUBMITTED / SUBMISSION_UNKNOWN.
+    if (extOrder === undefined || extOrder.status === 'NOT_FOUND') {
+      sink.push({
+        outcome: 'UNKNOWN_ORDER',
+        reason: `local order ${lo.orderId} (status=${lo.status}) cannot be conclusively established from external truth`,
+        exchange: lo.exchange,
+        symbol: lo.symbol,
+        orderId: lo.orderId,
+      });
+      continue;
+    }
+    if (extOrder.status === 'CANCELLED') {
+      sink.push({
+        outcome: 'UNKNOWN_ORDER',
+        reason: `local order ${lo.orderId} (status=${lo.status}) but external reports CANCELLED`,
+        exchange: lo.exchange,
+        symbol: lo.symbol,
+        orderId: lo.orderId,
+      });
+      continue;
+    }
+    // extOrder OPEN → consistent (both in-flight, not filled).
   }
 }
 
@@ -144,7 +200,6 @@ function reconcileOrphans(
   localOrderIds: ReadonlySet<string>,
   sink: IssueSink,
 ): void {
-  // External orders unknown locally.
   for (const [, eo] of externalOrders) {
     if (!localOrderIds.has(eo.orderId)) {
       sink.push({
@@ -156,7 +211,6 @@ function reconcileOrphans(
       });
     }
   }
-  // External fills whose order is unknown locally imply an orphan order.
   for (const [orderId, fs] of externalFills) {
     if (!localOrderIds.has(orderId)) {
       for (const f of fs) {
@@ -175,47 +229,56 @@ function reconcileOrphans(
 
 // ─── Position reconciliation ────────────────────────────────────────────────
 
-function positionKey(exchange: string, symbol: string): string {
-  return `${exchange}\u0000${symbol}`;
-}
-
 /**
- * Compare open positions. "Open" means signedQuantity !== 0.
- * Local missing/flat are NOT collapsed into each other in the report — the
- * local snapshot carries the exact status. Reconciliation only asserts that the
- * set of OPEN positions (side + signedQuantity) is identical on both sides.
+ * Compare positions preserving the factual semantics missing != flat != open.
+ * - A local `missing` position has no factual record; it must NEVER reconcile
+ *   to MATCH (fail-closed) — it is POSITION_MISMATCH.
+ * - A local `flat` position with no external open position MAY MATCH.
+ * - Agreed open positions must also match averageEntryPrice.
  */
 function reconcilePositions(
   localPositions: LocalReconciliationSnapshot['positions'],
   externalPositions: ExecutionTruthSnapshot['positions'],
   sink: IssueSink,
 ): void {
-  const localOpen = new Map<string, LocalReconciliationSnapshot['positions'][number]>();
-  for (const lp of localPositions) {
-    if (lp.status === 'open' && lp.signedQuantity !== 0) localOpen.set(positionKey(lp.exchange, lp.symbol), lp);
-  }
-  const externalOpen = new Map<string, ExecutionTruthSnapshot['positions'][number]>();
+  const localByKey = new Map<string, LocalReconciliationSnapshot['positions'][number]>();
+  for (const lp of localPositions) localByKey.set(positionKey(lp.exchange, lp.symbol), lp);
+
+  const externalOpenByKey = new Map<string, ExecutionTruthSnapshot['positions'][number]>();
   for (const ep of externalPositions) {
-    if (ep.signedQuantity !== 0) externalOpen.set(positionKey(ep.exchange, ep.symbol), ep);
+    if (ep.signedQuantity !== 0) externalOpenByKey.set(positionKey(ep.exchange, ep.symbol), ep);
   }
 
-  const keys = new Set<string>([...localOpen.keys(), ...externalOpen.keys()]);
+  const keys = new Set<string>([...localByKey.keys(), ...externalOpenByKey.keys()]);
   const sortedKeys = [...keys].sort();
 
   for (const key of sortedKeys) {
-    const lp = localOpen.get(key);
-    const ep = externalOpen.get(key);
+    const lp = localByKey.get(key);
+    const ep = externalOpenByKey.get(key);
 
-    if (lp && !ep) {
+    // P0-1: missing is a factual gap, never silently MATCH.
+    if (lp && lp.status === 'missing') {
       sink.push({
         outcome: 'POSITION_MISMATCH',
-        reason: `local records open position ${key} that external truth does not confirm`,
+        reason: `local position ${key} has no factual record (missing); cannot reconcile to MATCH`,
         exchange: lp.exchange,
         symbol: lp.symbol,
       });
       continue;
     }
-    if (!lp && ep) {
+
+    const localOpen = !!lp && lp.status === 'open' && lp.signedQuantity !== 0;
+
+    if (localOpen && !ep) {
+      sink.push({
+        outcome: 'POSITION_MISMATCH',
+        reason: `local records open position ${key} that external truth does not confirm`,
+        exchange: lp!.exchange,
+        symbol: lp!.symbol,
+      });
+      continue;
+    }
+    if (!localOpen && ep) {
       sink.push({
         outcome: 'POSITION_MISMATCH',
         reason: `external truth reports open position ${key} absent from local state`,
@@ -224,16 +287,24 @@ function reconcilePositions(
       });
       continue;
     }
-    if (lp && ep) {
-      if (lp.side !== ep.side || lp.signedQuantity !== ep.signedQuantity) {
+    if (localOpen && ep) {
+      if (lp!.side !== ep.side || lp!.signedQuantity !== ep.signedQuantity) {
         sink.push({
           outcome: 'POSITION_MISMATCH',
-          reason: `position ${key} differs: local ${lp.side} ${lp.signedQuantity} vs external ${ep.side} ${ep.signedQuantity}`,
-          exchange: lp.exchange,
-          symbol: lp.symbol,
+          reason: `position ${key} differs: local ${lp!.side} ${lp!.signedQuantity} vs external ${ep.side} ${ep.signedQuantity}`,
+          exchange: lp!.exchange,
+          symbol: lp!.symbol,
+        });
+      } else if (lp!.averageEntryPrice !== ep.averageEntryPrice) {
+        sink.push({
+          outcome: 'POSITION_MISMATCH',
+          reason: `position ${key} average entry differs: local ${lp!.averageEntryPrice} vs external ${ep.averageEntryPrice}`,
+          exchange: lp!.exchange,
+          symbol: lp!.symbol,
         });
       }
     }
+    // else: no open on either side (local flat/absent + external absent) → agree.
   }
 }
 
@@ -298,15 +369,9 @@ export function reconcile(
   local: LocalReconciliationSnapshot,
   external: ExecutionTruthSnapshot,
 ): ReconciliationReport {
-  const issues: ReconciliationIssue[] = [];
-  const sink: IssueSink = { push: (i) => issues.push(i) };
-
   // 1. Untrusted preconditions (short-circuit — no comparison is meaningful).
   if (!external.complete) {
-    return buildReport(local, external, [{
-      outcome: 'UNTRUSTED_STATE',
-      reason: external.incompleteReason ?? 'external truth is incomplete',
-    }]);
+    return buildReport(local, external, [{ outcome: 'UNTRUSTED_STATE', reason: external.incompleteReason ?? 'external truth is incomplete' }]);
   }
   if (!identityEqual(local.identity, external.identity)) {
     return buildReport(local, external, [{
@@ -315,32 +380,49 @@ export function reconcile(
     }]);
   }
 
-  // Index external truth (deterministic: input is treated as an unordered set).
-  const externalOrders = new Map<string, ExternalOrder>();
-  for (const eo of external.orders) externalOrders.set(eo.orderId, eo);
+  // 2. Fail-closed conflict detection on keyed facts (never order-dependent).
+  const localOrdersIdx = indexKeyed(local.orders, (o) => o.orderId);
+  if (localOrdersIdx.conflictKey !== null) return untrusted(local, external, `conflicting local order facts for orderId ${localOrdersIdx.conflictKey}`);
+  const localPositionsIdx = indexKeyed(local.positions, (p) => positionKey(p.exchange, p.symbol));
+  if (localPositionsIdx.conflictKey !== null) return untrusted(local, external, `conflicting local position facts for ${localPositionsIdx.conflictKey}`);
+  const localPlansIdx = indexKeyed(local.plans, (p) => p.planId);
+  if (localPlansIdx.conflictKey !== null) return untrusted(local, external, `conflicting local plan facts for planId ${localPlansIdx.conflictKey}`);
+
+  const externalOrdersIdx = indexKeyed(external.orders, (o) => o.orderId);
+  if (externalOrdersIdx.conflictKey !== null) return untrusted(local, external, `conflicting external order facts for orderId ${externalOrdersIdx.conflictKey}`);
+  const externalFillsIdx = indexKeyed(external.fills, (f) => f.fillId);
+  if (externalFillsIdx.conflictKey !== null) return untrusted(local, external, `conflicting external fill facts for fillId ${externalFillsIdx.conflictKey}`);
+  const externalPositionsIdx = indexKeyed(external.positions, (p) => positionKey(p.exchange, p.symbol));
+  if (externalPositionsIdx.conflictKey !== null) return untrusted(local, external, `conflicting external position facts for ${externalPositionsIdx.conflictKey}`);
+
+  // 3. Derived indexes.
   const externalFills = new Map<string, ExternalFill[]>();
-  for (const f of external.fills) {
+  for (const f of externalFillsIdx.map.values()) {
     const list = externalFills.get(f.orderId) ?? [];
     list.push(f);
     externalFills.set(f.orderId, list);
   }
+  const localOrderIds = new Set<string>(localOrdersIdx.map.keys());
 
-  const localOrderIds = new Set<string>(local.orders.map((o) => o.orderId));
+  // 4. Reconcile.
+  const issues: ReconciliationIssue[] = [];
+  const sink: IssueSink = { push: (i) => issues.push(i) };
 
-  // 2. Order / fill reconciliation.
-  const sortedLocalOrders = [...local.orders].sort((a, b) => a.orderId.localeCompare(b.orderId));
-  reconcileOrders(sortedLocalOrders, externalOrders, externalFills, sink);
-
-  // 3. Orphan orders (external without local).
-  reconcileOrphans(externalOrders, externalFills, localOrderIds, sink);
-
-  // 4. Position reconciliation.
+  const sortedLocalOrders = [...localOrdersIdx.map.values()].sort((a, b) => a.orderId.localeCompare(b.orderId));
+  reconcileOrders(sortedLocalOrders, externalOrdersIdx.map, externalFills, sink);
+  reconcileOrphans(externalOrdersIdx.map, externalFills, localOrderIds, sink);
   reconcilePositions(local.positions, external.positions, sink);
-
-  // 5. Protection reconciliation.
   reconcileProtection(local.plans, external.positions, sink);
 
   return buildReport(local, external, sortIssues(issues));
+}
+
+function untrusted(
+  local: LocalReconciliationSnapshot,
+  external: ExecutionTruthSnapshot,
+  reason: string,
+): ReconciliationReport {
+  return buildReport(local, external, [{ outcome: 'UNTRUSTED_STATE', reason }]);
 }
 
 function buildReport(
@@ -350,10 +432,11 @@ function buildReport(
 ): ReconciliationReport {
   const sorted = sortIssues([...issues]);
   const primary: ReconciliationOutcome = sorted.length === 0 ? 'MATCH' : (sorted[0].outcome as ReconciliationOutcome);
+  const frozenIssues = sorted.map((i) => Object.freeze({ ...i }));
   return Object.freeze({
     outcome: primary,
-    reconciliationVerified: sorted.length === 0,
-    issues: Object.freeze(sorted),
+    reconciliationVerified: frozenIssues.length === 0,
+    issues: Object.freeze(frozenIssues),
     identity: Object.freeze({ ...external.identity }),
     source: external.source,
     capturedAt: external.capturedAt,
