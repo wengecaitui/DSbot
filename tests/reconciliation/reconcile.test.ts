@@ -546,4 +546,133 @@ describe('Phase 5B — reconciliation core', () => {
       assert.ok(Object.isFrozen(issue), 'each issue frozen');
     }
   });
+
+  // ── P0-2 (closure): complete order/fill fact compatibility ────────────────
+
+  it('P0-2: matching fillId/orderId but wrong fill symbol → NOT MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', status: 'FILLED', fillId: 'f1', symbol: 'BTC/USDT' })] }),
+      truth({
+        orders: [extOrder({ orderId: 'o1', symbol: 'BTC/USDT', status: 'FILLED' })],
+        fills: [extFill({ fillId: 'f1', orderId: 'o1', symbol: 'ETH/USDT' })],
+      }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-2: matching fillId/orderId but wrong fill side → NOT MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', status: 'FILLED', fillId: 'f1', side: 'buy' })] }),
+      truth({
+        orders: [extOrder({ orderId: 'o1', status: 'FILLED' })],
+        fills: [extFill({ fillId: 'f1', orderId: 'o1', side: 'sell' })],
+      }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-2: matching fillId/orderId but wrong fill exchange → NOT MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', status: 'FILLED', fillId: 'f1', exchange: 'bitget' })] }),
+      truth({
+        orders: [extOrder({ orderId: 'o1', exchange: 'bitget', status: 'FILLED' })],
+        fills: [extFill({ fillId: 'f1', orderId: 'o1', exchange: 'binance' })],
+      }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-2: local CREATED + external CANCELLED → NOT MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ status: 'CREATED' })] }),
+      truth({ orders: [extOrder({ status: 'CANCELLED' })] }),
+    );
+    assert.strictEqual(report.outcome, 'UNKNOWN_ORDER');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-2: local FILLED + confirmed fill + external order OPEN → NOT MATCH', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', status: 'FILLED', fillId: 'f1' })] }),
+      truth({
+        orders: [extOrder({ orderId: 'o1', status: 'OPEN' })],
+        fills: [extFill({ fillId: 'f1', orderId: 'o1' })],
+      }),
+    );
+    // External order OPEN contradicts the external fill → UNTRUSTED_STATE.
+    assert.strictEqual(report.outcome, 'UNTRUSTED_STATE');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-2: conflicting external order/fill lifecycle → UNTRUSTED_STATE', () => {
+    const report = reconcile(
+      localSnap({ orders: [localOrder({ orderId: 'o1', status: 'SUBMITTED' })] }),
+      truth({
+        orders: [extOrder({ orderId: 'o1', status: 'CANCELLED' })],
+        fills: [extFill({ fillId: 'f1', orderId: 'o1' })],
+      }),
+    );
+    assert.strictEqual(report.outcome, 'UNTRUSTED_STATE');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  // ── P0-3 (closure): local protection order invariance ─────────────────────
+
+  it('P0-3: conflicting active plans for same position key → fail closed', () => {
+    const report = reconcile(
+      localSnap({
+        positions: [localPosition({ status: 'open', side: 'long', signedQuantity: 1 })],
+        plans: [
+          localPlan({ planId: 'p1', positionSide: 'long', status: 'active' }),
+          localPlan({ planId: 'p2', positionSide: 'short', status: 'active' }),
+        ],
+      }),
+      truth({ positions: [extPosition({ side: 'long', signedQuantity: 1 })] }),
+    );
+    assert.strictEqual(report.outcome, 'UNTRUSTED_STATE');
+    assert.strictEqual(report.reconciliationVerified, false);
+  });
+
+  it('P0-3: reversing conflicting local plans produces identical report', () => {
+    const base = {
+      positions: [localPosition({ status: 'open', side: 'long', signedQuantity: 1 })],
+    };
+    const ext = truth({ positions: [extPosition({ side: 'long', signedQuantity: 1 })] });
+    const a = reconcile(
+      localSnap({
+        ...base,
+        plans: [
+          localPlan({ planId: 'p1', positionSide: 'long', status: 'active' }),
+          localPlan({ planId: 'p2', positionSide: 'short', status: 'active' }),
+        ],
+      }),
+      ext,
+    );
+    const b = reconcile(
+      localSnap({
+        ...base,
+        plans: [
+          localPlan({ planId: 'p2', positionSide: 'short', status: 'active' }),
+          localPlan({ planId: 'p1', positionSide: 'long', status: 'active' }),
+        ],
+      }),
+      ext,
+    );
+    assert.deepStrictEqual(a, b);
+  });
+
+  it('P0-3: valid single matching active plan → MATCH preserved', () => {
+    const report = reconcile(
+      localSnap({
+        positions: [localPosition({ status: 'open', side: 'long', signedQuantity: 1 })],
+        plans: [localPlan({ planId: 'p1', positionSide: 'long', status: 'active' })],
+      }),
+      truth({ positions: [extPosition({ side: 'long', signedQuantity: 1 })] }),
+    );
+    assert.strictEqual(report.outcome, 'MATCH');
+    assert.strictEqual(report.reconciliationVerified, true);
+  });
 });

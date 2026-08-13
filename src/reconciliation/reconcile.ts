@@ -104,16 +104,31 @@ function reconcileOrders(
       continue;
     }
 
+    // Contradictory external facts: order reports NOT filled but a fill exists.
+    if (extOrder !== undefined && extOrder.status !== 'FILLED' && extFills.length > 0) {
+      sink.push({
+        outcome: 'UNTRUSTED_STATE',
+        reason: `external order ${lo.orderId} reports ${extOrder.status} but a fill record exists (contradictory external truth)`,
+        exchange: lo.exchange,
+        symbol: lo.symbol,
+        orderId: lo.orderId,
+      });
+      continue;
+    }
+
     const extFilled = (extOrder !== undefined && extOrder.status === 'FILLED') || extFills.length > 0;
 
     if (lo.status === 'FILLED') {
-      // Local recorded a fill. It must be confirmed by an external fill with
-      // the SAME fillId. A local fill the broker cannot confirm is unresolved.
-      const confirmed = extFills.some((f) => f.fillId === lo.fillId);
+      // Local recorded a fill. It must be confirmed by an external fill with the
+      // SAME fillId AND matching attribution (exchange/symbol/side). A matching
+      // fillId/orderId with wrong exchange/symbol/side is NOT confirmation.
+      const confirmed = extFills.some((f) =>
+        f.fillId === lo.fillId && f.exchange === lo.exchange && f.symbol === lo.symbol && f.side === lo.side
+      );
       if (!confirmed) {
         sink.push({
           outcome: 'UNKNOWN_ORDER',
-          reason: `local order FILLED with fillId=${lo.fillId ?? '(none)'} is not confirmed by external truth`,
+          reason: `local order FILLED with fillId=${lo.fillId ?? '(none)'} is not confirmed by an attribution-matching external fill`,
           exchange: lo.exchange,
           symbol: lo.symbol,
           orderId: lo.orderId,
@@ -152,11 +167,20 @@ function reconcileOrders(
     }
 
     if (lo.status === 'CREATED') {
-      // Local only created, never submitted. External must not hold it open.
+      // Local only created, never submitted. External must not hold it open or
+      // report it cancelled — either way the local order never reached the broker.
       if (extOrder !== undefined && extOrder.status === 'OPEN') {
         sink.push({
           outcome: 'UNKNOWN_ORDER',
           reason: `local order ${lo.orderId} CREATED (never submitted) but external reports OPEN`,
+          exchange: lo.exchange,
+          symbol: lo.symbol,
+          orderId: lo.orderId,
+        });
+      } else if (extOrder !== undefined && extOrder.status === 'CANCELLED') {
+        sink.push({
+          outcome: 'UNKNOWN_ORDER',
+          reason: `local order ${lo.orderId} CREATED (never submitted) but external reports CANCELLED`,
           exchange: lo.exchange,
           symbol: lo.symbol,
           orderId: lo.orderId,
@@ -312,23 +336,19 @@ function reconcilePositions(
 
 /**
  * Every factually open position (per external truth) must have an active local
- * protection plan matching the position side.
+ * protection plan matching the position side. The active-plan index is built
+ * with fail-closed conflict detection (no array-order authority).
  */
 function reconcileProtection(
-  localPlans: LocalReconciliationSnapshot['plans'],
+  activePlans: ReadonlyMap<string, LocalReconciliationSnapshot['plans'][number]>,
   externalPositions: ExecutionTruthSnapshot['positions'],
   sink: IssueSink,
 ): void {
-  const activePlanByKey = new Map<string, LocalReconciliationSnapshot['plans'][number]>();
-  for (const plan of localPlans) {
-    if (plan.status === 'active') activePlanByKey.set(positionKey(plan.exchange, plan.symbol), plan);
-  }
-
   const open = externalPositions.filter((ep) => ep.signedQuantity !== 0);
   const sorted = [...open].sort((a, b) => positionKey(a.exchange, a.symbol).localeCompare(positionKey(b.exchange, b.symbol)));
 
   for (const ep of sorted) {
-    const plan = activePlanByKey.get(positionKey(ep.exchange, ep.symbol));
+    const plan = activePlans.get(positionKey(ep.exchange, ep.symbol));
     if (!plan || plan.positionSide !== ep.side) {
       sink.push({
         outcome: 'MISSING_PROTECTION',
@@ -388,6 +408,14 @@ export function reconcile(
   const localPlansIdx = indexKeyed(local.plans, (p) => p.planId);
   if (localPlansIdx.conflictKey !== null) return untrusted(local, external, `conflicting local plan facts for planId ${localPlansIdx.conflictKey}`);
 
+  // P0-3: active protection plans must not use array order as authority.
+  // Conflicting active plans for the same position key fail closed.
+  const activePlansIdx = indexKeyed(
+    local.plans.filter((p) => p.status === 'active'),
+    (p) => positionKey(p.exchange, p.symbol),
+  );
+  if (activePlansIdx.conflictKey !== null) return untrusted(local, external, `conflicting active protection plans for ${activePlansIdx.conflictKey}`);
+
   const externalOrdersIdx = indexKeyed(external.orders, (o) => o.orderId);
   if (externalOrdersIdx.conflictKey !== null) return untrusted(local, external, `conflicting external order facts for orderId ${externalOrdersIdx.conflictKey}`);
   const externalFillsIdx = indexKeyed(external.fills, (f) => f.fillId);
@@ -412,7 +440,7 @@ export function reconcile(
   reconcileOrders(sortedLocalOrders, externalOrdersIdx.map, externalFills, sink);
   reconcileOrphans(externalOrdersIdx.map, externalFills, localOrderIds, sink);
   reconcilePositions(local.positions, external.positions, sink);
-  reconcileProtection(local.plans, external.positions, sink);
+  reconcileProtection(activePlansIdx.map, external.positions, sink);
 
   return buildReport(local, external, sortIssues(issues));
 }
