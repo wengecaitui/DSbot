@@ -85,4 +85,11 @@ export class PositionPlanStore {
     kernel.subscribe('position.plan.archived', (e: KernelEventEnvelope) => this.apply(e));
     return this;
   }
+
+  digest(): string {
+    const { createHash } = require('node:crypto') as typeof import('node:crypto');
+    const sorted = [...this.plans.entries()]
+      .sort(([a], [b]) => a.localeCompare(b));
+    return createHash('sha256').update(JSON.stringify(sorted), 'utf8').digest('hex');
+  }
 }

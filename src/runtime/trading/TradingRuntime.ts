@@ -332,8 +332,8 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
         appliedPlanVersion = planAtStart.version;
         appliedPlanSnapshot = snapshotPlanEntries(planAtStart);
 
-        // Phase 4B: Activate protection at LIVE_READY boundary
-        if (options.positionProtection) options.positionProtection.setMode('live');
+        // Phase 4B: Protection activated by ProductionSpine via recovery path
+        // No direct mode setting — ProductionSpine's recoverAndStart handles this
 
         // Only mark applied if Universe hasn't advanced past this version
         // during the async start window.

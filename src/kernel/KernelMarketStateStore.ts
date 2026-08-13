@@ -31,6 +31,7 @@ export interface KernelMarketStateStore {
   apply(envelope: KernelEventEnvelope): ApplyResult;
   getSnapshot(exchange: ExchangeId, symbol: string): MarketSnapshot | undefined;
   getAllSnapshots(): MarketSnapshot[];
+  digest(): string;
 }
 
 // ─── Internal ───────────────────────────────────────────────────────────────
@@ -251,6 +252,14 @@ export function createKernelMarketStateStore(config: {
 
     getAllSnapshots(): MarketSnapshot[] {
       return keys.map((k) => entries.get(k)!).filter(Boolean).map((e) => buildSnapshot(e));
+    },
+
+    digest(): string {
+      const sorted = [...entries.entries()]
+        .filter(([_, v]) => v !== null)
+        .sort(([a], [b]) => a.localeCompare(b));
+      const { createHash } = require('node:crypto') as typeof import('node:crypto');
+      return createHash('sha256').update(JSON.stringify(sorted), 'utf8').digest('hex');
     },
   };
 }

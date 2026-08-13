@@ -23,7 +23,8 @@ export interface PositionManagerRuntimeConfig {
 }
 
 export interface PositionManagerRuntime {
-  setMode(m: RuntimeMode): void;
+  /** @internal — captured and deleted by ProductionSpine, not callable by users */
+  _setLive?(): void;
   getMode(): RuntimeMode;
   start(): void;
   stop(): void;
@@ -43,7 +44,6 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
   // Fail-closed: no OMS -> no-op runtime
   if (!config.oms) {
     return {
-      setMode(m) { mode = m; },
       getMode() { return mode; },
       start() {},
       stop() { mode = 'replay'; },
@@ -171,7 +171,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
   }
 
   return {
-    setMode(m: RuntimeMode) { mode = m; },
+    _setLive() { mode = 'live'; },
     getMode(): RuntimeMode { return mode; },
     getSubmittedCount(): number { return submittedIntents.size; },
     clearSubmitted(planId: string) { submittedIntents.delete(planId); },

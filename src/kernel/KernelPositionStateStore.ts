@@ -103,6 +103,7 @@ export interface KernelPositionStateStore {
   getLatest(exchange: ExchangeId, symbol: string): VersionedPositionSnapshot | undefined;
   getByVersion(exchange: ExchangeId, symbol: string, version: number): VersionedPositionSnapshot | undefined;
   resolve(exchange: ExchangeId, symbol: string): PositionResolution;
+  digest(): string;
 }
 
 interface PerSymbol {
@@ -240,6 +241,15 @@ export function createKernelPositionStateStore(config?: { maxSnapshotsPerSymbol?
       const s = state.latest;
       const status = s.side === 'flat' ? 'flat' : 'open';
       return deepFreeze({ status, snapshot: s, side: s.side, signedQuantity: s.signedQuantity, averageEntryPrice: s.averageEntryPrice } as PositionResolution);
+    },
+
+    digest(): string {
+      const entries = [...states.entries()]
+        .map(([k, v]) => [k, v.latest] as [string, unknown])
+        .filter(([, v]) => v !== null)
+        .sort(([a], [b]) => (a as string).localeCompare(b as string));
+      const { createHash } = require('node:crypto') as typeof import('node:crypto');
+      return createHash('sha256').update(JSON.stringify(entries), 'utf8').digest('hex');
     },
   };
 }
