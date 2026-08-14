@@ -12,6 +12,10 @@ export interface PaperFill {
   readonly priceUsd: number;
   readonly feeUsd: number;
   readonly executedAt: number;
+  /** Phase 5B: OMS execution correlation (optional — generic/non-OMS fills lack these).
+   *  Neutral correlation identifiers, NOT claims about a real exchange-native order id. */
+  readonly sourceOrderId?: string;
+  readonly sourceIntentId?: string;
 }
 
 export function validatePaperFill(fill: PaperFill): PaperFill {
@@ -35,6 +39,12 @@ export function validatePaperFill(fill: PaperFill): PaperFill {
   }
   if (typeof fill.executedAt !== 'number' || !Number.isFinite(fill.executedAt) || !Number.isInteger(fill.executedAt) || fill.executedAt < 0) {
     throw new Error(`PaperFill: executedAt must be a non-negative integer, got ${fill.executedAt}`);
+  }
+  if (fill.sourceOrderId !== undefined && (typeof fill.sourceOrderId !== 'string' || !fill.sourceOrderId.trim() || fill.sourceOrderId.length > 128)) {
+    throw new Error(`PaperFill: sourceOrderId must be a non-empty string (1-128 chars) when present, got ${JSON.stringify(fill.sourceOrderId)}`);
+  }
+  if (fill.sourceIntentId !== undefined && (typeof fill.sourceIntentId !== 'string' || !fill.sourceIntentId.trim() || fill.sourceIntentId.length > 128)) {
+    throw new Error(`PaperFill: sourceIntentId must be a non-empty string (1-128 chars) when present, got ${JSON.stringify(fill.sourceIntentId)}`);
   }
   return fill;
 }

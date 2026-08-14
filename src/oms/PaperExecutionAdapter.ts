@@ -26,7 +26,10 @@ export class PaperExecutionAdapter implements ExecutionAdapter {
     };
 
     // Execute through real PaperExecutionService → PaperBroker → PaperAccountLedger → persistence
-    const paperEvent = await this.service.executeApproved(intent, order.approvedNotionalUsd, this.params);
+    const paperEvent = await this.service.executeApproved(intent, order.approvedNotionalUsd, this.params, {
+      sourceOrderId: order.orderId,
+      sourceIntentId: order.intentId,
+    });
 
     if (paperEvent.status === 'applied') {
       const omsFill: OmsConfirmedFill = {

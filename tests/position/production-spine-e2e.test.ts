@@ -1,7 +1,7 @@
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, activateLiveReadiness } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, reconcileRecoveredState, activateLiveReadiness } from '../../src/position/ProductionSpine';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -55,6 +55,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
     // Recovery + start (cold start → no_history → verified + live)
     await recoverAndStart(spine, journalPath);
+    await reconcileRecoveredState(spine);
     // Fresh market through production collector
     m.emitTicker();
     await activateLiveReadiness(spine);
@@ -139,6 +140,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
     // Recovery + start (cold start → verified + live)
     await recoverAndStart(s, protJournalPath);
+    await reconcileRecoveredState(s);
     // Fresh market through production collector
     m.emitTicker();
     await activateLiveReadiness(s);

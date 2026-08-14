@@ -75,6 +75,13 @@ export class PositionPlanStore {
 
   get(planId: string): PositionPlan | undefined { return this.plans.get(planId)?.snapshot; }
 
+  /** Phase 5B: deterministic read-only enumeration of all current plan snapshots. */
+  list(): readonly PositionPlan[] {
+    return [...this.plans.values()]
+      .map((r) => r.snapshot)
+      .sort((a, b) => a.planId.localeCompare(b.planId));
+  }
+
   /** Wire self to kernel — plan events project state into store. */
   subscribeToKernel(rawKernel: { subscribe: (t: string, h: (e: KernelEventEnvelope) => void) => void }): this {
     // Cast to any: TradingKernel.subscribe has typed event key but runtime uses string

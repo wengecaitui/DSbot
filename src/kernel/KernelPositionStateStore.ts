@@ -103,6 +103,9 @@ export interface KernelPositionStateStore {
   getLatest(exchange: ExchangeId, symbol: string): VersionedPositionSnapshot | undefined;
   getByVersion(exchange: ExchangeId, symbol: string, version: number): VersionedPositionSnapshot | undefined;
   resolve(exchange: ExchangeId, symbol: string): PositionResolution;
+  /** Phase 5B: deterministic read-only enumeration of all initialized factual
+   *  position resolutions (never 'missing'). */
+  listResolved(): readonly PositionResolution[];
   digest(): string;
 }
 
@@ -241,6 +244,17 @@ export function createKernelPositionStateStore(config?: { maxSnapshotsPerSymbol?
       const s = state.latest;
       const status = s.side === 'flat' ? 'flat' : 'open';
       return deepFreeze({ status, snapshot: s, side: s.side, signedQuantity: s.signedQuantity, averageEntryPrice: s.averageEntryPrice } as PositionResolution);
+    },
+
+    listResolved(): readonly PositionResolution[] {
+      const out: PositionResolution[] = [];
+      for (const state of states.values()) {
+        if (!state.initialized || !state.latest) continue;
+        const s = state.latest;
+        const status = s.side === 'flat' ? 'flat' : 'open';
+        out.push(deepFreeze({ status, snapshot: s, side: s.side, signedQuantity: s.signedQuantity, averageEntryPrice: s.averageEntryPrice } as PositionResolution));
+      }
+      return out.sort((a, b) => `${a.snapshot!.exchange}:${a.snapshot!.symbol}`.localeCompare(`${b.snapshot!.exchange}:${b.snapshot!.symbol}`));
     },
 
     digest(): string {

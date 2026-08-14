@@ -27,6 +27,12 @@ export interface ExecuteParams {
   fillIdPrefix?: string;
 }
 
+/** Phase 5B: OMS execution correlation carried onto the persisted Paper fill. */
+export interface PaperFillCorrelation {
+  readonly sourceOrderId?: string;
+  readonly sourceIntentId?: string;
+}
+
 export class PaperExecutionService {
   private broker: PaperBroker;
   private counter = 0;
@@ -59,6 +65,7 @@ export class PaperExecutionService {
     intent: TradeIntent,
     approvedNotionalUsd: number,
     params: ExecuteParams,
+    correlation?: PaperFillCorrelation,
   ): Promise<PaperExecutionEvent> {
     const counter = ++this.counter;
     const simCfg: FillSimulatorConfig = {
@@ -67,6 +74,8 @@ export class PaperExecutionService {
       slippageBps: params.slippageBps,
       executedAtMs: params.executedAtMs,
       fillIdPrefix: params.fillIdPrefix,
+      sourceOrderId: correlation?.sourceOrderId,
+      sourceIntentId: correlation?.sourceIntentId,
     };
     // Synthetic intent for paper sizing — different intentId to avoid canonical identity conflict
     const synthetic: TradeIntent = {
