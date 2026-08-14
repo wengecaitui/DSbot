@@ -34,6 +34,7 @@ function canonicalizeFill(f: PaperFill): PaperFill {
     fillId: validated.fillId, exchange: validated.exchange, symbol: validated.symbol,
     side: validated.side, quantity: qty, priceUsd: price, feeUsd: fee, executedAt: validated.executedAt,
     sourceOrderId: validated.sourceOrderId, sourceIntentId: validated.sourceIntentId,
+    executionReferencePriceUsd: validated.executionReferencePriceUsd,
   };
 }
 
@@ -41,7 +42,8 @@ function fillsEqual(a: PaperFill, b: PaperFill): boolean {
   return a.fillId === b.fillId && a.exchange === b.exchange && a.symbol === b.symbol &&
     a.side === b.side && a.quantity === b.quantity && a.priceUsd === b.priceUsd &&
     a.feeUsd === b.feeUsd && a.executedAt === b.executedAt &&
-    a.sourceOrderId === b.sourceOrderId && a.sourceIntentId === b.sourceIntentId;
+    a.sourceOrderId === b.sourceOrderId && a.sourceIntentId === b.sourceIntentId &&
+    a.executionReferencePriceUsd === b.executionReferencePriceUsd;
 }
 
 // ═══ Deep clone ════════════════════════════════════════════════
@@ -52,7 +54,8 @@ function clonePosition(p: PaperPosition): PaperPosition { return { ...p }; }
 function cloneFill(f: PaperFill): PaperFill {
   return { fillId: f.fillId, exchange: f.exchange, symbol: f.symbol,
     side: f.side, quantity: f.quantity, priceUsd: f.priceUsd, feeUsd: f.feeUsd, executedAt: f.executedAt,
-    sourceOrderId: f.sourceOrderId, sourceIntentId: f.sourceIntentId };
+    sourceOrderId: f.sourceOrderId, sourceIntentId: f.sourceIntentId,
+    executionReferencePriceUsd: f.executionReferencePriceUsd };
 }
 function cloneEntry(e: PaperLedgerEntry): PaperLedgerEntry {
   if (e.type === 'fill') return { type: 'fill', sequence: e.sequence, fill: cloneFill(e.fill) };

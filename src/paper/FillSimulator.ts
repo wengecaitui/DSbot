@@ -102,6 +102,7 @@ export function simulateFill(intent: TradeIntent, config: FillSimulatorConfig, c
   const fill: PaperFill = {
     fillId, exchange: intent.exchange, symbol: intent.symbol, side, quantity, priceUsd: executedPriceUsd, feeUsd, executedAt: config.executedAtMs,
     sourceOrderId: config.sourceOrderId, sourceIntentId: config.sourceIntentId,
+    executionReferencePriceUsd: config.markPriceUsd,
   };
   validatePaperFill(fill);
   return { fill, executedPriceUsd, quantity, executedNotionalUsd, feeUsd };

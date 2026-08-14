@@ -16,6 +16,9 @@ export interface PaperFill {
    *  Neutral correlation identifiers, NOT claims about a real exchange-native order id. */
   readonly sourceOrderId?: string;
   readonly sourceIntentId?: string;
+  /** Phase 6A: the explicit mark/reference price used to generate this fill, BEFORE
+   *  slippage was applied. Optional — legacy/generic fills may lack it. */
+  readonly executionReferencePriceUsd?: number;
 }
 
 export function validatePaperFill(fill: PaperFill): PaperFill {
@@ -50,6 +53,9 @@ export function validatePaperFill(fill: PaperFill): PaperFill {
   // (generic). A partial pair (only one) is malformed.
   if ((fill.sourceOrderId === undefined) !== (fill.sourceIntentId === undefined)) {
     throw new Error('PaperFill: sourceOrderId and sourceIntentId must both be present or both absent (partial correlation)');
+  }
+  if (fill.executionReferencePriceUsd !== undefined && (typeof fill.executionReferencePriceUsd !== 'number' || !Number.isFinite(fill.executionReferencePriceUsd) || fill.executionReferencePriceUsd <= 0)) {
+    throw new Error(`PaperFill: executionReferencePriceUsd must be a finite positive number when present, got ${JSON.stringify(fill.executionReferencePriceUsd)}`);
   }
   return fill;
 }
