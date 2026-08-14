@@ -64,11 +64,19 @@ export function createPaperExecutionTruthPort(options: PaperExecutionTruthPortOp
       // Map fills; require conclusive OMS correlation on every persisted fill.
       const fills: ExternalFill[] = [];
       let uncorrelated = false;
+      let malformed = false;
       for (const entry of entries) {
         if (entry.type !== 'fill') continue;
         const f = entry.fill;
-        if (!f.sourceOrderId) {
-          // Never fabricate an orderId for an uncorrelated fill — fail closed.
+        const hasOrder = f.sourceOrderId !== undefined && f.sourceOrderId !== '';
+        const hasIntent = f.sourceIntentId !== undefined && f.sourceIntentId !== '';
+        if (hasOrder !== hasIntent) {
+          // Partial correlation pair is malformed — never complete=true.
+          malformed = true;
+          continue;
+        }
+        if (!hasOrder) {
+          // Generic/non-OMS fill — never fabricate an orderId; fail closed.
           uncorrelated = true;
           continue;
         }
@@ -82,6 +90,16 @@ export function createPaperExecutionTruthPort(options: PaperExecutionTruthPortOp
           price: f.priceUsd,
           executedAt: f.executedAt,
         });
+      }
+
+      if (malformed) {
+        return {
+          identity: identity as ExecutionTruthSnapshot['identity'],
+          orders: [], fills, positions,
+          capturedAt, source,
+          complete: false,
+          incompleteReason: 'persisted Paper fill has a partial OMS correlation pair (sourceOrderId/sourceIntentId)',
+        };
       }
 
       if (uncorrelated) {

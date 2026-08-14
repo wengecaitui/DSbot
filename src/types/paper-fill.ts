@@ -46,5 +46,10 @@ export function validatePaperFill(fill: PaperFill): PaperFill {
   if (fill.sourceIntentId !== undefined && (typeof fill.sourceIntentId !== 'string' || !fill.sourceIntentId.trim() || fill.sourceIntentId.length > 128)) {
     throw new Error(`PaperFill: sourceIntentId must be a non-empty string (1-128 chars) when present, got ${JSON.stringify(fill.sourceIntentId)}`);
   }
+  // P1 correlation pair consistency: both present (OMS-correlated) or both absent
+  // (generic). A partial pair (only one) is malformed.
+  if ((fill.sourceOrderId === undefined) !== (fill.sourceIntentId === undefined)) {
+    throw new Error('PaperFill: sourceOrderId and sourceIntentId must both be present or both absent (partial correlation)');
+  }
   return fill;
 }

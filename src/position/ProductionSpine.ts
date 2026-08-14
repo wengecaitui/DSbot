@@ -29,7 +29,7 @@ import { createFileEventJournal, type FileEventJournal } from '../recovery/FileE
 import { bridgeMarketToKernel } from './MarketBridge';
 import type { MarketDataRuntime } from '../runtime/market/MarketDataRuntime';
 import { reconcile } from '../reconciliation/reconcile';
-import type { ReconciliationReport } from '../reconciliation/reconciliation-types';
+import type { ReconciliationReport, ExecutionTruthSnapshot } from '../reconciliation/reconciliation-types';
 import { createPaperExecutionTruthPort } from '../reconciliation/PaperExecutionTruthPort';
 import { buildLocalReconciliationSnapshot } from '../reconciliation/local-snapshot';
 
@@ -202,6 +202,32 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     },
   };
 
+  // Internal helper: run reconciliation against CURRENT facts. Revokes any stale
+  // authority first; grants reconciliationVerified only on a genuine current MATCH.
+  async function runCurrentReconciliation(): Promise<ReconciliationReport> {
+    reconciliationVerified = false; // revoke stale authority before each attempt
+    const identity = service.getIdentity();
+    const local = buildLocalReconciliationSnapshot(
+      oms.getStore(),
+      positionStore,
+      planStore,
+      { accountId: identity.accountId, exchange: identity.exchange },
+    );
+    let external: ExecutionTruthSnapshot;
+    try {
+      const port = createPaperExecutionTruthPort({ service, now: () => clock.now() });
+      external = await port.acquireTruth();
+    } catch (err) {
+      reconciliationVerified = false; // fail closed on acquisition failure
+      lastReconciliationReport = null;
+      throw err;
+    }
+    const report = reconcile(local, external);
+    lastReconciliationReport = report;
+    reconciliationVerified = report.reconciliationVerified;
+    return report;
+  }
+
   (spine as any)[VERIFY_TOKEN] = async function() {
     if (started) return;
     recoveryVerified = true;
@@ -211,26 +237,23 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // Internal: run the real reconciliation sequence. Requires RECOVERY_VERIFIED.
   (spine as any)[RECONCILE_TOKEN] = async function(): Promise<ReconciliationReport> {
     if (!recoveryVerified) throw new Error('RECONCILIATION_REQUIRES_RECOVERY');
-    const identity = service.getIdentity();
-    const local = buildLocalReconciliationSnapshot(
-      oms.getStore(),
-      positionStore,
-      planStore,
-      { accountId: identity.accountId, exchange: identity.exchange },
-    );
-    const port = createPaperExecutionTruthPort({ service, now: () => clock.now() });
-    const external = await port.acquireTruth();
-    const report = reconcile(local, external);
-    lastReconciliationReport = report;
-    reconciliationVerified = report.reconciliationVerified;
-    return report;
+    return await runCurrentReconciliation();
   };
 
-  // Internal: grant LIVE_READY (requires recovery + reconciliation + fresh post-recovery market)
+  // Internal: grant LIVE_READY. Requires recovery + a prior reconciliation + fresh
+  // collector market, AND re-establishes that CURRENT facts still reconcile to MATCH.
   (spine as any)[LIVE_TOKEN] = async function() {
     if (!recoveryVerified) throw new Error('LIVE_READY_REQUIRES_RECOVERY');
     if (!reconciliationVerified) throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
     if (!freshMarketObserved) throw new Error('LIVE_READY_REQUIRES_FRESH_MARKET');
+    // P0: current facts must still MATCH at the point LIVE_READY is granted.
+    let report: ReconciliationReport;
+    try {
+      report = await runCurrentReconciliation();
+    } catch {
+      throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
+    }
+    if (!report.reconciliationVerified) throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
     _setLive();
   };
 

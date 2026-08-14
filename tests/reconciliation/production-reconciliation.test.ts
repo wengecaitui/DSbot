@@ -20,6 +20,7 @@ import { PaperLedgerStore } from '../../src/paper/PaperLedgerStore';
 import { OmsOrderStore } from '../../src/oms/OmsOrderStore';
 import { createKernelPositionStateStore } from '../../src/kernel/KernelPositionStateStore';
 import { PositionPlanStore } from '../../src/position/PositionPlanStore';
+import { validatePaperFill } from '../../src/types/paper-fill';
 import type { PaperBrokerPersistence } from '../../src/paper/PaperBroker';
 import type { ExchangeId } from '../../src/data/MarketIdentity';
 
@@ -460,5 +461,132 @@ describe('Phase 5B2 — Real restart proof', () => {
     assert.strictEqual(s2.reconciliationVerified, false);
 
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('Phase 5B2 — reconciliation freshness authority', () => {
+  it('P0: stale MATCH does not bypass — factual mutation before LIVE_READY → denied', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5b2-stale-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'stale', journalPath });
+    spine.protection.start();
+    spine.planStore.subscribeToKernel(spine.kernel as any);
+    await recoverAndStart(spine, journalPath);
+    const r1 = await reconcileRecoveredState(spine);
+    assert.strictEqual(r1.outcome, 'MATCH');
+    assert.strictEqual(spine.reconciliationVerified, true);
+
+    // Mutate factual local state through the normal kernel/store event path.
+    spine.kernel.publish('order.created', { order: { orderId: 'o-mut', intentId: 'i-mut', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
+    spine.kernel.publish('order.submitted', { orderId: 'o-mut' });
+    spine.kernel.publish('order.submission.unknown', { orderId: 'o-mut', reason: 'mutated after MATCH' });
+
+    // Fresh collector market, but current facts no longer MATCH.
+    emitTicker();
+    await assert.rejects(() => activateLiveReadiness(spine), { message: /RECONCILIATION/ });
+    assert.strictEqual(spine.reconciliationVerified, false, 'stale authority revoked');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('P0: no factual mutation → LIVE_READY still succeeds (re-check MATCH)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5b2-nomut-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'nomut', journalPath });
+    spine.protection.start();
+    spine.planStore.subscribeToKernel(spine.kernel as any);
+    await recoverAndStart(spine, journalPath);
+    await reconcileRecoveredState(spine);
+    assert.strictEqual(spine.reconciliationVerified, true);
+    emitTicker();
+    await activateLiveReadiness(spine);
+    assert.strictEqual(spine.protection.getMode(), 'live');
+    assert.strictEqual(spine.reconciliationVerified, true, 're-check preserved authority');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('P1: previous MATCH + incomplete truth (uncorrelated fill) → revocation + denied', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p5b2-acqfail-'));
+    const journalPath = join(dir, 'journal.jsonl');
+    const cfg = paperConfig('acqfail');
+    const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'acqfail', journalPath, paperAccount: cfg });
+    spine.protection.start();
+    spine.planStore.subscribeToKernel(spine.kernel as any);
+    await recoverAndStart(spine, journalPath);
+    const r1 = await reconcileRecoveredState(spine);
+    assert.strictEqual(r1.outcome, 'MATCH');
+    assert.strictEqual(spine.reconciliationVerified, true);
+
+    // Make Paper truth incomplete: generic (non-OMS) execution carries no correlation.
+    const genericIntent = { intentId: 'generic-1', exchange: 'bitget' as ExchangeId, symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 1000, source: 'test', createdAt: Date.now(), reason: 'generic', biasUpdatedAt: Date.now() };
+    await spine.service.execute(genericIntent as any, { markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: Date.now() });
+
+    emitTicker();
+    await assert.rejects(() => activateLiveReadiness(spine), { message: /RECONCILIATION/ });
+    assert.strictEqual(spine.reconciliationVerified, false, 'incomplete truth revoked authority');
+
+    // Re-running reconciliation reports the incomplete truth (fail closed, no repair).
+    const r2 = await reconcileRecoveredState(spine);
+    assert.strictEqual(r2.outcome, 'UNTRUSTED_STATE');
+    assert.strictEqual(spine.reconciliationVerified, false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('Phase 5B2 — correlation pair consistency', () => {
+  const baseFill = { fillId: 'f', exchange: 'bitget' as ExchangeId, symbol: 'X/USDT', side: 'buy' as const, quantity: 1, priceUsd: 100, feeUsd: 0, executedAt: 1 };
+
+  it('PaperFill: both correlation fields absent → structurally valid (generic)', () => {
+    assert.doesNotThrow(() => validatePaperFill({ ...baseFill }));
+  });
+
+  it('PaperFill: sourceOrderId present / sourceIntentId absent → malformed', () => {
+    assert.throws(() => validatePaperFill({ ...baseFill, sourceOrderId: 'o1' } as any), /partial/);
+  });
+
+  it('PaperFill: sourceIntentId present / sourceOrderId absent → malformed', () => {
+    assert.throws(() => validatePaperFill({ ...baseFill, sourceIntentId: 'i1' } as any), /partial/);
+  });
+
+  it('PaperFill: both fields present → valid correlation', () => {
+    assert.doesNotThrow(() => validatePaperFill({ ...baseFill, sourceOrderId: 'o1', sourceIntentId: 'i1' }));
+  });
+
+  it('truth port: partial correlation pair → complete=false (malformed)', async () => {
+    for (const fill of [
+      { ...baseFill, sourceOrderId: 'o1' },
+      { ...baseFill, sourceIntentId: 'i1' },
+    ]) {
+      const service = {
+        getIdentity: () => ({ accountId: 'acct', exchange: 'bitget' as ExchangeId }),
+        snapshot: () => ({ positions: [] }),
+        entries: () => [{ type: 'fill', sequence: 1, fill }],
+      };
+      const truth = await createPaperExecutionTruthPort({ service: service as any, now: () => 1 }).acquireTruth();
+      assert.strictEqual(truth.complete, false);
+      assert.ok(/partial/.test(truth.incompleteReason ?? ''), `partial reason: ${truth.incompleteReason}`);
+    }
+  });
+
+  it('truth port: both present → correlated mapping unchanged; both absent → uncorrelated fail-closed', async () => {
+    const correlated = { ...baseFill, sourceOrderId: 'o1', sourceIntentId: 'i1' };
+    const svcCorr = {
+      getIdentity: () => ({ accountId: 'acct', exchange: 'bitget' as ExchangeId }),
+      snapshot: () => ({ positions: [] }),
+      entries: () => [{ type: 'fill', sequence: 1, fill: correlated }],
+    };
+    const tCorr = await createPaperExecutionTruthPort({ service: svcCorr as any, now: () => 1 }).acquireTruth();
+    assert.strictEqual(tCorr.complete, true);
+    assert.strictEqual(tCorr.orders[0].orderId, 'o1');
+    assert.strictEqual(tCorr.orders[0].status, 'FILLED');
+
+    const generic = { ...baseFill };
+    const svcGen = {
+      getIdentity: () => ({ accountId: 'acct', exchange: 'bitget' as ExchangeId }),
+      snapshot: () => ({ positions: [] }),
+      entries: () => [{ type: 'fill', sequence: 1, fill: generic }],
+    };
+    const tGen = await createPaperExecutionTruthPort({ service: svcGen as any, now: () => 1 }).acquireTruth();
+    assert.strictEqual(tGen.complete, false);
+    assert.ok(/correlation/.test(tGen.incompleteReason ?? ''), 'generic uncorrelated fail-closed');
   });
 });
