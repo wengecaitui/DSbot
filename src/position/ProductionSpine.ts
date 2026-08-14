@@ -17,6 +17,7 @@ import { PaperExecutionAdapter } from '../oms/PaperExecutionAdapter';
 import { PaperExecutionService, type ExecuteParams } from '../paper/PaperExecutionService';
 import type { PaperBrokerPersistence } from '../paper/PaperBroker';
 import type { PaperAccountConfig } from '../types/paper-account';
+import type { PaperFill } from '../types/paper-fill';
 import type { RiskSnapshot } from '../router/KillSwitch';
 import { createPositionManagerRuntime } from './PositionManagerRuntime';
 import { PositionPlanStore } from './PositionPlanStore';
@@ -32,6 +33,8 @@ import { reconcile } from '../reconciliation/reconcile';
 import type { ReconciliationReport, ExecutionTruthSnapshot } from '../reconciliation/reconciliation-types';
 import { createPaperExecutionTruthPort } from '../reconciliation/PaperExecutionTruthPort';
 import { buildLocalReconciliationSnapshot } from '../reconciliation/local-snapshot';
+import { computeRuntimeAccounting } from '../accounting/runtime-accounting';
+import type { RuntimeAccountingSnapshot } from '../accounting/runtime-accounting-types';
 
 export interface ProductionSpineConfig {
   exchange: string;
@@ -71,6 +74,8 @@ export interface ProductionSpine {
   /** Phase 5B: granted only by the real reconciliation sequence — read-only to callers */
   readonly reconciliationVerified: boolean;
   readonly lastReconciliationReport: ReconciliationReport | null;
+  /** Phase 6A: derived read-only runtime accounting (no mutation, no persistence write). */
+  accounting: { snapshot(): RuntimeAccountingSnapshot };
   /** Start production: must be called after recovery verification */
   start(options: { exchange: string }): Promise<void>;
 }
@@ -196,6 +201,18 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     get recoveryVerified() { return recoveryVerified; },
     get reconciliationVerified() { return reconciliationVerified; },
     get lastReconciliationReport() { return lastReconciliationReport; },
+
+    // Phase 6A: derived read-only runtime accounting. No mutation, no persistence write.
+    accounting: {
+      snapshot(): RuntimeAccountingSnapshot {
+        const account = service.snapshot();
+        const fills = service.entries()
+          .filter((e) => e.type === 'fill')
+          .map((e) => (e as { fill: PaperFill }).fill);
+        const markets = marketStore.getAllSnapshots();
+        return computeRuntimeAccounting({ account, fills, markets, capturedAt: clock.now(), source: 'production-spine' });
+      },
+    },
 
     async start(options: { exchange: string }) {
       throw new Error('START_AUTHORITY: use recoverAndStart + activateLiveReadiness');
