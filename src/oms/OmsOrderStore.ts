@@ -66,6 +66,14 @@ export class OmsOrderStore {
     return undefined;
   }
 
+  /** Phase 5B: deterministic read-only enumeration of all current order snapshots.
+   *  Snapshots are frozen at write time; the returned array is a fresh copy. */
+  list(): readonly OmsOrderSnapshot[] {
+    return [...this.orders.values()]
+      .map((r) => r.snapshot)
+      .sort((a, b) => a.orderId.localeCompare(b.orderId));
+  }
+
   digest(): string {
     const { createHash } = require('node:crypto') as typeof import('node:crypto');
     const sorted = [...this.orders.entries()]

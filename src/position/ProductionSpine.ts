@@ -28,6 +28,10 @@ import type { EventJournalPort } from '../kernel/EventJournalPort';
 import { createFileEventJournal, type FileEventJournal } from '../recovery/FileEventJournal';
 import { bridgeMarketToKernel } from './MarketBridge';
 import type { MarketDataRuntime } from '../runtime/market/MarketDataRuntime';
+import { reconcile } from '../reconciliation/reconcile';
+import type { ReconciliationReport, ExecutionTruthSnapshot } from '../reconciliation/reconciliation-types';
+import { createPaperExecutionTruthPort } from '../reconciliation/PaperExecutionTruthPort';
+import { buildLocalReconciliationSnapshot } from '../reconciliation/local-snapshot';
 
 export interface ProductionSpineConfig {
   exchange: string;
@@ -64,6 +68,9 @@ export interface ProductionSpine {
   privateConfig: { hardRisk: () => RiskSnapshot };
   /** Set internally by RecoveryManager — read-only to callers */
   readonly recoveryVerified: boolean;
+  /** Phase 5B: granted only by the real reconciliation sequence — read-only to callers */
+  readonly reconciliationVerified: boolean;
+  readonly lastReconciliationReport: ReconciliationReport | null;
   /** Start production: must be called after recovery verification */
   start(options: { exchange: string }): Promise<void>;
 }
@@ -170,6 +177,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   let recoveryVerified = false;
   let started = false;
   let freshMarketObserved = false;  // Set by production market bus events only
+  let reconciliationVerified = false;  // Phase 5B: granted only by the real reconcile sequence
+  let lastReconciliationReport: ReconciliationReport | null = null;
 
   // ── Production market ingestion (runtime ownership: MarketDataRuntime) ──
   // Market data still bridges to the kernel (positions/stores), but freshness
@@ -185,11 +194,39 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     privateConfig: { hardRisk: config.hardRisk },
 
     get recoveryVerified() { return recoveryVerified; },
+    get reconciliationVerified() { return reconciliationVerified; },
+    get lastReconciliationReport() { return lastReconciliationReport; },
 
     async start(options: { exchange: string }) {
       throw new Error('START_AUTHORITY: use recoverAndStart + activateLiveReadiness');
     },
   };
+
+  // Internal helper: run reconciliation against CURRENT facts. Revokes any stale
+  // authority first; grants reconciliationVerified only on a genuine current MATCH.
+  async function runCurrentReconciliation(): Promise<ReconciliationReport> {
+    reconciliationVerified = false; // revoke stale authority before each attempt
+    const identity = service.getIdentity();
+    const local = buildLocalReconciliationSnapshot(
+      oms.getStore(),
+      positionStore,
+      planStore,
+      { accountId: identity.accountId, exchange: identity.exchange },
+    );
+    let external: ExecutionTruthSnapshot;
+    try {
+      const port = createPaperExecutionTruthPort({ service, now: () => clock.now() });
+      external = await port.acquireTruth();
+    } catch (err) {
+      reconciliationVerified = false; // fail closed on acquisition failure
+      lastReconciliationReport = null;
+      throw err;
+    }
+    const report = reconcile(local, external);
+    lastReconciliationReport = report;
+    reconciliationVerified = report.reconciliationVerified;
+    return report;
+  }
 
   (spine as any)[VERIFY_TOKEN] = async function() {
     if (started) return;
@@ -197,10 +234,26 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     started = true;
   };
 
-  // Internal: grant LIVE_READY (requires recoveryVerified + fresh post-recovery market)
+  // Internal: run the real reconciliation sequence. Requires RECOVERY_VERIFIED.
+  (spine as any)[RECONCILE_TOKEN] = async function(): Promise<ReconciliationReport> {
+    if (!recoveryVerified) throw new Error('RECONCILIATION_REQUIRES_RECOVERY');
+    return await runCurrentReconciliation();
+  };
+
+  // Internal: grant LIVE_READY. Requires recovery + a prior reconciliation + fresh
+  // collector market, AND re-establishes that CURRENT facts still reconcile to MATCH.
   (spine as any)[LIVE_TOKEN] = async function() {
     if (!recoveryVerified) throw new Error('LIVE_READY_REQUIRES_RECOVERY');
+    if (!reconciliationVerified) throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
     if (!freshMarketObserved) throw new Error('LIVE_READY_REQUIRES_FRESH_MARKET');
+    // P0: current facts must still MATCH at the point LIVE_READY is granted.
+    let report: ReconciliationReport;
+    try {
+      report = await runCurrentReconciliation();
+    } catch {
+      throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
+    }
+    if (!report.reconciliationVerified) throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
     _setLive();
   };
 
@@ -209,6 +262,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
 const VERIFY_TOKEN = Symbol('verifyToken');
 const LIVE_TOKEN = Symbol('liveToken');
+const RECONCILE_TOKEN = Symbol('reconcileToken');
 
 /**
  * Full recovery: journal → replay → verify → RECOVERY_VERIFIED.
@@ -242,8 +296,21 @@ export async function recoverAndStart(
 }
 
 /**
- * Grant LIVE_READY after successful recovery AND fresh market data availability.
- * Requires recoverAndStart to have been called first (recoveryVerified must be true).
+ * Phase 5B: run reconciliation after successful recovery.
+ * Acquires the internally wired factual Paper execution truth, builds the local
+ * recovered snapshot, and runs the real reconcile(). Grants RECONCILIATION_VERIFIED
+ * only when the report is a genuine MATCH. The caller cannot inject a fake truth
+ * snapshot, report, or a reconciliationVerified=true boolean.
+ */
+export async function reconcileRecoveredState(spine: ProductionSpine): Promise<ReconciliationReport> {
+  const fn = (spine as any)[RECONCILE_TOKEN];
+  if (typeof fn !== 'function') throw new Error('RECONCILIATION_AUTHORITY: no internal reconcile token');
+  return await fn();
+}
+
+/**
+ * Grant LIVE_READY after successful recovery, reconciliation, AND fresh market data availability.
+ * Requires recoverAndStart + reconcileRecoveredState to have been called first.
  */
 export async function activateLiveReadiness(spine: ProductionSpine): Promise<void> {
   const fn = (spine as any)[LIVE_TOKEN];
@@ -257,7 +324,13 @@ function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
   m.set('execution.fill.confirmed', [spine.positionStore, spine.oms.getStore()]);
   m.set('market.ticker.updated', [spine.marketStore]);
   m.set('policy.snapshot.published', [spine.policyStore]);
+  m.set('order.created', [spine.oms.getStore()]);
+  m.set('order.submitted', [spine.oms.getStore()]);
+  m.set('order.rejected', [spine.oms.getStore()]);
+  m.set('order.submission.unknown', [spine.oms.getStore()]);
   m.set('position.plan.created', [spine.planStore]);
+  m.set('position.plan.updated', [spine.planStore]);
+  m.set('position.plan.archived', [spine.planStore]);
   m.set('position.plan.closed', [spine.planStore]);
   return m;
 }

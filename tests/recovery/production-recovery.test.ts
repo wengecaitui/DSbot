@@ -162,8 +162,9 @@ describe('Phase 5A — Production Recovery', () => {
     );
 
     // Recovery + start (recoverAndStart calls performRecoveryAndStart internally)
-    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const result = await recoverAndStart(s, journalPath);
+    await reconcileRecoveredState(s);
     // Fresh market through production collector satisfies LIVE_READY freshness gate
     emitTicker();
     await activateLiveReadiness(s);
@@ -279,10 +280,11 @@ describe('Phase 5A — Production Recovery', () => {
     });
 
     // Run 2: fresh spine, recoverAndStart replays journal → verified + live
-    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const { spine: s2, emitTicker } = await createSpineWithMarket({ accountId: 'factual-r2', journalPath: journalPath, policyMaxLifetimeMs: 3600_000 });
     s2.planStore.subscribeToKernel(s2.kernel as any);
     const recoveryResult = await recoverAndStart(s2, journalPath);
+    await reconcileRecoveredState(s2);
     // Fresh market through production collector → s2 now has freshMarketObserved
     emitTicker();
     await activateLiveReadiness(s2);
@@ -355,11 +357,12 @@ describe('Phase 5A — Production Recovery', () => {
     });
 
     // Recover: verified but NOT live
-    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'p0entry', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
     await recoverAndStart(s, journalPath);
+    await reconcileRecoveredState(s);
     assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
     assert.strictEqual(s.protection.getMode(), 'replay', 'NOT live after recovery');
 
@@ -416,8 +419,9 @@ describe('Phase 5A — Production Recovery', () => {
     const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'p0liveok', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
-    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
+    await reconcileRecoveredState(s);
     // Fresh market through production collector → LIVE_READY freshness gate satisfied
     emitTicker();
     await activateLiveReadiness(s);
@@ -439,8 +443,9 @@ describe('Phase 5A — Production Recovery', () => {
     s.planStore.subscribeToKernel(s.kernel as any);
 
     // Recovery
-    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
+    await reconcileRecoveredState(s);
     assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
 
     // Forge: publish market event directly to kernel (bypasses production bus)
@@ -480,8 +485,9 @@ describe('Phase 5A — Production Recovery', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0nobus-'));
     const journalPath = join(dir, 'journal.jsonl');
     const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0nobus', hardRisk, journalPath });
-    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
+    await reconcileRecoveredState(s);
     assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
     await assert.rejects(
       () => activateLiveReadiness(s),
@@ -499,8 +505,9 @@ describe('Phase 5A — Production Recovery', () => {
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
 
-    const { recoverAndStart, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
+    await reconcileRecoveredState(s);
     assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
 
     // Forge: write directly to the public bus (bypasses the collector)

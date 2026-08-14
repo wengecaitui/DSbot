@@ -13,6 +13,9 @@ export interface FillSimulatorConfig {
   slippageBps: number;
   executedAtMs: number;
   fillIdPrefix?: string;
+  /** Phase 5B: optional OMS correlation metadata carried onto the fill. */
+  sourceOrderId?: string;
+  sourceIntentId?: string;
 }
 
 const DEFAULT_PREFIX = 'sim';
@@ -96,7 +99,10 @@ export function simulateFill(intent: TradeIntent, config: FillSimulatorConfig, c
   const side = isBuy ? 'buy' as const : 'sell' as const;
   const prefix = config.fillIdPrefix ?? DEFAULT_PREFIX;
   const fillId = computeFillId(intent.intentId, intent.exchange, intent.symbol, side, quantity, executedPriceUsd, feeUsd, config.executedAtMs, prefix);
-  const fill: PaperFill = { fillId, exchange: intent.exchange, symbol: intent.symbol, side, quantity, priceUsd: executedPriceUsd, feeUsd, executedAt: config.executedAtMs };
+  const fill: PaperFill = {
+    fillId, exchange: intent.exchange, symbol: intent.symbol, side, quantity, priceUsd: executedPriceUsd, feeUsd, executedAt: config.executedAtMs,
+    sourceOrderId: config.sourceOrderId, sourceIntentId: config.sourceIntentId,
+  };
   validatePaperFill(fill);
   return { fill, executedPriceUsd, quantity, executedNotionalUsd, feeUsd };
 }
