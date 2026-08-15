@@ -12,6 +12,9 @@ function coordinator(overrides: Record<string, unknown> = {}) {
     randomId: ids,
     receiptTtlMs: 30_000,
     healthFreshnessMs: 10_000,
+    // A real (non-null) instruction so receipt-semantics tests can authorize;
+    // fail-closed supply cases inject their own supplier via overrides.
+    instructionSupplier: () => ({ op: 'pull' }),
     ...overrides,
   };
   return { c: createHandshakeCoordinator(options), clock, ids };
@@ -224,7 +227,7 @@ test('an open circuit rejects an otherwise-valid pull', async () => {
 });
 
 // ─── instruction supply is injected; failure does not re-open the handshake ─
-test('instruction supplier is injected and deterministic; its failure yields null instruction', async () => {
+test('instruction supplier is injected and deterministic; a real payload is returned', async () => {
   const { c } = coordinator({
     healthCollector: () => 'healthy',
     instructionSupplier: () => ({ op: 'pull', id: 42 }),
@@ -238,7 +241,7 @@ test('instruction supplier is injected and deterministic; its failure yields nul
   }
 });
 
-test('a throwing instruction supplier still authorizes but yields null instruction', async () => {
+test('a throwing instruction supplier rejects the pull fail-closed', async () => {
   const { c } = coordinator({
     healthCollector: () => 'healthy',
     instructionSupplier: () => {
@@ -247,9 +250,49 @@ test('a throwing instruction supplier still authorizes but yields null instructi
   });
   await c.start();
   const { receipt } = await c.confirmHealth();
-  const result = await c.pullInstruction(receipt!);
-  assert.equal(result.authorized, true);
-  if (result.authorized) assert.equal(result.instruction, null);
+  rejected(await c.pullInstruction(receipt!), 'INSTRUCTION_UNAVAILABLE');
+});
+
+test('a null instruction supplier rejects the pull fail-closed', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    instructionSupplier: () => null,
+  });
+  await c.start();
+  const { receipt } = await c.confirmHealth();
+  rejected(await c.pullInstruction(receipt!), 'INSTRUCTION_UNAVAILABLE');
+});
+
+test('an undefined instruction supplier rejects the pull fail-closed', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    instructionSupplier: () => undefined,
+  });
+  await c.start();
+  const { receipt } = await c.confirmHealth();
+  rejected(await c.pullInstruction(receipt!), 'INSTRUCTION_UNAVAILABLE');
+});
+
+test('a never-resolving instruction supplier times out and rejects fail-closed', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    instructionSupplier: () => new Promise(() => {}),
+    instructionTimeoutMs: 50,
+  });
+  await c.start();
+  const { receipt } = await c.confirmHealth();
+  rejected(await c.pullInstruction(receipt!), 'INSTRUCTION_UNAVAILABLE');
+});
+
+test('a failed pull consumes its receipt: replay is rejected after supplier failure', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    instructionSupplier: () => null,
+  });
+  await c.start();
+  const { receipt } = await c.confirmHealth();
+  rejected(await c.pullInstruction(receipt!), 'INSTRUCTION_UNAVAILABLE');
+  rejected(await c.pullInstruction(receipt!), 'REPLAYED_RECEIPT');
 });
 
 // ─── snapshot mutation resistance ───────────────────────────────────────────
@@ -268,13 +311,101 @@ test('coordinator snapshot is frozen and does not expose internal mutation', asy
   assert.equal(after.generation, 1);
 });
 
-// ─── no network / trading side effects with defaults ────────────────────────
-test('default configuration performs no I/O: pure health, null instruction, no-op flush', async () => {
+// ─── fail-closed defaults and receipt identity/storage ──────────────────────
+test('default configuration is fail-closed: no injected health dependency or instruction authorizes', async () => {
   const c = createHandshakeCoordinator(); // all defaults
   await c.start();
   const confirm = await c.confirmHealth();
-  assert.equal(confirm.confirmed, true); // default collector is always healthy (pure)
-  const result = await c.pullInstruction(confirm.receipt!);
-  assert.equal(result.authorized, true);
-  if (result.authorized) assert.equal(result.instruction, null);
+  assert.equal(confirm.confirmed, false); // no real health dependency
+  assert.equal(confirm.receipt, null);
+  rejected(await c.pullInstruction('anything'), 'UNHEALTHY');
+});
+
+test('an injected ID source that yields empty IDs fails closed instead of falling back to crypto', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    randomId: () => '',
+  });
+  await c.start();
+  const confirm = await c.confirmHealth();
+  assert.equal(confirm.confirmed, false);
+  assert.equal(confirm.receipt, null);
+  assert.equal(confirm.reason, 'RECEIPT_UNAVAILABLE');
+});
+
+test('a colliding ID does not overwrite an existing receipt and is retried to a unique value', async () => {
+  const sequence = ['dup', 'dup', 'unique', 'unique', 'unique'];
+  let call = 0;
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    randomId: () => sequence[call++],
+  });
+  await c.start();
+  const first = await c.confirmHealth();
+  assert.equal(first.confirmed, true);
+  assert.equal(first.receipt, 'dup');
+
+  const second = await c.confirmHealth();
+  assert.equal(second.confirmed, true);
+  assert.equal(second.receipt, 'unique');
+
+  // Neither receipt was overwritten: both remain independently usable.
+  authorized(await c.pullInstruction(first.receipt!));
+  authorized(await c.pullInstruction(second.receipt!));
+});
+
+test('expired receipts are pruned deterministically, bounding tracked growth', async () => {
+  const { c, clock } = coordinator({
+    healthCollector: () => 'healthy',
+    receiptTtlMs: 1_000,
+    healthFreshnessMs: 1_000_000,
+  });
+  await c.start();
+  await c.confirmHealth(); // receipt 1
+  await c.confirmHealth(); // receipt 2
+  assert.equal(c.getSnapshot().trackedReceiptCount, 2);
+
+  clock.advance(1_001); // both expire
+  await c.confirmHealth(); // prunes the two expired receipts, issues a third
+  assert.equal(c.getSnapshot().trackedReceiptCount, 1);
+});
+
+test('a consumed receipt is retained for replay until expiry, then pruned', async () => {
+  const { c, clock } = coordinator({
+    healthCollector: () => 'healthy',
+    receiptTtlMs: 1_000,
+    healthFreshnessMs: 1_000_000,
+  });
+  await c.start();
+  const { receipt } = await c.confirmHealth(); // receipt 1 at t0
+  authorized(await c.pullInstruction(receipt!)); // consumed
+  clock.advance(500); // t0 + 500
+  await c.confirmHealth(); // receipt 2 at t0+500
+  assert.equal(c.getSnapshot().trackedReceiptCount, 2); // tombstone retained
+  rejected(await c.pullInstruction(receipt!), 'REPLAYED_RECEIPT'); // replay still detected
+
+  clock.advance(501); // t0 + 1001: receipt 1 expired, receipt 2 still live
+  await c.confirmHealth(); // prunes the expired tombstone (receipt 1) only
+  assert.equal(c.getSnapshot().trackedReceiptCount, 2); // receipt 2 + receipt 3
+  rejected(await c.pullInstruction(receipt!), 'UNKNOWN_RECEIPT'); // pruned → gone
+});
+
+test('the tracked-receipt map enforces a maximum bound and fails closed when full', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    receiptTtlMs: 1_000_000,
+    healthFreshnessMs: 1_000_000,
+    maxTrackedReceipts: 2,
+  });
+  await c.start();
+  const a = await c.confirmHealth();
+  const b = await c.confirmHealth();
+  assert.equal(a.confirmed, true);
+  assert.equal(b.confirmed, true);
+  assert.equal(c.getSnapshot().trackedReceiptCount, 2);
+
+  const full = await c.confirmHealth();
+  assert.equal(full.confirmed, false);
+  assert.equal(full.reason, 'RECEIPT_UNAVAILABLE');
+  assert.equal(c.getSnapshot().trackedReceiptCount, 2);
 });

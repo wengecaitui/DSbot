@@ -27,6 +27,8 @@ import type {
 import {
   DEFAULT_HEALTH_CHECK_TIMEOUT_MS,
   DEFAULT_HEALTH_FRESHNESS_MS,
+  DEFAULT_INSTRUCTION_TIMEOUT_MS,
+  DEFAULT_MAX_TRACKED_RECEIPTS,
   DEFAULT_RECEIPT_TTL_MS,
 } from './types';
 import { Mutex, deepFreeze, withTimeout } from './internal';
@@ -53,6 +55,10 @@ export interface HandshakeCoordinatorOptions {
   healthFreshnessMs?: number;
   /** Timeout applied to the health collector (default 10_000 ms). */
   healthCheckTimeoutMs?: number;
+  /** Timeout applied to the instruction supplier (default 10_000 ms). */
+  instructionTimeoutMs?: number;
+  /** Maximum tracked-receipt bound; issuing beyond it fails closed (default 1_000). */
+  maxTrackedReceipts?: number;
   /** Circuit-breaker tuning. */
   breaker?: { failureThreshold?: number; cooldownMs?: number };
 }
@@ -91,7 +97,10 @@ export function createHandshakeCoordinator(
 ): HandshakeCoordinator {
   const now = options.now ?? (() => Date.now());
   const randomId = options.randomId ?? defaultRandomId;
-  const healthCollector = options.healthCollector ?? (() => 'healthy');
+  // Fail-closed defaults: with no injected health dependency the collector is
+  // "unknown" (never authorizing), and with no injected supplier the pull has
+  // no instruction to offer.
+  const healthCollector = options.healthCollector ?? (() => 'unknown');
   const instructionSupplier = options.instructionSupplier ?? (() => null);
 
   const receiptTtlMs =
@@ -106,6 +115,14 @@ export function createHandshakeCoordinator(
     options.healthCheckTimeoutMs !== undefined && options.healthCheckTimeoutMs > 0
       ? options.healthCheckTimeoutMs
       : DEFAULT_HEALTH_CHECK_TIMEOUT_MS;
+  const instructionTimeoutMs =
+    options.instructionTimeoutMs !== undefined && options.instructionTimeoutMs > 0
+      ? options.instructionTimeoutMs
+      : DEFAULT_INSTRUCTION_TIMEOUT_MS;
+  const maxTrackedReceipts =
+    options.maxTrackedReceipts !== undefined && options.maxTrackedReceipts > 0
+      ? options.maxTrackedReceipts
+      : DEFAULT_MAX_TRACKED_RECEIPTS;
 
   const breaker: HandshakeCircuitBreaker = createHandshakeCircuitBreaker({
     failureThreshold: options.breaker?.failureThreshold,
@@ -125,19 +142,38 @@ export function createHandshakeCoordinator(
   let lastHealthStatus: CollectedHealth | null = null;
   let consumedReceiptCount = 0;
 
-  function issueReceipt(): HealthReceipt {
-    const receipt = randomId();
-    // A receipt must be non-empty; if a test double returns an empty string,
-    // fall back to a non-empty token so the invariant always holds.
-    const value = receipt && receipt.length > 0 ? receipt : defaultRandomId();
-    const issuedAt = now();
-    receipts.set(value, {
-      generation,
-      issuedAt,
-      expiresAt: issuedAt + receiptTtlMs,
-      consumed: false,
-    });
-    return value;
+  const MAX_RECEIPT_ID_ATTEMPTS = 3;
+
+  function pruneReceipts(nowMs: number): void {
+    for (const [receipt, record] of receipts) {
+      // Expired records are dead weight. Consumed tombstones are retained until
+      // expiry so replay detection holds for the receipt's entire lifetime.
+      if (nowMs > record.expiresAt) receipts.delete(receipt);
+    }
+  }
+
+  /**
+   * Issue a unique, non-empty receipt or fail closed. Never silently replaces an
+   * invalid injected ID with a different randomness source, and never overwrites
+   * an existing receipt (collisions are retried within a bounded window).
+   */
+  function issueReceipt(): HealthReceipt | null {
+    const nowMs = now();
+    pruneReceipts(nowMs);
+    if (receipts.size >= maxTrackedReceipts) return null;
+    for (let attempt = 0; attempt < MAX_RECEIPT_ID_ATTEMPTS; attempt++) {
+      const candidate = randomId();
+      if (!candidate || candidate.length === 0) continue; // invalid — no fallback
+      if (receipts.has(candidate)) continue; // collision — retry
+      receipts.set(candidate, {
+        generation,
+        issuedAt: nowMs,
+        expiresAt: nowMs + receiptTtlMs,
+        consumed: false,
+      });
+      return candidate;
+    }
+    return null;
   }
 
   function reject(reason: PullRejectionReason): PullResult {
@@ -205,8 +241,20 @@ export function createHandshakeCoordinator(
 
         if (status === 'healthy') {
           breaker.recordSuccess();
-          lastHealthConfirmedAt = now();
           const receipt = issueReceipt();
+          if (receipt === null) {
+            // A unique, non-empty receipt could not be issued — fail closed.
+            return {
+              confirmed: false,
+              receipt: null,
+              generation,
+              state: 'running',
+              health: 'healthy',
+              circuitState: breaker.getState().state,
+              reason: 'RECEIPT_UNAVAILABLE',
+            };
+          }
+          lastHealthConfirmedAt = now();
           return {
             confirmed: true,
             receipt,
@@ -257,11 +305,18 @@ export function createHandshakeCoordinator(
 
         let instruction: unknown = null;
         try {
-          instruction = await Promise.resolve().then(() => instructionSupplier());
+          instruction = await withTimeout(
+            Promise.resolve().then(() => instructionSupplier()),
+            instructionTimeoutMs
+          );
         } catch {
-          // Instruction supply failure does not re-open the handshake; the
-          // pull is still authorized but yields no instruction payload.
-          instruction = null;
+          // Supply failure or timeout: the receipt is already consumed, so the
+          // pull rejects fail-closed rather than authorizing without payload.
+          return reject('INSTRUCTION_UNAVAILABLE');
+        }
+
+        if (instruction === null || instruction === undefined) {
+          return reject('INSTRUCTION_UNAVAILABLE');
         }
 
         return { authorized: true, receipt, generation, instruction };

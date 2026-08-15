@@ -18,15 +18,21 @@ import type {
   FlushResult,
   FlushRevision,
 } from './types';
-import { Mutex, deepFreeze } from './internal';
+import { DEFAULT_SINK_TIMEOUT_MS } from './types';
+import { Mutex, deepFreeze, withTimeout } from './internal';
 
 export type FlushSink = (notification: FlushNotification) => void | Promise<void>;
 
 export interface FlushNotifierOptions {
   /** Injectable clock (default Date.now). */
   now?: () => number;
-  /** Injected notification sink (default no-op — no real outbound messaging). */
+  /**
+   * Injected notification sink. When omitted, flushes are NOT acknowledged:
+   * no real outbound messaging happens until a sink is injected (Phase 7B).
+   */
   sink?: FlushSink;
+  /** Timeout applied to the sink (default 10_000 ms). */
+  sinkTimeoutMs?: number;
 }
 
 export interface FlushNotifier {
@@ -41,12 +47,16 @@ export interface FlushNotifier {
 
 export function createFlushNotifier(options: FlushNotifierOptions = {}): FlushNotifier {
   const now = options.now ?? (() => Date.now());
-  const sink = options.sink ?? (() => undefined);
+  const sink = options.sink;
+  const sinkTimeoutMs =
+    options.sinkTimeoutMs !== undefined && options.sinkTimeoutMs > 0
+      ? options.sinkTimeoutMs
+      : DEFAULT_SINK_TIMEOUT_MS;
   const mutex = new Mutex();
 
   let revision: FlushRevision = 0;
   let lastFlushedAt: number | null = null;
-  let lastAcknowledged = true;
+  let lastAcknowledged = false;
   let failures = 0;
 
   return {
@@ -55,15 +65,27 @@ export function createFlushNotifier(options: FlushNotifierOptions = {}): FlushNo
         revision += 1;
         const flushedAt = now();
         const notification: FlushNotification = { revision, flushedAt, payload };
-        let acknowledged = true;
+        let acknowledged = false;
         let error: string | undefined;
-        try {
-          await sink(notification);
-        } catch (cause) {
-          acknowledged = false;
-          failures += 1;
-          error = cause instanceof Error ? cause.message : String(cause);
+
+        if (!sink) {
+          // No sink configured — fail closed rather than claim delivery.
+          error = 'NO_SINK';
+        } else {
+          try {
+            await withTimeout(
+              Promise.resolve().then(() => sink(notification)),
+              sinkTimeoutMs,
+              'SINK_TIMEOUT'
+            );
+            acknowledged = true;
+          } catch (cause) {
+            acknowledged = false;
+            error = cause instanceof Error ? cause.message : String(cause);
+          }
         }
+
+        if (!acknowledged) failures += 1;
         lastFlushedAt = flushedAt;
         lastAcknowledged = acknowledged;
         const result: FlushResult = { revision, acknowledged };
@@ -77,7 +99,8 @@ export function createFlushNotifier(options: FlushNotifierOptions = {}): FlushNo
     },
 
     isFresh(candidate: FlushRevision): boolean {
-      return candidate > 0 && candidate === revision;
+      // A revision is fresh only if it is the latest AND was acknowledged.
+      return candidate > 0 && candidate === revision && lastAcknowledged;
     },
 
     getSnapshot(): FlushNotifierSnapshot {

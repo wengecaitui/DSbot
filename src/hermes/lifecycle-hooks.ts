@@ -13,6 +13,8 @@
  *   prevents the delegate lifecycle from running.
  */
 
+import { Mutex } from './internal';
+
 export interface LifecycleHookContext {
   phase: 'start' | 'stop';
   /** Monotonic cycle count for this adaptor (increments on each start). */
@@ -60,12 +62,20 @@ export interface LifecycleHookRegistry {
   getSnapshot(): LifecycleHookRegistrySnapshot;
 }
 
-export function createLifecycleHookRegistry(): LifecycleHookRegistry {
+export interface LifecycleHookRegistryOptions {
+  /** Injectable clock used in hook/error contexts (default Date.now). */
+  now?: () => number;
+}
+
+export function createLifecycleHookRegistry(
+  options: LifecycleHookRegistryOptions = {}
+): LifecycleHookRegistry {
   const hooks = new Map<string, LifecycleHooks>();
   let running = false;
   let cycle = 0;
   const errors: HookErrorRecord[] = [];
-  const now = () => Date.now();
+  const now = options.now ?? (() => Date.now());
+  const mutex = new Mutex();
   const MAX_ERRORS = 50;
 
   function recordError(name: string, phase: 'start' | 'stop', error: unknown): void {
@@ -104,21 +114,36 @@ export function createLifecycleHookRegistry(): LifecycleHookRegistry {
 
     adapt(lifecycle: GatewayLifecycleLike): GatewayLifecycleLike {
       return {
-        async start(): Promise<void> {
-          if (running) return; // no double start
-          running = true;
-          cycle += 1;
-          const context: LifecycleHookContext = { phase: 'start', cycle, at: now() };
-          await runHooks('start', context);
-          await lifecycle.start();
+        start(): Promise<void> {
+          return mutex.run(async () => {
+            if (running) return; // serialized no double start
+            cycle += 1;
+            const context: LifecycleHookContext = { phase: 'start', cycle, at: now() };
+            await runHooks('start', context);
+            try {
+              await lifecycle.start();
+            } catch (error) {
+              // A failed start must leave a non-running, retryable state.
+              running = false;
+              throw error;
+            }
+            running = true;
+          });
         },
 
-        async stop(): Promise<void> {
-          if (!running) return; // no double stop
-          await lifecycle.stop();
-          const context: LifecycleHookContext = { phase: 'stop', cycle, at: now() };
-          await runHooks('stop', context);
-          running = false;
+        stop(): Promise<void> {
+          return mutex.run(async () => {
+            if (!running) return; // serialized no double stop
+            try {
+              await lifecycle.stop();
+            } catch (error) {
+              // Conservatively remain running so a later stop can retry.
+              throw error;
+            }
+            const context: LifecycleHookContext = { phase: 'stop', cycle, at: now() };
+            await runHooks('stop', context);
+            running = false;
+          });
         },
       };
     },

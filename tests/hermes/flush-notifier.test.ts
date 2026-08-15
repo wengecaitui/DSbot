@@ -20,7 +20,7 @@ test('revisions are strictly monotonic across serial and concurrent flushes', as
 });
 
 test('duplicate and stale revisions cannot be presented as fresh', async () => {
-  const notifier = createFlushNotifier();
+  const notifier = createFlushNotifier({ sink: () => {} }); // acknowledging sink
   await notifier.flush();
   await notifier.flush();
   assert.equal(notifier.getRevision(), 2);
@@ -83,4 +83,65 @@ test('flush notifier snapshot is frozen', async () => {
   await notifier.flush();
   const snap = notifier.getSnapshot();
   assert.ok(Object.isFrozen(snap));
+});
+
+test('no configured sink fails closed with a stable NO_SINK error', async () => {
+  const notifier = createFlushNotifier(); // no sink
+  const result = await notifier.flush({ k: 1 });
+  assert.equal(result.acknowledged, false);
+  assert.equal(result.revision, 1);
+  assert.equal(result.error, 'NO_SINK');
+  const snap = notifier.getSnapshot();
+  assert.equal(snap.lastAcknowledged, false);
+  assert.equal(snap.failures, 1);
+});
+
+test('a failed latest flush is never considered fresh', async () => {
+  let fail = false;
+  const notifier = createFlushNotifier({
+    sink: async () => { if (fail) throw new Error('down'); },
+  });
+  await notifier.flush(); // revision 1, acknowledged
+  assert.equal(notifier.isFresh(1), true);
+
+  fail = true;
+  await notifier.flush(); // revision 2, failed
+  assert.equal(notifier.getRevision(), 2);
+  assert.equal(notifier.isFresh(2), false); // latest but unacknowledged
+  assert.equal(notifier.isFresh(1), false); // stale
+
+  fail = false;
+  await notifier.flush(); // revision 3, acknowledged
+  assert.equal(notifier.isFresh(3), true);
+  assert.equal(notifier.isFresh(2), false); // past failed revision
+});
+
+test('a never-resolving sink times out as an unacknowledged failure, preserving revisions', async () => {
+  const notifier = createFlushNotifier({
+    sinkTimeoutMs: 50,
+    sink: () => new Promise<void>(() => {}), // never resolves
+  });
+  const result = await notifier.flush();
+  assert.equal(result.acknowledged, false);
+  assert.equal(result.revision, 1);
+  assert.equal(result.error, 'SINK_TIMEOUT');
+  assert.equal(notifier.getRevision(), 1); // monotonic preserved
+  assert.equal(notifier.isFresh(1), false);
+});
+
+test('the notifier recovers to acknowledged after a timeout', async () => {
+  let hang = true;
+  const notifier = createFlushNotifier({
+    sinkTimeoutMs: 50,
+    sink: () => (hang ? new Promise<void>(() => {}) : undefined),
+  });
+  const bad = await notifier.flush();
+  assert.equal(bad.acknowledged, false);
+  assert.equal(bad.error, 'SINK_TIMEOUT');
+
+  hang = false;
+  const good = await notifier.flush();
+  assert.equal(good.acknowledged, true);
+  assert.equal(good.revision, 2);
+  assert.equal(notifier.isFresh(2), true);
 });

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLifecycleHookRegistry } from '../../src/hermes';
+import { createClock } from './helpers';
 
 function fakeLifecycle() {
   const calls: string[] = [];
@@ -92,4 +93,96 @@ test('registry snapshot is a defensive copy', () => {
   const snap = registry.getSnapshot();
   (snap.registered as string[]).push('injected');
   assert.deepEqual(registry.getSnapshot().registered, ['x']);
+});
+
+test('concurrent starts call the delegate exactly once', async () => {
+  const registry = createLifecycleHookRegistry();
+  let startCalls = 0;
+  let releaseStart!: () => void;
+  const gate = new Promise<void>(resolve => { releaseStart = resolve; });
+  const lifecycle = {
+    async start() { startCalls += 1; await gate; },
+    async stop() {},
+  };
+  const adapted = registry.adapt(lifecycle);
+  const p1 = adapted.start();
+  const p2 = adapted.start();
+  releaseStart();
+  await Promise.all([p1, p2]);
+  assert.equal(startCalls, 1);
+  assert.equal(registry.getSnapshot().running, true);
+});
+
+test('concurrent stops call the delegate exactly once', async () => {
+  const registry = createLifecycleHookRegistry();
+  const calls: string[] = [];
+  let releaseStop!: () => void;
+  const gate = new Promise<void>(resolve => { releaseStop = resolve; });
+  const lifecycle = {
+    async start() { calls.push('start'); },
+    async stop() { calls.push('stop'); await gate; },
+  };
+  const adapted = registry.adapt(lifecycle);
+  await adapted.start();
+  const p1 = adapted.stop();
+  const p2 = adapted.stop();
+  releaseStop();
+  await Promise.all([p1, p2]);
+  assert.deepEqual(calls, ['start', 'stop']);
+  assert.equal(registry.getSnapshot().running, false);
+});
+
+test('a failing delegate start propagates, restores non-running, and retries cleanly', async () => {
+  const registry = createLifecycleHookRegistry();
+  let startCalls = 0;
+  const lifecycle = {
+    async start() {
+      startCalls += 1;
+      if (startCalls === 1) throw new Error('start failed');
+    },
+    async stop() {},
+  };
+  const adapted = registry.adapt(lifecycle);
+
+  await assert.rejects(adapted.start(), /start failed/);
+  assert.equal(registry.getSnapshot().running, false); // retryable
+
+  await adapted.start(); // retry succeeds
+  assert.equal(startCalls, 2);
+  assert.equal(registry.getSnapshot().running, true);
+});
+
+test('a failing delegate stop propagates and stays conservatively running for retry', async () => {
+  const registry = createLifecycleHookRegistry();
+  let stopCalls = 0;
+  const lifecycle = {
+    async start() {},
+    async stop() {
+      stopCalls += 1;
+      if (stopCalls === 1) throw new Error('stop failed');
+    },
+  };
+  const adapted = registry.adapt(lifecycle);
+
+  await adapted.start();
+  await assert.rejects(adapted.stop(), /stop failed/);
+  assert.equal(registry.getSnapshot().running, true); // conservative
+
+  await adapted.stop(); // retry succeeds
+  assert.equal(stopCalls, 2);
+  assert.equal(registry.getSnapshot().running, false);
+});
+
+test('the injected clock drives hook and error contexts', async () => {
+  const clock = createClock(42_000);
+  const registry = createLifecycleHookRegistry({ now: clock.now });
+  const lifecycle = { async start() {}, async stop() {} };
+  const seen: number[] = [];
+  registry.register('ok', { onStart: ctx => seen.push(ctx.at) });
+  registry.register('boom', { onStart: () => { throw new Error('boom'); } });
+  const adapted = registry.adapt(lifecycle);
+  clock.advance(7);
+  await adapted.start();
+  assert.equal(seen[0], 42_007);
+  assert.equal(registry.getSnapshot().errors[0].at, 42_007);
 });

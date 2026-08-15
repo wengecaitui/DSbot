@@ -37,7 +37,8 @@ export type PullRejectionReason =
   | 'EXPIRED_RECEIPT'
   | 'REPLAYED_RECEIPT'
   | 'GENERATION_MISMATCH'
-  | 'INSTRUCTION_UNAVAILABLE';
+  | 'INSTRUCTION_UNAVAILABLE'
+  | 'RECEIPT_UNAVAILABLE';
 
 /** Outcome of an instruction pull. */
 export type PullResult =
@@ -45,7 +46,7 @@ export type PullResult =
       authorized: true;
       receipt: HealthReceipt;
       generation: LifecycleGeneration;
-      instruction: unknown | null;
+      instruction: unknown;
     }
   | { authorized: false; reason: PullRejectionReason };
 
@@ -104,5 +105,8 @@ export interface FlushNotification {
 export const DEFAULT_RECEIPT_TTL_MS = 30_000;
 export const DEFAULT_HEALTH_FRESHNESS_MS = 60_000;
 export const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 10_000;
+export const DEFAULT_INSTRUCTION_TIMEOUT_MS = 10_000;
+export const DEFAULT_SINK_TIMEOUT_MS = 10_000;
+export const DEFAULT_MAX_TRACKED_RECEIPTS = 1_000;
 export const DEFAULT_BREAKER_FAILURE_THRESHOLD = 3;
 export const DEFAULT_BREAKER_COOLDOWN_MS = 30_000;

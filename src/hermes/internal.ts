@@ -33,10 +33,14 @@ export function deepFreeze<T>(value: T): T {
 }
 
 /** Race a promise against a timeout; rejects with a generic timeout error. */
-export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+export function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message = 'operation timed out'
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error('operation timed out'));
+      reject(new Error(message));
     }, timeoutMs);
     promise.then(
       value => {

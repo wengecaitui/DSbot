@@ -33,7 +33,10 @@ export {
   DEFAULT_BREAKER_FAILURE_THRESHOLD,
   DEFAULT_HEALTH_CHECK_TIMEOUT_MS,
   DEFAULT_HEALTH_FRESHNESS_MS,
+  DEFAULT_INSTRUCTION_TIMEOUT_MS,
+  DEFAULT_MAX_TRACKED_RECEIPTS,
   DEFAULT_RECEIPT_TTL_MS,
+  DEFAULT_SINK_TIMEOUT_MS,
 } from './types';
 
 export {
@@ -49,6 +52,7 @@ export {
   type HookErrorRecord,
   type LifecycleHookContext,
   type LifecycleHookRegistry,
+  type LifecycleHookRegistryOptions,
   type LifecycleHookRegistrySnapshot,
   type LifecycleHooks,
 } from './lifecycle-hooks';
