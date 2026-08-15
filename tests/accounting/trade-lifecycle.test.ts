@@ -164,7 +164,7 @@ describe('Phase 6B — partial close then same-side scale-in', () => {
     assert.strictEqual(t.status, 'closed');
     assert.strictEqual(t.entryQuantity, 6);
     assert.strictEqual(t.exitQuantity, 6);
-    assert.strictEqual(t.averageEntryPriceUsd, 102);
+    assert.strictEqual(t.averageEntryPriceUsd, 101.66666667);
     assert.strictEqual(t.grossRealizedPnlUsd, 75);
     assert.strictEqual(t.netPnlUsd, 73.80);
     assert.strictEqual(t.holdingDurationMs, 3);
@@ -416,44 +416,59 @@ describe('Phase 6B — determinism + deep freeze + caller immutability', () => {
 
 describe('Phase 6B — sequence validation (reject malformed, allow gaps)', () => {
   it('rejects duplicate sequences', () => {
-    const { account } = buildLedger(makeConfig('dup'), []);
-    const f = makeFill('f1', 'buy', 1, 100);
+    const { account } = buildLedger(makeConfig('dup'), [
+      makeFill('f1', 'buy', 1, 100),
+      makeFill('f2', 'sell', 1, 100),
+    ]);
     assert.throws(
-      () => computeTradeLifecycle({ account, fills: [fillEntry(f, 1), fillEntry(f, 1)] }),
+      () => computeTradeLifecycle({
+        account,
+        fills: [fillEntry(makeFill('fa', 'buy', 1, 100), 1), fillEntry(makeFill('fb', 'buy', 1, 100), 1)],
+      }),
       (e: any) => e instanceof TradeLifecycleSequenceError,
     );
   });
 
   it('rejects non-increasing sequences', () => {
-    const { account } = buildLedger(makeConfig('noninc'), []);
+    const { account } = buildLedger(makeConfig('noninc'), [
+      makeFill('f1', 'buy', 1, 100),
+      makeFill('f2', 'sell', 1, 100),
+    ]);
     assert.throws(
-      () => computeTradeLifecycle({ account, fills: [fillEntry(makeFill('f1', 'buy', 1, 100), 2), fillEntry(makeFill('f2', 'sell', 1, 100), 1)] }),
+      () => computeTradeLifecycle({
+        account,
+        fills: [fillEntry(makeFill('fa', 'buy', 1, 100), 2), fillEntry(makeFill('fb', 'sell', 1, 100), 1)],
+      }),
       (e: any) => e instanceof TradeLifecycleSequenceError,
     );
   });
 
   it('rejects non-positive sequences', () => {
-    const { account } = buildLedger(makeConfig('nonpos'), []);
+    const { account } = buildLedger(makeConfig('nonpos'), [makeFill('f1', 'buy', 1, 100)]);
     assert.throws(
-      () => computeTradeLifecycle({ account, fills: [fillEntry(makeFill('f1', 'buy', 1, 100), 0)] }),
+      () => computeTradeLifecycle({ account, fills: [fillEntry(makeFill('fa', 'buy', 1, 100), 0)] }),
       (e: any) => e instanceof TradeLifecycleSequenceError,
     );
   });
 
-  it('allows gaps (marks may exist between fills) and does NOT sort by timestamp/fillId', () => {
-    // Account (realized 20, fees 0) from the same economic facts in ledger order.
-    const { account } = buildLedger(makeConfig('gap'), [
-      makeFill('f1', 'buy', 2, 100, { executedAt: 1 }),
-      makeFill('f2', 'sell', 2, 110, { executedAt: 2 }),
-    ]);
-    // Lifecycle input: sequences 1 and 3 (gap at 2). The close fill carries an
-    // EARLIER executedAt (50) than the open (200) to prove sequence — not
-    // timestamp — governs ordering. A timestamp sort would wrongly open a short.
+  it('allows gaps (marks between fills) and orders by sequence, not timestamp/fillId', () => {
+    // Genuine gap: buy (seq 1), mark (seq 2), sell (seq 3), so fill sequences are
+    // 1 and 3 while account.sequence is 3.
+    const ledger = new PaperAccountLedger(makeConfig('gap'));
+    ledger.applyFill(makeFill('z-open', 'buy', 2, 100, { executedAt: 1 }));
+    ledger.markToMarket({ exchange: EXCHANGE, symbol: 'BTC/USDT', markPriceUsd: 105, markedAt: 2 });
+    ledger.applyFill(makeFill('a-close', 'sell', 2, 110, { executedAt: 3 }));
+    const account = ledger.snapshot();
+    const entries = ledger.entries().filter((e) => e.type === 'fill') as PaperFillLedgerEntry[];
+
+    // Equal executedAt with lexically conflicting fill IDs: 'z-open' (opening,
+    // seq 1) sorts AFTER 'a-close' (closing, seq 3). A fillId sort would wrongly
+    // open a short; sequence — not timestamp or fillId — is the authority.
     const s = computeTradeLifecycle({
       account,
       fills: [
-        fillEntry(makeFill('f1', 'buy', 2, 100, { executedAt: 200 }), 1),
-        fillEntry(makeFill('f2', 'sell', 2, 110, { executedAt: 50 }), 3),
+        fillEntry({ ...entries[0].fill, executedAt: 100 }, 1),
+        fillEntry({ ...entries[1].fill, executedAt: 100 }, 3),
       ],
     });
     assert.strictEqual(s.trades.length, 1);
@@ -465,7 +480,7 @@ describe('Phase 6B — sequence validation (reject malformed, allow gaps)', () =
 
 describe('Phase 6B — exchange / reconciliation fail-closed', () => {
   it('rejects a fill whose exchange mismatches the account', () => {
-    const { account } = buildLedger(makeConfig('xchg'), []);
+    const { account } = buildLedger(makeConfig('xchg'), [makeFill('f1', 'buy', 1, 100)]);
     const foreign = { ...makeFill('f1', 'buy', 1, 100), exchange: 'binance' as ExchangeId };
     assert.throws(
       () => computeTradeLifecycle({ account, fills: [fillEntry(foreign, 1)] }),
