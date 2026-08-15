@@ -467,8 +467,8 @@ describe('Phase 6B — sequence validation (reject malformed, allow gaps)', () =
     const s = computeTradeLifecycle({
       account,
       fills: [
-        fillEntry({ ...entries[0].fill, executedAt: 100 }, 1),
-        fillEntry({ ...entries[1].fill, executedAt: 100 }, 3),
+        fillEntry({ ...entries[0].fill, executedAt: 3 }, 1),
+        fillEntry({ ...entries[1].fill, executedAt: 3 }, 3),
       ],
     });
     assert.strictEqual(s.trades.length, 1);

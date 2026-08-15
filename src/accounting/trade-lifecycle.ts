@@ -37,6 +37,16 @@
 //   5. Per-symbol `executedAt` regression is rejected (matching the canonical
 //      Paper ledger), so a negative holding duration can never be published.
 //
+// Phase 6B Repair 3 (timestamp provenance binding):
+//   - Every supplied fill `executedAt` must be <= `account.updatedAt` (the
+//     ledger head), so a stale ledger `updatedAt` can never publish a trade
+//     opened later than the ledger claims.
+//   - Each projected open position's `openedAt` must equal the incarnation
+//     opening fill timestamp.
+//   - An open position's `updatedAt` may exceed its last fill timestamp (marks
+//     are intentionally absent from lifecycle input) but must be >= that last
+//     fill timestamp and <= `account.updatedAt`.
+//
 // No network, no LLM, no execution, no storage writes, no Date.now, no
 // randomness. Identical inputs produce an identical deeply-frozen snapshot.
 // Caller-owned inputs are never mutated or frozen.
@@ -82,6 +92,14 @@ export class TradeLifecycleTimeRegressionError extends TradeLifecycleError {
 /** Repair 2 (item 1): projected open positions do not reconcile with account.positions. */
 export class TradeLifecyclePositionReconciliationError extends TradeLifecycleReconciliationError {
   constructor(message: string) { super(message); this.name = 'TradeLifecyclePositionReconciliationError'; }
+}
+/** Repair 3: timestamp provenance binding — a supplied fill/position timestamp
+ *  is not bound by the account ledger head or the projected incarnation
+ *  timestamps. Fail-closed: the ledger `updatedAt` must be >= every fill
+ *  `executedAt`, and an open position's `updatedAt` must be >= its last fill
+ *  timestamp and <= `account.updatedAt`. */
+export class TradeLifecycleTimestampProvenanceError extends TradeLifecycleReconciliationError {
+  constructor(message: string) { super(message); this.name = 'TradeLifecycleTimestampProvenanceError'; }
 }
 
 export interface TradeLifecycleInput {
@@ -269,6 +287,9 @@ interface IncState {
   /** Sum of all leg fees attributed to this incarnation. */
   allocatedFeesUsd: number;
   openedAt: number;
+  /** Latest fill timestamp attributed to this incarnation (for open-position
+   *  provenance: position.updatedAt >= lastFillAt). */
+  lastFillAt: number;
   lastExitAt: number;
   exitPriceWeighted: number;
   openingSequence: number;
@@ -290,6 +311,7 @@ function newIncarnation(fill: PaperFill, sequence: number, side: 'long' | 'short
     grossRealizedPnlUsd: 0,
     allocatedFeesUsd: roundUsd(entryFeeUsd),
     openedAt: fill.executedAt,
+    lastFillAt: fill.executedAt,
     lastExitAt: 0,
     exitPriceWeighted: 0,
     openingSequence: sequence,
@@ -340,6 +362,24 @@ function reconcileOpenPositions(openByKey: ReadonlyMap<string, IncState>, accoun
     if (Math.abs(state.costBasisPriceUsd - p.averageEntryPriceUsd) > ACCOUNTING_EPSILON) {
       throw new TradeLifecyclePositionReconciliationError(
         `position ${p.symbol}: projected cost basis ${state.costBasisPriceUsd} != account ${p.averageEntryPriceUsd}`,
+      );
+    }
+    // Repair 3: canonical position openedAt must equal the incarnation opening
+    // timestamp; updatedAt must be >= the incarnation's last fill and <= the
+    // account ledger head (marks between fills are absent from lifecycle input).
+    if (state.openedAt !== p.openedAt) {
+      throw new TradeLifecyclePositionReconciliationError(
+        `position ${p.symbol}: openedAt ${p.openedAt} != incarnation openedAt ${state.openedAt}`,
+      );
+    }
+    if (p.updatedAt < state.lastFillAt) {
+      throw new TradeLifecycleTimestampProvenanceError(
+        `position ${p.symbol}: updatedAt ${p.updatedAt} < last fill executedAt ${state.lastFillAt}`,
+      );
+    }
+    if (p.updatedAt > account.updatedAt) {
+      throw new TradeLifecycleTimestampProvenanceError(
+        `position ${p.symbol}: updatedAt ${p.updatedAt} > account.updatedAt ${account.updatedAt}`,
       );
     }
   }
@@ -397,6 +437,13 @@ export function computeTradeLifecycle(input: TradeLifecycleInput): TradeLifecycl
       );
     }
 
+    // Repair 3: every supplied fill timestamp must be bound by the ledger head.
+    if (fill.executedAt > account.updatedAt) {
+      throw new TradeLifecycleTimestampProvenanceError(
+        `fill ${fill.fillId}: executedAt ${fill.executedAt} > account.updatedAt ${account.updatedAt}`,
+      );
+    }
+
     const lastExec = lastExecutedAtBySymbol.get(fill.symbol);
     if (lastExec !== undefined && fill.executedAt < lastExec) {
       throw new TradeLifecycleTimeRegressionError(
@@ -426,6 +473,7 @@ export function computeTradeLifecycle(input: TradeLifecycleInput): TradeLifecycl
       state.entryQuantity = roundQuantity(state.entryQuantity + fill.quantity);
       state.entryNotionalUsd = roundUsd(state.entryNotionalUsd + fill.quantity * fill.priceUsd);
       state.allocatedFeesUsd = roundUsd(state.allocatedFeesUsd + fill.feeUsd);
+      state.lastFillAt = fill.executedAt;
       state.legs.push(makeLeg(fill, sequence, fill.quantity, fill.feeUsd));
       continue;
     }
@@ -441,6 +489,7 @@ export function computeTradeLifecycle(input: TradeLifecycleInput): TradeLifecycl
     state.exitQuantity = roundQuantity(state.exitQuantity + closeQty);
     state.exitPriceWeighted = roundUsd(state.exitPriceWeighted + fill.priceUsd * closeQty);
     state.lastExitAt = fill.executedAt;
+    state.lastFillAt = fill.executedAt;
 
     const closeLegFee = qty <= oldAbs ? fill.feeUsd : roundUsd(fill.feeUsd * (oldAbs / qty));
     state.allocatedFeesUsd = roundUsd(state.allocatedFeesUsd + closeLegFee);
