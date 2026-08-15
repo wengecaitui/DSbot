@@ -81,7 +81,14 @@ export function createFlushNotifier(options: FlushNotifierOptions = {}): FlushNo
             acknowledged = true;
           } catch (cause) {
             acknowledged = false;
-            error = cause instanceof Error ? cause.message : String(cause);
+            // Never echo arbitrary sink exception text (it may contain
+            // credentials). Distinguish the controlled timeout from a genuine
+            // sink failure with stable, non-sensitive codes; NO_SINK is
+            // retained above for the unconfigured case.
+            error =
+              cause instanceof Error && cause.message === 'SINK_TIMEOUT'
+                ? 'SINK_TIMEOUT'
+                : 'SINK_FAILED';
           }
         }
 

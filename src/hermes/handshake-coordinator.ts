@@ -148,7 +148,7 @@ export function createHandshakeCoordinator(
     for (const [receipt, record] of receipts) {
       // Expired records are dead weight. Consumed tombstones are retained until
       // expiry so replay detection holds for the receipt's entire lifetime.
-      if (nowMs > record.expiresAt) receipts.delete(receipt);
+      if (nowMs >= record.expiresAt) receipts.delete(receipt);
     }
   }
 
@@ -163,7 +163,7 @@ export function createHandshakeCoordinator(
     if (receipts.size >= maxTrackedReceipts) return null;
     for (let attempt = 0; attempt < MAX_RECEIPT_ID_ATTEMPTS; attempt++) {
       const candidate = randomId();
-      if (!candidate || candidate.length === 0) continue; // invalid — no fallback
+      if (typeof candidate !== 'string' || candidate.trim().length === 0) continue; // invalid — no fallback
       if (receipts.has(candidate)) continue; // collision — retry
       receipts.set(candidate, {
         generation,
@@ -186,6 +186,10 @@ export function createHandshakeCoordinator(
         if (running) return; // no double start
         running = true;
         generation += 1;
+        // A new generation invalidates and removes every prior-generation
+        // receipt/tombstone: old receipts can never authorize, so retaining
+        // them would only consume the new generation's bounded capacity.
+        receipts.clear();
         health = 'unknown';
         startedAt = now();
         stoppedAt = null;
@@ -296,7 +300,7 @@ export function createHandshakeCoordinator(
         const record = receipts.get(receipt);
         if (!record) return reject('UNKNOWN_RECEIPT');
         if (record.generation !== generation) return reject('GENERATION_MISMATCH');
-        if (now() > record.expiresAt) return reject('EXPIRED_RECEIPT');
+        if (now() >= record.expiresAt) return reject('EXPIRED_RECEIPT');
         if (record.consumed) return reject('REPLAYED_RECEIPT');
 
         // Single-use: consume atomically within the serialized section.

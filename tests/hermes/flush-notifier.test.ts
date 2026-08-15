@@ -50,7 +50,7 @@ test('sink failure is contained, revision still advances, and it is observable',
   const bad = await notifier.flush('second');
   assert.equal(bad.acknowledged, false);
   assert.equal(bad.revision, 2);
-  assert.equal(bad.error, 'sink down');
+  assert.equal(bad.error, 'SINK_FAILED');
 
   const snap = notifier.getSnapshot();
   assert.equal(snap.revision, 2);
@@ -144,4 +144,18 @@ test('the notifier recovers to acknowledged after a timeout', async () => {
   assert.equal(good.acknowledged, true);
   assert.equal(good.revision, 2);
   assert.equal(notifier.isFresh(2), true);
+});
+
+test('a throwing sink never leaks its error text; it reports a stable SINK_FAILED code', async () => {
+  const notifier = createFlushNotifier({
+    sink: () => {
+      throw new Error('secret: api_key=sk-live-1234567890');
+    },
+  });
+  const result = await notifier.flush();
+  assert.equal(result.acknowledged, false);
+  assert.equal(result.revision, 1);
+  assert.equal(result.error, 'SINK_FAILED');
+  assert.ok(!result.error?.includes('sk-live'));
+  assert.ok(!result.error?.includes('secret'));
 });

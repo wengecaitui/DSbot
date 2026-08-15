@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLifecycleHookRegistry } from '../../src/hermes';
+import { createHandshakeCoordinator, createLifecycleHookRegistry } from '../../src/hermes';
 import { createClock } from './helpers';
 
 function fakeLifecycle() {
@@ -185,4 +185,58 @@ test('the injected clock drives hook and error contexts', async () => {
   await adapted.start();
   assert.equal(seen[0], 42_007);
   assert.equal(registry.getSnapshot().errors[0].at, 42_007);
+});
+
+test('the delegate start completes before any onStart hook runs (event order)', async () => {
+  const registry = createLifecycleHookRegistry();
+  const events: string[] = [];
+  const lifecycle = {
+    async start() {
+      events.push('delegate:start');
+    },
+    async stop() {
+      events.push('delegate:stop');
+    },
+  };
+  registry.register('hook', {
+    onStart: () => events.push('hook:start'),
+    onStop: () => events.push('hook:stop'),
+  });
+  const adapted = registry.adapt(lifecycle);
+  await adapted.start();
+  await adapted.stop();
+  assert.deepEqual(events, ['delegate:start', 'hook:start', 'delegate:stop', 'hook:stop']);
+});
+
+test('a failing delegate start runs no onStart hook and leaves a bound coordinator non-authorizing', async () => {
+  const registry = createLifecycleHookRegistry();
+  const coordinator = createHandshakeCoordinator({
+    healthCollector: () => 'healthy',
+    instructionSupplier: () => ({ op: 'pull' }),
+  });
+  const started: string[] = [];
+  // Phase 7B-style binding: the coordinator starts via the onStart hook.
+  registry.register('handshake', {
+    onStart: () => {
+      started.push('hook');
+      return coordinator.start();
+    },
+  });
+  const lifecycle = {
+    async start() {
+      throw new Error('gateway start failed');
+    },
+    async stop() {},
+  };
+  const adapted = registry.adapt(lifecycle);
+
+  await assert.rejects(adapted.start(), /gateway start failed/);
+  assert.deepEqual(started, []); // no onStart hook ran
+  assert.equal(registry.getSnapshot().running, false);
+
+  // The bound coordinator was never started, so it cannot authorize health.
+  assert.equal(coordinator.getSnapshot().state, 'stopped');
+  const confirm = await coordinator.confirmHealth();
+  assert.equal(confirm.confirmed, false);
+  assert.equal(confirm.reason, 'STOPPED');
 });

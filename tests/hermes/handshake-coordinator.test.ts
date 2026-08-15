@@ -140,14 +140,17 @@ test('replayed receipt is rejected after a single successful use', async () => {
   rejected(await c.pullInstruction(receipt!), 'REPLAYED_RECEIPT');
 });
 
-test('generation-mismatched receipt is rejected after a restart', async () => {
+test('a prior-generation receipt cannot authorize after a restart', async () => {
   const { c } = coordinator({ healthCollector: () => 'healthy' });
   await c.start();
   const first = await c.confirmHealth();
   await c.stop();
-  await c.start(); // generation 2
+  await c.start(); // generation 2 clears prior-generation receipts
   await c.confirmHealth(); // healthy in generation 2
-  rejected(await c.pullInstruction(first.receipt!), 'GENERATION_MISMATCH');
+  const result = await c.pullInstruction(first.receipt!);
+  assert.equal(result.authorized, false);
+  const reason = (result as Extract<PullResult, { authorized: false }>).reason;
+  assert.ok(['UNKNOWN_RECEIPT', 'GENERATION_MISMATCH'].includes(reason));
 });
 
 test('empty and unknown receipts are rejected', async () => {
@@ -408,4 +411,79 @@ test('the tracked-receipt map enforces a maximum bound and fails closed when ful
   assert.equal(full.confirmed, false);
   assert.equal(full.reason, 'RECEIPT_UNAVAILABLE');
   assert.equal(c.getSnapshot().trackedReceiptCount, 2);
+});
+
+test('a capacity-saturated restart starts generation 2 with zero tracked receipts and can issue immediately', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    receiptTtlMs: 1_000_000,
+    healthFreshnessMs: 1_000_000,
+    maxTrackedReceipts: 2,
+  });
+  await c.start(); // generation 1
+  const a = await c.confirmHealth();
+  const b = await c.confirmHealth();
+  assert.equal(a.confirmed, true);
+  assert.equal(b.confirmed, true);
+  assert.equal(c.getSnapshot().trackedReceiptCount, 2);
+
+  await c.stop();
+  await c.start(); // generation 2
+  assert.equal(c.getSnapshot().generation, 2);
+  assert.equal(c.getSnapshot().trackedReceiptCount, 0); // prior receipts cleared
+  assert.equal(c.getSnapshot().consumedReceiptCount, 0);
+
+  const gen2 = await c.confirmHealth();
+  assert.equal(gen2.confirmed, true); // can issue despite prior saturation
+  assert.equal(c.getSnapshot().trackedReceiptCount, 1);
+});
+
+test('a receipt is expired exactly at the TTL boundary (now === expiresAt)', async () => {
+  const { c, clock } = coordinator({
+    healthCollector: () => 'healthy',
+    receiptTtlMs: 1_000,
+    healthFreshnessMs: 1_000_000,
+  });
+  await c.start();
+  const { receipt } = await c.confirmHealth();
+  clock.advance(1_000); // exactly expiresAt
+  rejected(await c.pullInstruction(receipt!), 'EXPIRED_RECEIPT');
+});
+
+test('expired receipts are pruned exactly at the TTL boundary', async () => {
+  const { c, clock } = coordinator({
+    healthCollector: () => 'healthy',
+    receiptTtlMs: 1_000,
+    healthFreshnessMs: 1_000_000,
+  });
+  await c.start();
+  await c.confirmHealth(); // receipt 1 at t0
+  assert.equal(c.getSnapshot().trackedReceiptCount, 1);
+  clock.advance(1_000); // exactly expiresAt
+  await c.confirmHealth(); // prunes receipt 1, issues receipt 2
+  assert.equal(c.getSnapshot().trackedReceiptCount, 1);
+});
+
+test('a whitespace-only injected receipt ID is unavailable', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    randomId: () => '   ',
+  });
+  await c.start();
+  const confirm = await c.confirmHealth();
+  assert.equal(confirm.confirmed, false);
+  assert.equal(confirm.receipt, null);
+  assert.equal(confirm.reason, 'RECEIPT_UNAVAILABLE');
+});
+
+test('a non-string injected receipt ID is unavailable', async () => {
+  const { c } = coordinator({
+    healthCollector: () => 'healthy',
+    randomId: () => 123 as unknown as string,
+  });
+  await c.start();
+  const confirm = await c.confirmHealth();
+  assert.equal(confirm.confirmed, false);
+  assert.equal(confirm.receipt, null);
+  assert.equal(confirm.reason, 'RECEIPT_UNAVAILABLE');
 });

@@ -17,7 +17,7 @@ import { Mutex } from './internal';
 
 export interface LifecycleHookContext {
   phase: 'start' | 'stop';
-  /** Monotonic cycle count for this adaptor (increments on each start). */
+  /** Monotonic cycle count for this adaptor (increments on each successful start). */
   cycle: number;
   at: number;
 }
@@ -117,17 +117,20 @@ export function createLifecycleHookRegistry(
         start(): Promise<void> {
           return mutex.run(async () => {
             if (running) return; // serialized no double start
-            cycle += 1;
-            const context: LifecycleHookContext = { phase: 'start', cycle, at: now() };
-            await runHooks('start', context);
             try {
               await lifecycle.start();
             } catch (error) {
-              // A failed start must leave a non-running, retryable state.
+              // A failed start must leave a non-running, retryable state and
+              // must not run any onStart hook nor advance the successful cycle.
               running = false;
               throw error;
             }
+            // Only after the authoritative delegate start succeeds do we
+            // surface the running state and run onStart hooks (P1-6 repair).
             running = true;
+            cycle += 1;
+            const context: LifecycleHookContext = { phase: 'start', cycle, at: now() };
+            await runHooks('start', context);
           });
         },
 
