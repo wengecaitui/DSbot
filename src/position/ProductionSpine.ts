@@ -16,7 +16,7 @@ import type { ProjectorMap } from '../recovery/ReplayCoordinator';
 import { PaperExecutionAdapter } from '../oms/PaperExecutionAdapter';
 import { PaperExecutionService, type ExecuteParams } from '../paper/PaperExecutionService';
 import type { PaperBrokerPersistence } from '../paper/PaperBroker';
-import type { PaperAccountConfig } from '../types/paper-account';
+import type { PaperAccountConfig, PaperFillLedgerEntry } from '../types/paper-account';
 import type { PaperFill } from '../types/paper-fill';
 import type { RiskSnapshot } from '../router/KillSwitch';
 import { createPositionManagerRuntime } from './PositionManagerRuntime';
@@ -35,6 +35,8 @@ import { createPaperExecutionTruthPort } from '../reconciliation/PaperExecutionT
 import { buildLocalReconciliationSnapshot } from '../reconciliation/local-snapshot';
 import { computeRuntimeAccounting } from '../accounting/runtime-accounting';
 import type { RuntimeAccountingSnapshot } from '../accounting/runtime-accounting-types';
+import { computeTradeLifecycle } from '../accounting/trade-lifecycle';
+import type { TradeLifecycle } from '../accounting/trade-lifecycle-types';
 
 export interface ProductionSpineConfig {
   exchange: string;
@@ -75,7 +77,7 @@ export interface ProductionSpine {
   readonly reconciliationVerified: boolean;
   readonly lastReconciliationReport: ReconciliationReport | null;
   /** Phase 6A: derived read-only runtime accounting (no mutation, no persistence write). */
-  accounting: { snapshot(): RuntimeAccountingSnapshot };
+  accounting: { snapshot(): RuntimeAccountingSnapshot; lifecycle(): TradeLifecycle };
   /** Start production: must be called after recovery verification */
   start(options: { exchange: string }): Promise<void>;
 }
@@ -211,6 +213,13 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
           .map((e) => (e as { fill: PaperFill }).fill);
         const markets = marketStore.getAllSnapshots();
         return computeRuntimeAccounting({ account, fills, markets, capturedAt: clock.now(), source: 'production-spine' });
+      },
+      // Phase 6B: derived read-only trade lifecycle. No mutation, no persistence
+      // write, no OMS/execution/market writes, no state mutation.
+      lifecycle(): TradeLifecycle {
+        const account = service.snapshot();
+        const fills = service.entries().filter((e) => e.type === 'fill') as PaperFillLedgerEntry[];
+        return computeTradeLifecycle({ account, fills });
       },
     },
 
