@@ -62,7 +62,7 @@
     "url": "https://github.com/alsk1992/CloddsBot/issues"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.12.0"
   },
   "license": "MIT",
   "repository": {
