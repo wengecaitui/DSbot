@@ -47,6 +47,16 @@
 //     are intentionally absent from lifecycle input) but must be >= that last
 //     fill timestamp and <= `account.updatedAt`.
 //
+// Phase 6B Repair 4 (tiny-quantity weighted-average precision):
+//   - `entryNotionalUsd` and `exitPriceWeighted` are internal weighted-price
+//     NUMERATORS, not published USD ledger balances. They accumulate raw
+//     `quantity * price` products WITHOUT `roundUsd`, so a tiny but canonical
+//     quantity (e.g. 1e-12) cannot round its numerator to zero before the
+//     final division. Only the PUBLISHED average price is rounded to canonical
+//     USD precision.
+//   - Fail-closed: a positive entry/exit quantity can never publish a
+//     non-finite or non-positive corresponding average price.
+//
 // No network, no LLM, no execution, no storage writes, no Date.now, no
 // randomness. Identical inputs produce an identical deeply-frozen snapshot.
 // Caller-owned inputs are never mutated or frozen.
@@ -306,7 +316,7 @@ function newIncarnation(fill: PaperFill, sequence: number, side: 'long' | 'short
     signedQuantity: roundQuantity(signedQuantity),
     entryQuantity: roundQuantity(Math.abs(signedQuantity)),
     exitQuantity: 0,
-    entryNotionalUsd: roundUsd(Math.abs(signedQuantity) * fill.priceUsd),
+    entryNotionalUsd: Math.abs(signedQuantity) * fill.priceUsd,
     costBasisPriceUsd: roundUsd(fill.priceUsd),
     grossRealizedPnlUsd: 0,
     allocatedFeesUsd: roundUsd(entryFeeUsd),
@@ -471,7 +481,7 @@ export function computeTradeLifecycle(input: TradeLifecycleInput): TradeLifecycl
       );
       state.signedQuantity = roundQuantity(state.side === 'long' ? newAbs : -newAbs);
       state.entryQuantity = roundQuantity(state.entryQuantity + fill.quantity);
-      state.entryNotionalUsd = roundUsd(state.entryNotionalUsd + fill.quantity * fill.priceUsd);
+      state.entryNotionalUsd = state.entryNotionalUsd + fill.quantity * fill.priceUsd;
       state.allocatedFeesUsd = roundUsd(state.allocatedFeesUsd + fill.feeUsd);
       state.lastFillAt = fill.executedAt;
       state.legs.push(makeLeg(fill, sequence, fill.quantity, fill.feeUsd));
@@ -487,7 +497,7 @@ export function computeTradeLifecycle(input: TradeLifecycleInput): TradeLifecycl
       : (state.costBasisPriceUsd - fill.priceUsd) * closeQty;
     state.grossRealizedPnlUsd = roundUsd(state.grossRealizedPnlUsd + gross);
     state.exitQuantity = roundQuantity(state.exitQuantity + closeQty);
-    state.exitPriceWeighted = roundUsd(state.exitPriceWeighted + fill.priceUsd * closeQty);
+    state.exitPriceWeighted = state.exitPriceWeighted + fill.priceUsd * closeQty;
     state.lastExitAt = fill.executedAt;
     state.lastFillAt = fill.executedAt;
 
@@ -527,6 +537,18 @@ export function computeTradeLifecycle(input: TradeLifecycleInput): TradeLifecycl
       const averageExitPriceUsd = st.exitQuantity > 0
         ? roundUsd(st.exitPriceWeighted / st.exitQuantity)
         : null;
+      // Repair 4 fail-closed: a positive entry/exit quantity must never publish
+      // a non-finite or non-positive average price.
+      if (st.entryQuantity > 0 && (!Number.isFinite(averageEntryPriceUsd) || averageEntryPriceUsd <= 0)) {
+        throw new TradeLifecycleValidationError(
+          `trade ${st.symbol}: positive entry quantity ${st.entryQuantity} published non-finite/non-positive average entry ${averageEntryPriceUsd}`,
+        );
+      }
+      if (st.exitQuantity > 0 && (averageExitPriceUsd === null || !Number.isFinite(averageExitPriceUsd) || averageExitPriceUsd <= 0)) {
+        throw new TradeLifecycleValidationError(
+          `trade ${st.symbol}: positive exit quantity ${st.exitQuantity} published non-finite/non-positive average exit ${averageExitPriceUsd}`,
+        );
+      }
       const holdingDurationMs = closed ? st.lastExitAt - st.openedAt : null;
       if (holdingDurationMs !== null && holdingDurationMs < 0) {
         throw new TradeLifecycleTimeRegressionError(
