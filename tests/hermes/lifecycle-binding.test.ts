@@ -245,3 +245,56 @@ test('a failed delegate start leaves the lifecycle-health flag false (rollback m
   assert.equal(confirm.confirmed, false);
   assert.equal(confirm.reason, 'STOPPED');
 });
+
+test('a failed delegate stop revokes authorization at stop-begin: the prior receipt cannot authorize and stop stays retryable', async () => {
+  const coordinator = runningCoordinator();
+  let stopAttempts = 0;
+  const lifecycle = {
+    async start() {},
+    async stop() {
+      stopAttempts += 1;
+      if (stopAttempts === 1) throw new Error('delegate stop failed');
+    },
+  };
+  const bound = bindHandshakeToLifecycle(lifecycle, { coordinator });
+
+  // 1. Start successfully.
+  await bound.start();
+  assert.equal(coordinator.getSnapshot().state, 'running');
+  assert.equal(coordinator.getSnapshot().generation, 1);
+
+  // 2. Confirm health and obtain a real valid receipt.
+  const confirm = await coordinator.confirmHealth();
+  assert.equal(confirm.confirmed, true);
+  assert.ok(confirm.receipt);
+
+  // 3-4. Begin stop; the delegate stop throws.
+  await assert.rejects(bound.stop(), /delegate stop failed/);
+
+  // 5. The coordinator is now non-authorizing (fail-closed at stop-begin).
+  assert.equal(coordinator.getSnapshot().state, 'stopped');
+
+  // 6. The previously valid receipt cannot authorize an instruction pull.
+  const pull = await coordinator.pullInstruction(confirm.receipt as string);
+  assert.equal(pull.authorized, false);
+
+  // No new receipt may be issued either.
+  const reConfirm = await coordinator.confirmHealth();
+  assert.equal(reConfirm.confirmed, false);
+
+  // The failed stop must not spuriously advance the generation.
+  assert.equal(coordinator.getSnapshot().generation, 1);
+
+  // 7. A subsequent stop retry remains possible.
+  await bound.stop();
+  assert.equal(stopAttempts, 2);
+  assert.equal(coordinator.getSnapshot().state, 'stopped');
+
+  // 8. After successful stop + restart, normal generation behavior holds.
+  await bound.start();
+  assert.equal(coordinator.getSnapshot().state, 'running');
+  assert.equal(coordinator.getSnapshot().generation, 2);
+  const confirm2 = await coordinator.confirmHealth();
+  assert.equal(confirm2.confirmed, true);
+  assert.ok(confirm2.receipt);
+});

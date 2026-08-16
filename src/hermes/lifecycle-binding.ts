@@ -8,8 +8,11 @@
  *
  * - `coordinator.start()` runs only AFTER the delegate lifecycle start has
  *   fully succeeded (never on a partial/failed start).
- * - `coordinator.stop()` runs only AFTER the delegate lifecycle stop has
- *   succeeded.
+ * - `coordinator.stop()` (authorization revocation) runs at the BEGINNING of
+ *   stop, so a previously issued, fresh, unconsumed receipt cannot authorize
+ *   once stop begins — even if the delegate stop later throws. The onStop
+ *   hook still fires after a successful delegate stop (idempotent), leaving
+ *   the registry's conservative failed-stop retryability intact.
  * - A failed start leaves the coordinator stopped/non-authorizing, and stop
  *   preserves the Phase 7A generation + fail-closed invariants.
  *
@@ -84,6 +87,12 @@ export function bindHandshakeToLifecycle(
       }
     },
     async stop(): Promise<void> {
+      // Revoke authorization the moment authoritative stop begins: a
+      // previously issued, fresh, unconsumed receipt must not authorize even
+      // if the delegate stop later throws. Coordinator.stop() is idempotent
+      // and does not advance the generation, so the onStop hook (which fires
+      // again after a successful delegate stop) and a retried stop are safe.
+      await options.coordinator.stop();
       await adapted.stop();
     },
   };

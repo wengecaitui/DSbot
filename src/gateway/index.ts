@@ -2907,8 +2907,10 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       await channels?.stop();
       await feeds.stop();
       // Stop the authoritative HTTP gateway. The lifecycle binding (see the
-      // return value of createGateway) runs the handshake onStop hook
-      // (coordinator.stop()) after this delegate stop succeeds.
+      // return value of createGateway) already revoked coordinator
+      // authorization at the beginning of stop; the handshake onStop hook
+      // (coordinator.stop(), idempotent) still fires after this delegate stop
+      // succeeds.
       await httpGateway.stop();
       sessions.dispose();
       started = false;
@@ -2927,8 +2929,9 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   // Bind the handshake coordinator to the complete AppGateway lifecycle at the
   // return boundary. `bindHandshakeToLifecycle` adapts the full start/stop via
   // the Phase 7A LifecycleHookRegistry: coordinator.start() runs only after a
-  // fully successful start, coordinator.stop() after a successful stop, and a
-  // failed start triggers the compensating rollback that closes the HTTP
+  // fully successful start, coordinator.stop() (authorization revocation) runs
+  // at the beginning of stop so no receipt can authorize once stop begins, and
+  // a failed start triggers the compensating rollback that closes the HTTP
   // listener (so the lifecycle truth stays consistent and a later start is
   // retryable) while leaving the coordinator stopped/non-authorizing.
   return bindHandshakeToLifecycle(baseGateway, {
