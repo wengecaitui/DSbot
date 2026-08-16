@@ -71,3 +71,41 @@ export {
   type HealthCollector,
   type InstructionSupplier,
 } from './handshake-coordinator';
+
+export {
+  bindHandshakeToLifecycle,
+  DEFAULT_HANDSHAKE_HOOK_NAME,
+  type BoundLifecycle,
+  type LifecycleBindingOptions,
+} from './lifecycle-binding';
+
+export {
+  createLifecycleHealthFlag,
+  type LifecycleHealthFlag,
+} from './lifecycle-health';
+
+// Phase 7B — gateway transport and dedicated bridge authentication.
+export {
+  createBridgeAuthenticator,
+  type BridgeAuthDecision,
+  type BridgeAuthenticator,
+  type BridgeAuthenticatorOptions,
+} from './auth';
+
+export {
+  createHttpFlushSink,
+  type HttpFlushSinkOptions,
+} from './flush-sink';
+
+export {
+  createHermesTransport,
+  DEFAULT_MAX_RECEIPT_LENGTH,
+  HERMES_HEALTH_ROUTE,
+  HERMES_INSTRUCTION_ROUTE,
+  HERMES_MOUNT_PATH,
+  HERMES_STATE_ROUTE,
+  pullRejectionStatus,
+  validateReceiptMaterial,
+  type HermesStateResponse,
+  type HermesTransportOptions,
+} from './transport';

@@ -61,6 +61,7 @@ export interface GatewayServer {
   setEmbeddingsRouter(router: Router | null): void;
   setCronRouter(router: Router | null): void;
   setLaunchRouter(router: Router | null): void;
+  setHermesRouter(router: Router | null): void;
   setCommandListHandler(handler: CommandListHandler | null): void;
   setHooksHandler(handler: HooksHandler | null): void;
   setOnSessionDelete(handler: ((key: string) => void) | null): void;
@@ -2819,6 +2820,13 @@ export function createServer(
     setLaunchRouter(router: Router | null): void {
       if (router) {
         app.use('/api/launch', requireAuth, router);
+      }
+    },
+    // Phase 7B Hermes transport mounts WITHOUT requireAuth: it enforces its own
+    // dedicated, fail-closed HERMES_BRIDGE_TOKEN auth inside the router.
+    setHermesRouter(router: Router | null): void {
+      if (router) {
+        app.use('/api/hermes', router);
       }
     },
     setCommandListHandler(handler: CommandListHandler | null): void {

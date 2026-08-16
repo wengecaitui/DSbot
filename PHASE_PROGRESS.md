@@ -17,7 +17,7 @@
 | 4 | Python 桥接层 | P1 | ⏳框架就绪 | 90% |
 | 5 | Freqtrade 数据层整合 | P1 | 🔲待开始 | 0% |
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
-| 7 | Hermes 握手协议 | P1 | 🔲待开始 | 0% |
+| 7 | Hermes 握手协议（7A 完成 / 7B 进行中 / 7C 计划） | P1 | ⏳进行中 | 35% |
 | 8 | 功能模块接入 | P2 | ⏳部分就绪 | 25% |
 | 9 | 系统集成 | P2 | 🔲待开始 | 0% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
@@ -186,24 +186,44 @@
 
 ---
 
-## Phase 7 — Hermes 握手协议 🆕
+## Phase 7 — Hermes 握手协议 ⏳（7A 完成 / 7B 进行中 / 7C 计划）
 
-### 7.1 CloddsBot 生命周期钩子 🔲
-- 🔲 启动 / 停止 / 健康检查事件
-- 🔲 Lifecycle Hooks 注册器
+> Phase 7 拆分为三个明确子阶段：**7A**（握手契约与生命周期核心，已合并）、
+> **7B**（绑定握手核心到权威网关传输，进行中）、**7C**（只读运维可观测 Web 看板，计划）。
 
-### 7.2 Hermes 触发时先发健康检查 → CloddsBot 确认 → 再拉指令 🔲
-- 🔲 健康检查 endpoint（CloddsBot 侧）
-- 🔲 Hermes 端确认逻辑
-- 🔲 超时熔断
+### Phase 7A — Hermes 握手契约与生命周期核心 ✅ 已合并
 
-### 7.3 自动 Flush 机制（CloddsBot 主动通知 Hermes 刷新配置）🔲
-- 🔲 配置变更通知 channel
-- 🔲 Hermes 监听器
+- **PR**: #118（`feat(hermes): Phase 7A handshake contract and lifecycle core`）
+- **批准 head**: `ccacd2015abb8c04352131c991d08fb1e6df6470`
+- **合并提交**: `dfa04607b65195aa208868b7cc5570d9365ea772`
+- **落地组件**（`src/hermes/`）:
+  - `createHandshakeCoordinator` — 健康优先的拉取授权状态机（单次收据 / TTL / generation / 容量 / 超时 / 熔断）
+  - `createLifecycleHookRegistry` — 绑定现有网关生命周期的类型化钩子注册器
+  - `createFlushNotifier` — 严格单调的配置 flush 通知契约（可注入 sink，默认 fail-closed）
+  - `createHandshakeCircuitBreaker` — 健康确认专用 fail-closed 熔断器
+- **测试**: 63 个 Phase 7A Hermes 测试全部通过
 
-### 7.4 失败熔断 🔲
-- 🔲 Hermes 读不到确认信号时不发交易指令
-- 🔲 Circuit Breaker
+### Phase 7B — 绑定 Hermes 握手核心到权威网关传输 ⏳ 进行中
+
+- 将 Phase 7A 的 `LifecycleHookRegistry` / `HandshakeCoordinator` 绑定到唯一的应用生命周期
+  事实（`createGateway()` 及其返回的 `AppGateway` start/stop），不引入第二个生命周期真相。
+- 在现有 Express 网关（`src/gateway/server.ts`）上新增窄而专用的 Hermes HTTP 传输
+  （`/api/hermes`），仅提供三个端点：
+  - 认证健康确认 / 收据签发
+  - 认证单次收据指令拉取
+  - 认证无收据状态 / 诊断快照（仅计数与状态）
+- 独立于开发友好型 `requireAuth` 的专用凭证（`HERMES_BRIDGE_TOKEN`），
+  仅 Authorization Bearer header，常数时间比较，绝不记录 token / 收据 / 指令。
+- 生产指令供给保持 fail-closed（本阶段不接任何真实交易指令源，不运行 Paper/Testnet/Live）。
+- 配置热重载成功后触发一次严格单调 flush 通知；失败重载不 flush。
+  （Hermes 0.20.0 无专用 config-flush 监听端点，不误用 chat/responses//v1/runs。）
+
+### Phase 7C — 只读运维 / 交易可观测 Web 看板 📋 计划
+
+- **定位**: Phase 7B 合并后启动的只读 Web 看板（V1）。
+- **范围**: 系统健康、Hermes 状态、市场数据、持仓、PnL、风控与事件流。
+- **明确排除（V1）**: 无 start / stop / order / trading 任何控制端点。
+- **时序与验收门禁**: 不承诺固定日历日期；在 7B 合并并通过验收后按序启动。
 
 ---
 
