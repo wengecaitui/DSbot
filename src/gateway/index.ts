@@ -75,6 +75,15 @@ import { createBotManager, createMeanReversionStrategy, createMomentumStrategy, 
 import { createStrategyBuilder, type StrategyBuilder } from '../trading/builder';
 import { createTradeLogger, type TradeLogger } from '../trading/logger';
 import { createMMStrategy, type MMConfig } from '../trading/market-making';
+import {
+  bindHandshakeToLifecycle,
+  createBridgeAuthenticator,
+  createFlushNotifier,
+  createHandshakeCoordinator,
+  createHermesTransport,
+  createHttpFlushSink,
+  createLifecycleHealthFlag,
+} from '../hermes';
 
 // =============================================================================
 // TYPES
@@ -482,6 +491,48 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     webhookManager,
     db
   );
+
+  // ── Phase 7B: bind the Hermes handshake core to the gateway lifecycle ─────
+  // The coordinator is the single source of Hermes authorizing state and is
+  // started/stopped in lockstep with the authoritative gateway lifecycle (see
+  // start()/stop() below). Its health dependency and instruction supplier are
+  // deliberately NOT wired to any trading source in this phase: the health
+  // collector reflects ONLY the authoritative application lifecycle via a
+  // fail-closed lifecycle-health flag (false until the full start succeeds,
+  // false again at the beginning of stop), and the instruction supplier stays
+  // fail-closed (no real instruction source).
+  const lifecycleHealth = createLifecycleHealthFlag();
+  const hermesCoordinator = createHandshakeCoordinator({
+    healthCollector: () => (lifecycleHealth.isHealthy() ? 'healthy' : 'unhealthy'),
+  });
+  // Outbound config-flush transport is injectable and fail-closed by default:
+  // only an explicit HERMES_FLUSH_URL installs a real sink; otherwise flushes
+  // remain unacknowledged. The notifier enforces strict monotonic revisions.
+  const hermesFlushUrl = process.env.HERMES_FLUSH_URL;
+  const hermesNotifier = createFlushNotifier({
+    sink:
+      typeof hermesFlushUrl === 'string' && hermesFlushUrl.trim().length > 0
+        ? createHttpFlushSink(hermesFlushUrl.trim())
+        : undefined,
+  });
+  const hermesAuthenticator = createBridgeAuthenticator({
+    token: process.env.HERMES_BRIDGE_TOKEN,
+  });
+  const hermesTransport = createHermesTransport({
+    coordinator: hermesCoordinator,
+    notifier: hermesNotifier,
+    authenticator: hermesAuthenticator,
+  });
+  httpGateway.setHermesRouter(hermesTransport);
+
+  // Bind the handshake coordinator to the authoritative APPLICATION lifecycle
+  // at the return boundary (see `bindHandshakeToLifecycle` below): the Phase 7A
+  // LifecycleHookRegistry adapts the complete AppGateway start/stop — NOT
+  // merely the HTTP listener — so coordinator.start() runs only after every
+  // later start step (feeds, channels, cron, trackers, recorder, alt-data, ...)
+  // has succeeded. A failed start leaves the coordinator stopped/non-authorizing
+  // AND triggers a compensating rollback that closes the HTTP listener so the
+  // lifecycle truth stays consistent and the next start is retryable.
 
   let channels: Awaited<ReturnType<typeof createChannelManager>> | null = null;
   let triggerManager: import('../execution/trigger-orders').TriggerOrderManager | null = null;
@@ -1745,6 +1796,14 @@ export async function createGateway(config: Config): Promise<AppGateway> {
           await rebuildRuntime('config change', workspaceChanged);
 
           logger.info({ configPath }, 'Config hot-reloaded');
+
+          // Phase 7B: notify Hermes only after a successful authoritative
+          // config reload. The flush notifier advances a strictly monotonic
+          // revision and delivers via the injected sink (or stays
+          // unacknowledged fail-closed when none is configured). A failed
+          // reload (loadConfig/reloadConfig throws) lands in the catch below
+          // and triggers NO flush.
+          await hermesNotifier.flush();
         } catch (error) {
           logger.error({ error, configPath }, 'Failed to hot-reload config');
         }
@@ -2484,7 +2543,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   });
   httpGateway.setTradingApiRouter(tradingApiRouter);
 
-  return {
+  const baseGateway: AppGateway = {
     async start(): Promise<void> {
       logger.info('Starting gateway services');
 
@@ -2663,11 +2722,26 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       setupSkillWatcher();
       setupConfigWatcher();
 
+      // The full application start has succeeded — flip the authoritative
+      // lifecycle-health flag so the Hermes health collector reports healthy
+      // (and only from this point can a health receipt be issued). This is the
+      // FINAL state mutation, after every potentially throwing startup
+      // operation, so a later synchronous start failure can never leave the
+      // flag true (false after failed start, true only after full start).
+      lifecycleHealth.markHealthy();
+
       logger.info({ port: currentConfig.gateway.port }, 'Gateway started');
     },
 
     async stop(): Promise<void> {
       logger.info('Stopping gateway services');
+
+      // Flip the lifecycle-health flag false at the BEGINNING of stop so the
+      // Hermes health collector reports unhealthy and no receipt can be issued
+      // during the (potentially long) shutdown window, even though the
+      // coordinator's onStop hook does not fire until the delegate stop below
+      // completes.
+      lifecycleHealth.markUnhealthy();
 
       if (heartbeatService) {
         heartbeatService.stop();
@@ -2832,6 +2906,11 @@ export async function createGateway(config: Config): Promise<AppGateway> {
 
       await channels?.stop();
       await feeds.stop();
+      // Stop the authoritative HTTP gateway. The lifecycle binding (see the
+      // return value of createGateway) already revoked coordinator
+      // authorization at the beginning of stop; the handshake onStop hook
+      // (coordinator.stop(), idempotent) still fires after this delegate stop
+      // succeeds.
       await httpGateway.stop();
       sessions.dispose();
       started = false;
@@ -2846,4 +2925,27 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       logger.info('Gateway stopped');
     },
   };
+
+  // Bind the handshake coordinator to the complete AppGateway lifecycle at the
+  // return boundary. `bindHandshakeToLifecycle` adapts the full start/stop via
+  // the Phase 7A LifecycleHookRegistry: coordinator.start() runs only after a
+  // fully successful start, coordinator.stop() (authorization revocation) runs
+  // at the beginning of stop so no receipt can authorize once stop begins, and
+  // a failed start triggers the compensating rollback that closes the HTTP
+  // listener (so the lifecycle truth stays consistent and a later start is
+  // retryable) while leaving the coordinator stopped/non-authorizing.
+  return bindHandshakeToLifecycle(baseGateway, {
+    coordinator: hermesCoordinator,
+    onStartFailure: async () => {
+      // A failed start must leave the lifecycle-health flag false. Mark it
+      // unhealthy BEFORE rolling back so a partial start that (incorrectly)
+      // flipped it true cannot retain stale health through the rollback.
+      lifecycleHealth.markUnhealthy();
+      try {
+        await httpGateway.stop();
+      } catch (error) {
+        logger.warn({ error }, 'Failed to roll back HTTP gateway after partial start');
+      }
+    },
+  });
 }
