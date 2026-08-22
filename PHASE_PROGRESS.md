@@ -17,7 +17,7 @@
 | 4 | Python 桥接层 | P1 | ⏳框架就绪 | 90% |
 | 5 | Freqtrade 数据层整合 | P1 | 🔲待开始 | 0% |
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
-| 7 | Hermes 握手 + Quant Terminal（7A/7B 已合并；7C 契约门进行中，UI 未开始） | P1 | ⏳进行中 | 70% |
+| 7 | Hermes 握手 + Quant Terminal（7A/7B 已合并；7C V1 Draft PR 实现中） | P1 | ⏳进行中 | 85% |
 | 8 | 功能模块接入 | P2 | ⏳部分就绪 | 25% |
 | 9 | 系统集成 | P2 | 🔲待开始 | 0% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
@@ -186,11 +186,11 @@
 
 ---
 
-## Phase 7 — Hermes 握手协议 + Quant Terminal ⏳（7A/7B 已合并；7C 契约门）
+## Phase 7 — Hermes 握手协议 + Quant Terminal ⏳（7A/7B 已合并；7C V1 实现）
 
 > Phase 7 拆分为三个明确子阶段：**7A**（握手契约与生命周期核心，已合并）、
 > **7B**（绑定握手核心到权威网关传输，已合并）、**7C**（只读 Trading & Research
-> Workbench；先完成契约门，网页实现需后续明确授权）。
+> Workbench；契约门已通过，V1 实现进入 Draft PR 审核）。
 
 ### Phase 7A — Hermes 握手契约与生命周期核心 ✅ 已合并
 
@@ -223,9 +223,10 @@
 - 配置热重载成功后触发一次严格单调 flush 通知；失败重载不 flush。
   （Hermes 0.20.0 无专用 config-flush 监听端点，不误用 chat/responses//v1/runs。）
 
-### Phase 7C — DSbot Quant Terminal（只读 Trading & Research Workbench）📝 契约门
+### Phase 7C — DSbot Quant Terminal（只读 Trading & Research Workbench）⏳ V1 实现
 
-- **当前状态**: 契约冻结交付中；React/UI 实现尚未开始，也未获本阶段授权。
+- **当前状态**: 已获 implementation 授权；React/TypeScript/Vite/TanStack Query
+  展示层、共享类型化查询层和 GET-only API 已实现，等待 Draft PR 审核，尚未合并。
 - **V1 信息架构**: Overview / Market / Trading / Research / AI-Policy / Safety /
   Operations / Data / Settings；相关子域使用页内 tab，Project Control Center 保持
   Operations / Engineering Evidence。
@@ -235,12 +236,20 @@
 - **研究边界**: 预留 Provider → Normalizer → Canonical Research Dataset → Research
   Storage/Compute → Evidence 的扩展点；A 股/抓取/AI 数据不得直达 OMS，也不得成为
   Recovery、Reconciliation 或 LIVE_READY 证据。
+- **已实现路由域**: Overview / Market / Trading / Research / Policy / Safety /
+  Operations / Data / Settings；相关子域使用页内 tab，Project Control Center 保持在
+  Operations / Engineering Evidence。
+- **只读传输**: `/api/workbench/v1` 仅注册 GET 资源；POST / PUT / PATCH / DELETE
+  返回 405，且不能触发读提供者或任何执行路径。
 - **明确排除（V1）**: 无 start / stop / order / close / retry / risk-limit /
-  reconcile / live-ready 等控制能力；不安装前端依赖，不实现 DataHub、Docking、
-  A 股 Provider、优化器、工作流编辑器或 MCP 扩展。
+  reconcile / live-ready 等控制能力；不实现 DataHub、Docking、A 股 Provider、
+  优化器、工作流编辑器或 MCP 扩展。
+- **运行时约束**: 当前应用网关并不持有 `ProductionSpine`，因此网关适配器不创建第二个
+  spine；未挂载的 Market / Position / OMS / Accounting / Safety 权威来源在 UI 中明确
+  显示 `UNAVAILABLE` / `UNKNOWN`，绝不伪造健康、空仓或 `LIVE_READY`。
 - **契约文档**: `docs/phase-7c-read-only-workbench-contract.md`。
-- **下一门禁**: 只有收到“进入 Phase 7C implementation”或明确等价授权后，才开始
-  `web/` 展示层与只读 API 实现。
+- **下一门禁**: 通过独立审核并明确合并授权后才能合并；本分支和 Draft PR 不改变
+  Paper / Testnet / Live 权限，也不宣称 Phase 7C 已关闭。
 
 ---
 

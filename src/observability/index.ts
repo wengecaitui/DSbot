@@ -96,3 +96,13 @@ export {
   WORKBENCH_V1_READ_RESOURCES,
   WORKBENCH_V1_ROUTES,
 } from './workbench-contract';
+export type {
+  DataOverviewSnapshot,
+  DataSourceEvidence,
+  PolicyOverviewSnapshot,
+  RuntimeReadEvidence,
+  WorkbenchReadAdapter,
+  WorkbenchReadAdapterOptions,
+  WorkbenchStatusResponse,
+} from './workbench-read-adapter';
+export { createWorkbenchReadAdapter } from './workbench-read-adapter';
