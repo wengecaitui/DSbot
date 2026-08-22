@@ -61,3 +61,38 @@ export type {
 export { createHermesRuntimeAdapter } from './adapters/hermes-runtime-adapter';
 export type { DashboardServerOptions, ObservabilityDashboardServer } from './dashboard/dashboard-server';
 export { createObservabilityDashboardServer } from './dashboard/dashboard-server';
+export type {
+  AccountOverviewSnapshot,
+  ActivityOverviewSnapshot,
+  KillSwitchDisplay,
+  LiveReadinessDisplay,
+  MarketOverviewSnapshot,
+  MarketRegimeEvidence,
+  OperationsOverviewSnapshot,
+  PersistentTerminalStatusSnapshot,
+  PositionOverviewRecord,
+  ReadOnlyResearchJobStatus,
+  ReadOnlySnapshot,
+  ResearchEvidenceKind,
+  ResearchEvidenceSummary,
+  ResearchJobState,
+  ResearchOverviewSnapshot,
+  ResearchProviderStatus,
+  RuntimeHealth,
+  RuntimeOverviewSnapshot,
+  SafetyOverviewSnapshot,
+  SnapshotAvailability,
+  SnapshotFreshness,
+  SnapshotProvenance,
+  TradingEnvironment,
+  TradingOverviewSnapshot,
+  WorkbenchOverviewInput,
+  WorkbenchOverviewSnapshot,
+} from './workbench-contract';
+export {
+  createWorkbenchOverviewSnapshot,
+  WORKBENCH_V1_AUTHORITY_MAP,
+  WORKBENCH_V1_BOUNDARIES,
+  WORKBENCH_V1_READ_RESOURCES,
+  WORKBENCH_V1_ROUTES,
+} from './workbench-contract';
