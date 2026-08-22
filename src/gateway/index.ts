@@ -84,6 +84,8 @@ import {
   createHttpFlushSink,
   createLifecycleHealthFlag,
 } from '../hermes';
+import { createWorkbenchReadAdapter } from '../observability/workbench-read-adapter';
+import { createWorkbenchRouter } from './workbench-routes';
 
 // =============================================================================
 // TYPES
@@ -524,6 +526,16 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     authenticator: hermesAuthenticator,
   });
   httpGateway.setHermesRouter(hermesTransport);
+  const workbenchReadAdapter = createWorkbenchReadAdapter({
+    now: () => Date.now(),
+    runtime: () => ({
+      health: lifecycleHealth.isHealthy() ? 'HEALTHY' : 'UNHEALTHY',
+      environment: 'unknown',
+      mode: 'application-gateway',
+    }),
+    hermes: () => hermesCoordinator.getSnapshot(),
+  });
+  httpGateway.setWorkbenchRouter(createWorkbenchRouter(workbenchReadAdapter));
 
   // Bind the handshake coordinator to the authoritative APPLICATION lifecycle
   // at the return boundary (see `bindHandshakeToLifecycle` below): the Phase 7A
