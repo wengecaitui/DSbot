@@ -17,7 +17,7 @@
 | 4 | Python 桥接层 | P1 | ⏳框架就绪 | 90% |
 | 5 | Freqtrade 数据层整合 | P1 | 🔲待开始 | 0% |
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
-| 7 | Hermes 握手协议（7A 完成 / 7B 进行中 / 7C 计划） | P1 | ⏳进行中 | 35% |
+| 7 | Hermes 握手 + Quant Terminal（7A/7B 已合并；7C 契约门进行中，UI 未开始） | P1 | ⏳进行中 | 70% |
 | 8 | 功能模块接入 | P2 | ⏳部分就绪 | 25% |
 | 9 | 系统集成 | P2 | 🔲待开始 | 0% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
@@ -186,10 +186,11 @@
 
 ---
 
-## Phase 7 — Hermes 握手协议 ⏳（7A 完成 / 7B 进行中 / 7C 计划）
+## Phase 7 — Hermes 握手协议 + Quant Terminal ⏳（7A/7B 已合并；7C 契约门）
 
 > Phase 7 拆分为三个明确子阶段：**7A**（握手契约与生命周期核心，已合并）、
-> **7B**（绑定握手核心到权威网关传输，进行中）、**7C**（只读运维可观测 Web 看板，计划）。
+> **7B**（绑定握手核心到权威网关传输，已合并）、**7C**（只读 Trading & Research
+> Workbench；先完成契约门，网页实现需后续明确授权）。
 
 ### Phase 7A — Hermes 握手契约与生命周期核心 ✅ 已合并
 
@@ -203,7 +204,11 @@
   - `createHandshakeCircuitBreaker` — 健康确认专用 fail-closed 熔断器
 - **测试**: 63 个 Phase 7A Hermes 测试全部通过
 
-### Phase 7B — 绑定 Hermes 握手核心到权威网关传输 ⏳ 进行中
+### Phase 7B — 绑定 Hermes 握手核心到权威网关传输 ✅ 已合并
+
+- **PR**: #119（`Phase 7B — Hermes Gateway Production Wiring`）
+- **批准 head**: `f8219b8a78bb753dbf51fc7acc498853dee73587`
+- **合并提交**: `c4dc26910e84677ec7ca7cb261d2ccf44772297c`
 
 - 将 Phase 7A 的 `LifecycleHookRegistry` / `HandshakeCoordinator` 绑定到唯一的应用生命周期
   事实（`createGateway()` 及其返回的 `AppGateway` start/stop），不引入第二个生命周期真相。
@@ -218,12 +223,24 @@
 - 配置热重载成功后触发一次严格单调 flush 通知；失败重载不 flush。
   （Hermes 0.20.0 无专用 config-flush 监听端点，不误用 chat/responses//v1/runs。）
 
-### Phase 7C — 只读运维 / 交易可观测 Web 看板 📋 计划
+### Phase 7C — DSbot Quant Terminal（只读 Trading & Research Workbench）📝 契约门
 
-- **定位**: Phase 7B 合并后启动的只读 Web 看板（V1）。
-- **范围**: 系统健康、Hermes 状态、市场数据、持仓、PnL、风控与事件流。
-- **明确排除（V1）**: 无 start / stop / order / trading 任何控制端点。
-- **时序与验收门禁**: 不承诺固定日历日期；在 7B 合并并通过验收后按序启动。
+- **当前状态**: 契约冻结交付中；React/UI 实现尚未开始，也未获本阶段授权。
+- **V1 信息架构**: Overview / Market / Trading / Research / AI-Policy / Safety /
+  Operations / Data / Settings；相关子域使用页内 tab，Project Control Center 保持
+  Operations / Engineering Evidence。
+- **真相边界**: 复用 Market / Position / OMS / RuntimeAccounting / TradeLifecycle /
+  Recovery / Reconciliation / LIVE_READY / Hermes 的现有权威读面；浏览器只渲染
+  确定性只读投影，不创建第二套交易真相。
+- **研究边界**: 预留 Provider → Normalizer → Canonical Research Dataset → Research
+  Storage/Compute → Evidence 的扩展点；A 股/抓取/AI 数据不得直达 OMS，也不得成为
+  Recovery、Reconciliation 或 LIVE_READY 证据。
+- **明确排除（V1）**: 无 start / stop / order / close / retry / risk-limit /
+  reconcile / live-ready 等控制能力；不安装前端依赖，不实现 DataHub、Docking、
+  A 股 Provider、优化器、工作流编辑器或 MCP 扩展。
+- **契约文档**: `docs/phase-7c-read-only-workbench-contract.md`。
+- **下一门禁**: 只有收到“进入 Phase 7C implementation”或明确等价授权后，才开始
+  `web/` 展示层与只读 API 实现。
 
 ---
 
