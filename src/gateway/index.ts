@@ -28,6 +28,7 @@ import { initDCAPersistence } from '../execution/dca-persistence';
 import { createFeedManager } from '../feeds';
 import { createSessionManager } from '../sessions';
 import { createAgentManager } from '../agents';
+import { setDirectExchangeExecutionQuarantined } from '../agents/handlers/direct-exchange-execution';
 import { createChannelManager } from '../channels';
 import { createPairingService } from '../pairing';
 import { createMemoryService } from '../memory';
@@ -88,7 +89,7 @@ import { createWorkbenchReadAdapter } from '../observability/workbench-read-adap
 import { createWorkbenchRouter } from './workbench-routes';
 import {
   createApplicationProductionRuntimeOwner,
-  type ProductionRuntimeReadView,
+  type ProductionRuntimePublicReadView,
 } from '../runtime/production/ProductionRuntimeOwner';
 
 // =============================================================================
@@ -430,8 +431,8 @@ export function createGatewayServer(config?: GatewayConfig): GatewayServer {
 }
 
 export interface AppGateway {
-  /** Read-only Phase 8A evidence. Lifecycle remains owned by start/stop. */
-  readonly productionRuntime: ProductionRuntimeReadView;
+  /** Read-only Phase 8A evidence. Never exposes the mutable ProductionSpine. */
+  readonly productionRuntime: ProductionRuntimePublicReadView;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -455,6 +456,13 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   let currentConfig = config;
   const productionRuntimeOwner = createApplicationProductionRuntimeOwner(config.productionRuntime);
   const legacyExecutionAllowed = productionRuntimeOwner.legacyWrites.mode !== 'QUARANTINED';
+  if (!legacyExecutionAllowed) {
+    // Phase 8A no-dual-execution-authority: fail closed any Agent handler that
+    // trades directly against exchange credentials instead of routing through
+    // the authoritative ProductionSpine -> PreTradeRiskGateway -> OMS path.
+    setDirectExchangeExecutionQuarantined('binance', true);
+    setDirectExchangeExecutionQuarantined('bybit', true);
+  }
   configureHttpClient(currentConfig.http);
   const configPath = process.env.CLODDS_CONFIG_PATH || CONFIG_FILE;
   const db = await initDatabase();
@@ -542,7 +550,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       mode: 'application-gateway',
     }),
     hermes: () => hermesCoordinator.getSnapshot(),
-    productionSpine: productionRuntimeOwner.read.productionSpine,
+    productionSpine: productionRuntimeOwner.authoritativeSpine,
     recovery: productionRuntimeOwner.read.recovery,
   });
   httpGateway.setWorkbenchRouter(createWorkbenchRouter(workbenchReadAdapter));

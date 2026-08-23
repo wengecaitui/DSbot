@@ -16,6 +16,13 @@ import {
   type ProductionRuntimeConfig,
 } from '../../src/runtime/production/ProductionRuntimeOwner';
 import { LEGACY_WRITE_CAPABLE_PATHS } from '../../src/runtime/production/ProductionRuntimeCompositionContract';
+import { binanceHandlers } from '../../src/agents/handlers/binance';
+import { bybitHandlers } from '../../src/agents/handlers/bybit';
+import {
+  isDirectExchangeExecutionQuarantined,
+  setDirectExchangeExecutionQuarantined,
+} from '../../src/agents/handlers/direct-exchange-execution';
+import type { HandlerContext } from '../../src/agents/handlers/types';
 
 interface CollectorProbe {
   readonly collector: MarketDataCollectorPort;
@@ -23,7 +30,7 @@ interface CollectorProbe {
   readonly stops: () => number;
 }
 
-function collectorProbe(startError?: Error): CollectorProbe {
+function collectorProbe(startError?: Error, stopError?: Error): CollectorProbe {
   let starts = 0;
   let stops = 0;
   let tickerHandler: Parameters<MarketDataCollectorPort['onTicker']>[0] | null = null;
@@ -34,7 +41,10 @@ function collectorProbe(startError?: Error): CollectorProbe {
         starts += 1;
         if (startError) throw startError;
       },
-      stop() { stops += 1; },
+      stop() {
+        stops += 1;
+        if (stopError) throw stopError;
+      },
       onTicker(handler) { tickerHandler = handler; },
       onKline(handler) { klineHandler = handler; },
     },
@@ -106,16 +116,16 @@ describe('Phase 8A application production runtime owner', () => {
     });
 
     try {
-      assert.equal(owner.read.productionSpine(), null);
+      assert.equal(owner.authoritativeSpine(), null);
       assert.deepEqual(Object.keys(owner.read).sort(), [
-        'identity', 'productionSpine', 'reconciliation', 'recovery', 'status',
+        'identity', 'reconciliation', 'recovery', 'status',
       ]);
       await owner.start();
 
       assert.equal(creations, 1);
       assert.ok(authoritative);
       for (let read = 0; read < 20; read += 1) {
-        assert.strictEqual(owner.read.productionSpine(), authoritative);
+        assert.strictEqual(owner.authoritativeSpine(), authoritative);
       }
       assert.equal(owner.read.status().spineCreations, 1);
       assert.equal(owner.read.status().state, 'READY_FOR_MARKET');
@@ -130,11 +140,11 @@ describe('Phase 8A application production runtime owner', () => {
       assert.equal(creations, 1, 'repeated owner start cannot create a second spine');
       await assert.rejects(() => secondOwner.start(), /SECOND_PRODUCTION_RUNTIME_OWNER_FORBIDDEN/);
       assert.equal(secondOwner.read.status().spineCreations, 0);
-      assert.equal(secondOwner.read.productionSpine(), null);
+      assert.equal(secondOwner.authoritativeSpine(), null);
 
       await owner.stop();
       await owner.stop();
-      assert.equal(owner.read.productionSpine(), null);
+      assert.equal(owner.authoritativeSpine(), null);
       assert.equal(probe.stops(), 1);
       assert.equal(owner.read.status().state, 'STOPPED');
     } finally {
@@ -149,7 +159,7 @@ describe('Phase 8A application production runtime owner', () => {
     const absent = createApplicationProductionRuntimeOwner(undefined);
     await absent.start();
     assert.equal(absent.read.status().state, 'NOT_CONFIGURED');
-    assert.equal(absent.read.productionSpine(), null);
+    assert.equal(absent.authoritativeSpine(), null);
 
     const dir = mkdtempSync(join(tmpdir(), 'phase8a-invalid-'));
     try {
@@ -175,7 +185,7 @@ describe('Phase 8A application production runtime owner', () => {
       await zeroRisk.start();
       assert.equal(zeroRisk.read.status().state, 'NOT_CONFIGURED');
       assert.match(zeroRisk.read.status().reason ?? '', /PLACEHOLDER_REJECTED/);
-      assert.equal(zeroRisk.read.productionSpine(), null);
+      assert.equal(zeroRisk.authoritativeSpine(), null);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -229,7 +239,7 @@ describe('Phase 8A application production runtime owner', () => {
     try {
       await assert.rejects(() => owner.start(), /JOURNAL_OPEN_FAILED/);
       assert.equal(creations, 0);
-      assert.equal(owner.read.productionSpine(), null);
+      assert.equal(owner.authoritativeSpine(), null);
       assert.equal(owner.read.status().state, 'RECOVERY_FAILED');
     } finally {
       await owner.stop();
@@ -252,7 +262,7 @@ describe('Phase 8A application production runtime owner', () => {
     try {
       await assert.rejects(() => owner.start(), /PAPER_LEDGER_OPEN_FAILED/);
       assert.equal(creations, 0);
-      assert.equal(owner.read.productionSpine(), null);
+      assert.equal(owner.authoritativeSpine(), null);
       assert.equal(owner.read.status().state, 'RECOVERY_FAILED');
     } finally {
       await owner.stop();
@@ -275,7 +285,7 @@ describe('Phase 8A application production runtime owner', () => {
       await assert.rejects(() => owner.start(), /COLLECTOR_START_FAILED/);
       assert.ok(captured);
       assert.equal(owner.read.status().state, 'MARKET_FAILED');
-      assert.equal(owner.read.productionSpine(), null);
+      assert.equal(owner.authoritativeSpine(), null);
       assert.equal(captured.protection.getMode(), 'replay');
       assert.equal(probe.starts(), 1);
       assert.equal(probe.stops(), 1);
@@ -296,7 +306,7 @@ describe('Phase 8A application production runtime owner', () => {
 
     const gatewaySource = readFileSync('src/gateway/index.ts', 'utf8');
     assert.match(gatewaySource, /createApplicationProductionRuntimeOwner\(config\.productionRuntime\)/);
-    assert.match(gatewaySource, /productionSpine: productionRuntimeOwner\.read\.productionSpine/);
+    assert.match(gatewaySource, /productionSpine: productionRuntimeOwner\.authoritativeSpine/);
     assert.match(gatewaySource, /recovery: productionRuntimeOwner\.read\.recovery/);
     assert.match(gatewaySource, /await productionRuntimeOwner\.start\(\)/);
     assert.match(gatewaySource, /await productionRuntimeOwner\.stop\(\)/);
@@ -305,6 +315,114 @@ describe('Phase 8A application production runtime owner', () => {
     assert.match(gatewaySource, /legacyExecutionAllowed && config\.arbitrageExecution\?\.enabled/);
     assert.match(gatewaySource, /legacyExecutionAllowed && signalRouterCfg\?\.enabled/);
     assert.match(gatewaySource, /if \(legacyExecutionAllowed\) \{\s*httpGateway\.setDCARouter/);
+  });
+
+  it('publishes a spine-free public read view while Workbench retains the exact spine internally', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'phase8a-public-view-'));
+    const probe = collectorProbe();
+    let authoritative: ProductionSpine | null = null;
+    const owner = createApplicationProductionRuntimeOwner(runtimeConfig(dir, 'public_view_owner'), {
+      ...marketOverride(probe),
+      async createSpine(config) {
+        authoritative = await createProductionSpine(config);
+        return authoritative;
+      },
+    });
+    try {
+      await owner.start();
+      assert.ok(authoritative);
+
+      // Public read surface exposes evidence only — no spine, no mutable authority.
+      assert.equal('productionSpine' in owner.read, false);
+      assert.equal((owner.read as unknown as Record<string, unknown>).productionSpine, undefined);
+      assert.deepEqual(Object.keys(owner.read).sort(), ['identity', 'reconciliation', 'recovery', 'status']);
+      for (const mutable of ['kernel', 'oms', 'adapter', 'service', 'protection', 'stores', 'policyStore', 'positionStore']) {
+        assert.equal((owner.read as unknown as Record<string, unknown>)[mutable], undefined, mutable);
+      }
+
+      // Internal Workbench provider still resolves the exact owner spine reference.
+      assert.strictEqual(owner.authoritativeSpine(), authoritative);
+
+      // Gateway wiring: public surface is the read view; Workbench is bound to the internal provider.
+      const gatewaySource = readFileSync('src/gateway/index.ts', 'utf8');
+      assert.match(gatewaySource, /productionRuntime: ProductionRuntimePublicReadView/);
+      assert.match(gatewaySource, /productionSpine: productionRuntimeOwner\.authoritativeSpine/);
+      assert.doesNotMatch(gatewaySource, /productionSpine: productionRuntimeOwner\.read\.productionSpine/);
+    } finally {
+      await owner.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed direct Binance/Bybit agent mutations when the authoritative runtime quarantines them', async () => {
+    setDirectExchangeExecutionQuarantined('binance', true);
+    setDirectExchangeExecutionQuarantined('bybit', true);
+    try {
+      const context = {} as HandlerContext; // quarantine short-circuits before db/credential use
+      const mutations = [
+        ['binance_futures_long', binanceHandlers.binance_futures_long],
+        ['binance_futures_short', binanceHandlers.binance_futures_short],
+        ['binance_futures_close', binanceHandlers.binance_futures_close],
+        ['bybit_long', bybitHandlers.bybit_long],
+        ['bybit_short', bybitHandlers.bybit_short],
+        ['bybit_close', bybitHandlers.bybit_close],
+      ] as const;
+      for (const [tool, handler] of mutations) {
+        const result = await handler({ symbol: 'BTCUSDT', quantity: 1, qty: 1, leverage: 1 }, context);
+        assert.match(result, /quarantined/i, `${tool} must fail closed`);
+        assert.doesNotMatch(result, /"success"\s*:\s*true/, `${tool} must not submit an order`);
+      }
+    } finally {
+      setDirectExchangeExecutionQuarantined('binance', false);
+      setDirectExchangeExecutionQuarantined('bybit', false);
+    }
+    assert.equal(isDirectExchangeExecutionQuarantined('binance'), false);
+    assert.equal(isDirectExchangeExecutionQuarantined('bybit'), false);
+
+    // Gateway wiring: quarantine is enabled whenever the owner quarantines legacy writes.
+    const gatewaySource = readFileSync('src/gateway/index.ts', 'utf8');
+    assert.match(gatewaySource, /setDirectExchangeExecutionQuarantined\('binance', true\)/);
+    assert.match(gatewaySource, /setDirectExchangeExecutionQuarantined\('bybit', true\)/);
+  });
+
+  it('retains the singleton reservation and reports STOP_FAILED when shutdown cleanup fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'phase8a-stop-fail-'));
+    const secondDir = mkdtempSync(join(tmpdir(), 'phase8a-stop-fail-second-'));
+    const probe = collectorProbe(undefined, new Error('MARKET_STOP_FAILED'));
+    let authoritative: ProductionSpine | null = null;
+    const owner = createApplicationProductionRuntimeOwner(runtimeConfig(dir, 'shutdown_failure_owner'), {
+      ...marketOverride(probe),
+      async createSpine(config) {
+        authoritative = await createProductionSpine(config);
+        return authoritative;
+      },
+    });
+    const secondOwner = createApplicationProductionRuntimeOwner(runtimeConfig(secondDir, 'shutdown_failure_owner'), {
+      ...marketOverride(collectorProbe()),
+      async createSpine(config) {
+        return createProductionSpine(config);
+      },
+    });
+    try {
+      await owner.start();
+      assert.ok(authoritative);
+      assert.strictEqual(owner.authoritativeSpine(), authoritative);
+
+      await owner.stop();
+      // Read availability withdrawn; the owner does not claim a clean STOPPED.
+      assert.equal(owner.authoritativeSpine(), null);
+      assert.equal(owner.read.status().state, 'STOP_FAILED');
+
+      // Singleton reservation retained -> a replacement owner for the same identity is rejected.
+      await assert.rejects(() => secondOwner.start(), /SECOND_PRODUCTION_RUNTIME_OWNER_FORBIDDEN/);
+      assert.equal(secondOwner.read.status().spineCreations, 0);
+      assert.equal(secondOwner.authoritativeSpine(), null);
+    } finally {
+      await secondOwner.stop();
+      await owner.stop();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(secondDir, { recursive: true, force: true });
+    }
   });
 
   it('recovers SUBMISSION_UNKNOWN without retrying and refuses mismatched reconciliation', async () => {
@@ -352,7 +470,7 @@ describe('Phase 8A application production runtime owner', () => {
       assert.ok(captured);
       assert.equal(captured.oms.getStore().get('unknown-order')?.status, 'SUBMISSION_UNKNOWN');
       assert.equal(adapterSubmissions, 0, 'recovery/startup never resubmits unknown orders');
-      assert.equal(owner.read.productionSpine(), null);
+      assert.equal(owner.authoritativeSpine(), null);
       assert.equal(owner.read.status().state, 'RECONCILIATION_FAILED');
       assert.equal(probe.starts(), 0, 'market starts only after reconciliation succeeds');
     } finally {

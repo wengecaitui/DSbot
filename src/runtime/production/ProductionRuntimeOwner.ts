@@ -26,7 +26,6 @@ import {
   LEGACY_WRITE_CAPABLE_PATHS,
   createProductionSpineReadBinding,
   type ProductionRuntimeState,
-  type WorkbenchProductionSpineProvider,
 } from './ProductionRuntimeCompositionContract';
 
 export interface ProductionRuntimeIdentity {
@@ -87,7 +86,12 @@ export interface ProductionRuntimeStatusSnapshot {
   readonly legacyWritePolicy: LegacyWriteAuthorityMode;
 }
 
-export interface ProductionRuntimeReadView extends WorkbenchProductionSpineProvider<ProductionSpine> {
+/**
+ * Phase 8A public read surface. Exposes evidence only — never the mutable
+ * ProductionSpine, its OMS/kernel/adapter/service/stores, or any recovery,
+ * reconciliation, execution, or activation authority.
+ */
+export interface ProductionRuntimePublicReadView {
   status(): ProductionRuntimeStatusSnapshot;
   identity(): ProductionRuntimeIdentity | null;
   recovery(): RecoveryResult | null;
@@ -95,7 +99,13 @@ export interface ProductionRuntimeReadView extends WorkbenchProductionSpineProvi
 }
 
 export interface ApplicationProductionRuntimeOwner {
-  readonly read: ProductionRuntimeReadView;
+  readonly read: ProductionRuntimePublicReadView;
+  /**
+   * Internal Workbench spine provider only. Resolves the exact owner spine (or
+   * null); wired exclusively into WorkbenchReadAdapter inside createGateway and
+   * never exposed through the public AppGateway.productionRuntime surface.
+   */
+  readonly authoritativeSpine: () => ProductionSpine | null;
   readonly legacyWrites: LegacyWriteAuthorityPolicy;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -391,20 +401,19 @@ export function createApplicationProductionRuntimeOwner(
     activeOwners.set(key, reservation);
   }
 
-  function cleanupOwnedResources(closeBinding: boolean): void {
+  function cleanupOwnedResources(): readonly unknown[] {
     binding.owner.makeUnavailable();
+    const failures: unknown[] = [];
     if (!cleanupComplete) {
-      try { authoritativeSpine?.protection.stop(); } catch { /* continue deterministic cleanup */ }
-      try { marketRuntime?.stop(); } catch { /* continue deterministic cleanup */ }
-      try { journal?.close(); } catch { /* continue deterministic cleanup */ }
-      cleanupComplete = true;
+      try { authoritativeSpine?.protection.stop(); } catch (error) { failures.push(error); }
+      try { marketRuntime?.stop(); } catch (error) { failures.push(error); }
+      try { journal?.close(); } catch (error) { failures.push(error); }
+      if (failures.length === 0) cleanupComplete = true;
     }
-    if (closeBinding) binding.owner.close();
-    releaseReservation();
+    return failures;
   }
 
-  const read: ProductionRuntimeReadView = Object.freeze({
-    productionSpine: binding.provider.productionSpine,
+  const read: ProductionRuntimePublicReadView = Object.freeze({
     status(): ProductionRuntimeStatusSnapshot {
       return Object.freeze({
         state,
@@ -483,7 +492,12 @@ export function createApplicationProductionRuntimeOwner(
         state = failureState;
         reason = failureMessage(error);
         terminal = true;
-        cleanupOwnedResources(true);
+        const cleanupFailures = cleanupOwnedResources();
+        if (cleanupFailures.length === 0) {
+          binding.owner.close();
+          releaseReservation();
+        }
+        // On rollback cleanup failure the singleton reservation stays held (fail-closed).
         throw error;
       }
     })();
@@ -496,13 +510,20 @@ export function createApplicationProductionRuntimeOwner(
       binding.owner.makeUnavailable();
       if (state !== 'DISABLED' && state !== 'NOT_CONFIGURED') state = 'STOPPING';
       terminal = true;
-      cleanupOwnedResources(true);
-      if (state !== 'DISABLED' && state !== 'NOT_CONFIGURED') state = 'STOPPED';
+      const cleanupFailures = cleanupOwnedResources();
+      if (cleanupFailures.length === 0) {
+        binding.owner.close();
+        releaseReservation();
+        if (state !== 'DISABLED' && state !== 'NOT_CONFIGURED') state = 'STOPPED';
+      } else if (state !== 'DISABLED' && state !== 'NOT_CONFIGURED') {
+        // Fail closed: retain the singleton reservation; do not claim a clean STOPPED.
+        state = 'STOP_FAILED';
+      }
     })();
     return stopPromise;
   }
 
-  return Object.freeze({ read, legacyWrites, start, stop });
+  return Object.freeze({ read, authoritativeSpine: binding.provider.productionSpine, legacyWrites, start, stop });
 }
 
 /** Test-only convenience type for injected collectors; production uses exchange providers. */
