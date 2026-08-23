@@ -1,15 +1,23 @@
 # Phase 8A Contract — Authoritative Production Runtime Composition
 
-Status: contract gate only. Production composition is not implemented or activated by this change.
+Status: contract frozen. The Phase 8A implementation branch now implements the opt-in,
+Paper-only owner; it remains unavailable by default and is not merged or activated by this change.
 
-Baseline: `feature/orangeai-split` at `3f6918e317e608580dfcd565138432be9bebcd21`.
+Implementation baseline: `feature/orangeai-split` at
+`dfdf2ba3d2fa475fb3ba0171082785e5a663d22d`.
 
 ## 1. Repository truth and decision
 
-The running application currently has no `ProductionSpine` owner. `createProductionSpine`,
-`recoverAndStart`, `reconcileRecoveredState`, and `activateLiveReadiness` are called only by
-tests. `createGateway()` mounts `WorkbenchReadAdapter` with application lifecycle and Hermes
+The contract baseline had no `ProductionSpine` owner. `createProductionSpine`,
+`recoverAndStart`, `reconcileRecoveredState`, and `activateLiveReadiness` were called only by
+tests. `createGateway()` mounted `WorkbenchReadAdapter` with application lifecycle and Hermes
 providers, but no spine or retained recovery result.
+
+The implementation adds `ApplicationProductionRuntimeOwner` at `createGateway(config)`. It
+creates no resources when configuration is absent or incomplete, accepts only explicit Paper
+identity/durability/market/hard-risk facts, quarantines the reviewed legacy write stack while
+requested, and publishes only the recovered and reconciled owner spine through the same-reference
+read binding. Application boot still never calls `activateLiveReadiness`.
 
 The smallest repository-consistent future composition root is `createGateway(config)`. It
 already constructs the application services returned as `AppGateway`, and `src/index.ts`
@@ -247,4 +255,5 @@ Implementation remains a later, separately authorized change and must prove:
 12. Raw current `KillSwitch.snapshot()`, `as any`, fake CLEAR, and placeholder-zero risk facts
     cannot satisfy the hard-risk dependency.
 
-This contract gate does not claim any of those implementation items complete.
+The contract alone does not claim these items complete. The Phase 8A implementation test suite
+must prove them and the Draft PR must pass the full repository gates before review closure.

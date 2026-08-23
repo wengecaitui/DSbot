@@ -64,7 +64,10 @@ function fakeSpine(): ProductionSpine {
     accounting: { snapshot: () => accounting, lifecycle: () => lifecycle },
     policyStore: { getLatest: () => undefined },
     protection: { getMode: () => 'replay' },
-    privateConfig: { hardRisk: () => ({ exchange: 'bitget', currentExposureUsd: 10, todayRealizedLossUsd: 0, todayUnrealizedLossUsd: 0, openPositions: 1, isTriggered: false }) },
+    privateConfig: { hardRisk: () => ({
+      exchange: 'bitget', accountId: 'paper-1', enabled: true, locked: false,
+      totalCapitalUsd: 1_000, maxSinglePositionPct: 0.1, maxSinglePositionAbsUsd: 100,
+    }) },
     recoveryVerified: false,
     reconciliationVerified: false,
     lastReconciliationReport: null,

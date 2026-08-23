@@ -237,7 +237,7 @@ export function createWorkbenchReadAdapter(options: WorkbenchReadAdapterOptions)
     if (!spine.recoveryVerified) blockers.push('recovery is not verified');
     if (!spine.reconciliationVerified) blockers.push('reconciliation is not verified');
     if (mode !== 'live') blockers.push('LIVE_READY is not established');
-    if (hardRisk.isTriggered) blockers.push(hardRisk.triggerReason ?? 'kill switch is triggered');
+    if (hardRisk.locked) blockers.push(hardRisk.lockReason ?? 'kill switch is locked');
     const incomplete = recovery === null || reconciliation === null;
     return {
       availability: incomplete ? 'INCOMPLETE' : 'AVAILABLE',
@@ -253,9 +253,9 @@ export function createWorkbenchReadAdapter(options: WorkbenchReadAdapterOptions)
           blockers,
         },
         killSwitch: {
-          status: hardRisk.isTriggered ? 'TRIGGERED' : 'CLEAR',
+          status: hardRisk.locked ? 'TRIGGERED' : 'CLEAR',
           authority: 'ProductionSpine hardRisk snapshot',
-          reason: hardRisk.triggerReason ?? null,
+          reason: hardRisk.lockReason ?? null,
           mutableFromWorkbench: false,
         },
         riskBlockers: blockers,

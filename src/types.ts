@@ -790,6 +790,8 @@ export interface SkillManagerConfig {
 // =============================================================================
 
 export interface Config {
+  /** Phase 8A: explicit, Paper-only authoritative runtime. Absent is fail-closed. */
+  productionRuntime?: import('./runtime/production/ProductionRuntimeOwner').ProductionRuntimeConfig;
   gateway: {
     port: number;
     host?: string;

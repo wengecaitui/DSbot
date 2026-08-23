@@ -16,6 +16,16 @@ export interface HardRiskSnapshot {
   readonly maxSinglePositionAbsUsd: number;
 }
 
+/**
+ * Production composition identity wrapper. The risk gateway remains exchange
+ * focused, while the application owner additionally proves that the source is
+ * bound to the same durable paper account before publishing a spine.
+ */
+export interface AccountBoundHardRiskSnapshot extends HardRiskSnapshot {
+  readonly accountId: string;
+  readonly lockReason?: string;
+}
+
 export interface GatewayInput {
   readonly intent: TradeIntent;
   readonly action: TradeAction;
