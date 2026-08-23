@@ -413,6 +413,9 @@ describe('Phase 8A application production runtime owner', () => {
       assert.equal(owner.authoritativeSpine(), null);
       assert.equal(owner.read.status().state, 'STOP_FAILED');
 
+      // Terminal owner can never restart — a second start rejects, not a silent success.
+      await assert.rejects(() => owner.start(), /PRODUCTION_RUNTIME_OWNER_TERMINAL/);
+
       // Singleton reservation retained -> a replacement owner for the same identity is rejected.
       await assert.rejects(() => secondOwner.start(), /SECOND_PRODUCTION_RUNTIME_OWNER_FORBIDDEN/);
       assert.equal(secondOwner.read.status().spineCreations, 0);
@@ -422,6 +425,33 @@ describe('Phase 8A application production runtime owner', () => {
       await owner.stop();
       rmSync(dir, { recursive: true, force: true });
       rmSync(secondDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a second start after a clean stop (terminal owner cannot restart)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'phase8a-restart-after-stop-'));
+    const probe = collectorProbe();
+    const owner = createApplicationProductionRuntimeOwner(runtimeConfig(dir, 'restart_after_stop'), {
+      ...marketOverride(probe),
+      async createSpine(config) {
+        return createProductionSpine(config);
+      },
+    });
+    try {
+      await owner.start();
+      assert.equal(owner.read.status().state, 'READY_FOR_MARKET');
+
+      await owner.stop();
+      assert.equal(owner.read.status().state, 'STOPPED');
+      assert.equal(owner.authoritativeSpine(), null);
+
+      // A stopped (terminal) owner must never report a successful restart.
+      await assert.rejects(() => owner.start(), /PRODUCTION_RUNTIME_OWNER_TERMINAL/);
+      assert.equal(owner.read.status().state, 'STOPPED');
+      assert.equal(owner.read.status().spineCreations, 1, 'restart attempt must not create a second spine');
+    } finally {
+      await owner.stop();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

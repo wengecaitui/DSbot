@@ -429,9 +429,9 @@ export function createApplicationProductionRuntimeOwner(
   });
 
   async function start(): Promise<void> {
-    if (startPromise) return startPromise;
     if (!validated) return;
     if (terminal) throw new Error('PRODUCTION_RUNTIME_OWNER_TERMINAL');
+    if (startPromise) return startPromise;
 
     startPromise = (async () => {
       state = 'STARTING';
