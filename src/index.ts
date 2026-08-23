@@ -272,6 +272,7 @@ async function main() {
     // Final success message
     console.log('\n\x1b[32m\x1b[1m✓ Clodds is running!\x1b[0m');
     console.log(`\n  WebChat: \x1b[36mhttp://localhost:${config.gateway.port}/webchat\x1b[0m`);
+    console.log(`  Quant Terminal: \x1b[36mhttp://localhost:${config.gateway.port}/workbench/\x1b[0m`);
     if (process.env.TELEGRAM_BOT_TOKEN) {
       console.log('  Telegram: \x1b[32mConnected\x1b[0m');
     }

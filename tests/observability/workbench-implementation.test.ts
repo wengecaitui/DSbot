@@ -183,6 +183,8 @@ describe('Phase 7C shared frontend query boundary', () => {
     const appSource = readFileSync('web/src/App.tsx', 'utf8');
     const clientSource = readFileSync('web/src/api/client.ts', 'utf8');
     const querySource = readFileSync('web/src/api/queries.ts', 'utf8');
+    const entrySource = readFileSync('web/index.html', 'utf8');
+    const mainSource = readFileSync('web/src/main.tsx', 'utf8');
 
     assert.match(appSource, /workbenchQueries/);
     assert.doesNotMatch(appSource, /\bfetch\s*\(/);
@@ -191,5 +193,13 @@ describe('Phase 7C shared frontend query boundary', () => {
     assert.match(clientSource, /\/api\/workbench\/v1/);
     assert.match(querySource, /workbenchQueryKeys/);
     assert.match(querySource, /refetchInterval/);
+    assert.match(appSource, /Connecting to \{label\}/);
+    assert.match(appSource, /role="alert"/);
+    assert.match(entrySource, /class="boot-screen"/);
+    assert.match(entrySource, /application gateway URL ending in \/workbench\//);
+    assert.match(mainSource, /WorkbenchErrorBoundary/);
+    assert.match(mainSource, /WORKBENCH RENDER FAILED/);
+    assert.match(clientSource, /Authentication is required/);
+    assert.match(clientSource, /standalone frontend preview/);
   });
 });

@@ -90,6 +90,7 @@ button { color: inherit; }
 .persistent-status time { color: var(--dim); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 9px; white-space: nowrap; }
 .status-offline { color: var(--red); }
 .status-offline span { color: var(--muted); font-size: 11px; }
+.status-connecting > b { color: var(--muted); font-size: 10px; letter-spacing: .08em; }
 
 main { width: 100%; max-width: 1540px; margin: 0 auto; padding: 28px 30px 42px; flex: 1; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 30px; margin-bottom: 24px; }
@@ -169,9 +170,17 @@ tbody tr:last-child td { border-bottom: 0; }
 .boundary-note { margin-top: 22px; padding: 13px; border: 1px solid var(--line); border-radius: 8px; }
 .boundary-note b { color: var(--mint); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
 .boundary-note p { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
-.query-failure { min-height: 320px; display: grid; place-items: center; align-content: center; gap: 12px; }
-.query-failure p { color: var(--muted); font-size: 11px; }
-.loading-grid { min-height: 400px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.query-failure { min-height: 320px; display: grid; place-items: center; align-content: center; gap: 10px; padding: 28px; text-align: center; }
+.query-failure strong { color: var(--text); font-size: 14px; font-weight: 580; }
+.query-failure p { max-width: 680px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.loading-grid {
+  min-height: 400px; display: grid; place-items: center; align-content: center; gap: 12px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); text-align: center;
+}
+.loading-grid i { width: 18px; height: 18px; border: 2px solid var(--line-strong); border-top-color: var(--mint); border-radius: 50%; animation: terminal-spin .8s linear infinite; }
+.loading-grid strong { color: var(--text); font-size: 12px; font-weight: 580; }
+.loading-grid p { margin: 0; color: var(--dim); font-size: 10px; }
+@keyframes terminal-spin { to { transform: rotate(360deg); } }
 footer { display: flex; justify-content: space-between; gap: 20px; padding: 14px 30px; border-top: 1px solid var(--line); color: var(--dim); font-size: 9px; }
 
 @media (max-width: 1180px) {
@@ -209,4 +218,5 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding: 14px
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+  .loading-grid i { animation: none; }
 }

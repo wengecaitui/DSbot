@@ -18,6 +18,23 @@ import type {
 const API_ROOT = '/api/workbench/v1';
 const TOKEN_KEY = 'dsbot.workbench.session-token';
 
+export class WorkbenchHttpError extends Error {
+  constructor(
+    readonly resource: string,
+    readonly status: number,
+  ) {
+    const guidance = status === 401
+      ? 'Authentication is required. Open /workbench/?token=<gateway-token>.'
+      : status === 404
+        ? 'The read API is not mounted here. Open /workbench/ on the running application gateway, not a standalone frontend preview.'
+        : status >= 500
+          ? 'The application gateway could not serve this read projection.'
+          : 'The application gateway rejected this read request.';
+    super(`Workbench ${resource} HTTP ${status}. ${guidance}`);
+    this.name = 'WorkbenchHttpError';
+  }
+}
+
 function sessionToken(): string | null {
   const queryToken = new URLSearchParams(window.location.search).get('token');
   if (queryToken) {
@@ -36,7 +53,7 @@ async function read<T>(resource: string): Promise<T> {
     method: 'GET',
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   });
-  if (!response.ok) throw new Error(`Workbench ${resource} HTTP ${response.status}`);
+  if (!response.ok) throw new WorkbenchHttpError(resource, response.status);
   return response.json() as Promise<T>;
 }
 

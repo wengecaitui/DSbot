@@ -50,7 +50,15 @@ function useRoute() {
 }
 
 function QueryFailure({ message }: { message: string }) {
-  return <div className="query-failure"><StatusBadge value="UNAVAILABLE" /><p>{message}</p></div>;
+  return <div className="query-failure" role="alert"><StatusBadge value="UNAVAILABLE" /><strong>Read-only data link unavailable</strong><p>{message}</p></div>;
+}
+
+function LoadingState({ label }: { label: string }) {
+  return <div className="loading-grid" role="status" aria-live="polite">
+    <i aria-hidden="true" />
+    <strong>Connecting to {label}</strong>
+    <p>Waiting for a factual response from the application gateway.</p>
+  </div>;
 }
 
 function EnvelopeFrame<T>({ envelope, children }: { envelope: ReadEnvelope<T>; children: (data: T) => ReactNode }) {
@@ -72,6 +80,7 @@ function PageHeading({ eyebrow, title, detail, status }: { eyebrow: string; titl
 
 function PersistentStatus() {
   const query = useQuery(workbenchQueries.status());
+  if (query.isPending) return <div className="persistent-status status-connecting"><div className="status-title"><i /><span>READ-ONLY</span></div><b>CONNECTING TO APPLICATION GATEWAY</b></div>;
   if (query.isError) return <div className="persistent-status status-offline"><b>READ LINK UNAVAILABLE</b><span>{query.error.message}</span></div>;
   const status = query.data?.status;
   const items = [
@@ -88,7 +97,7 @@ function PersistentStatus() {
 function OverviewPage() {
   const query = useQuery(workbenchQueries.overview());
   if (query.isError) return <QueryFailure message={query.error.message} />;
-  if (!query.data) return <div className="loading-grid" />;
+  if (!query.data) return <LoadingState label="the Overview read model" />;
   const view = query.data;
   const account = view.account.data?.accounting;
   const safety = view.safety.data;

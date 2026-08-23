@@ -1,5 +1,5 @@
 import { queryOptions } from '@tanstack/react-query';
-import { workbenchApi } from './client';
+import { WorkbenchHttpError, workbenchApi } from './client';
 
 export const workbenchQueryKeys = {
   root: ['workbench', 'v1'] as const,
@@ -16,7 +16,13 @@ export const workbenchQueryKeys = {
   status: () => [...workbenchQueryKeys.root, 'status'] as const,
 };
 
-const stable = { staleTime: 15_000, retry: 1 } as const;
+const stable = {
+  staleTime: 15_000,
+  retry: (failureCount: number, error: Error) => {
+    if (error instanceof WorkbenchHttpError && error.status < 500) return false;
+    return failureCount < 1;
+  },
+} as const;
 
 export const workbenchQueries = {
   overview: () => queryOptions({ queryKey: workbenchQueryKeys.overview(), queryFn: workbenchApi.overview, ...stable }),
