@@ -17,8 +17,8 @@
 | 4 | Python 桥接层 | P1 | ⏳框架就绪 | 90% |
 | 5 | Freqtrade 数据层整合 | P1 | 🔲待开始 | 0% |
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
-| 7 | Hermes 握手 + Quant Terminal（7A/7B 已合并；7C V1 Draft PR 实现中） | P1 | ⏳进行中 | 85% |
-| 8 | 功能模块接入 | P2 | ⏳部分就绪 | 25% |
+| 7 | Hermes 握手 + Quant Terminal（7A/7B/7C 已合并） | P1 | ✅完成 | 100% |
+| 8 | 权威生产运行时组合 + 功能模块接入 | P1 | ⏳契约门进行中 | 30% |
 | 9 | 系统集成 | P2 | 🔲待开始 | 0% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
 
@@ -186,11 +186,11 @@
 
 ---
 
-## Phase 7 — Hermes 握手协议 + Quant Terminal ⏳（7A/7B 已合并；7C V1 实现）
+## Phase 7 — Hermes 握手协议 + Quant Terminal ✅（7A/7B/7C 已合并）
 
 > Phase 7 拆分为三个明确子阶段：**7A**（握手契约与生命周期核心，已合并）、
 > **7B**（绑定握手核心到权威网关传输，已合并）、**7C**（只读 Trading & Research
-> Workbench；契约门已通过，V1 实现进入 Draft PR 审核）。
+> Workbench V1，已通过 PR #121 合并）。
 
 ### Phase 7A — Hermes 握手契约与生命周期核心 ✅ 已合并
 
@@ -223,10 +223,13 @@
 - 配置热重载成功后触发一次严格单调 flush 通知；失败重载不 flush。
   （Hermes 0.20.0 无专用 config-flush 监听端点，不误用 chat/responses//v1/runs。）
 
-### Phase 7C — DSbot Quant Terminal（只读 Trading & Research Workbench）⏳ V1 实现
+### Phase 7C — DSbot Quant Terminal（只读 Trading & Research Workbench）✅ 已合并
 
-- **当前状态**: 已获 implementation 授权；React/TypeScript/Vite/TanStack Query
-  展示层、共享类型化查询层和 GET-only API 已实现，等待 Draft PR 审核，尚未合并。
+- **PR**: #121（`Phase 7C — DSbot Quant Terminal V1 Implementation`）
+- **实现 head**: `6a0a62ff59f6070b6026462abf987c4ce7606a0f`
+- **合并提交**: `3f6918e317e608580dfcd565138432be9bebcd21`
+- **当前状态**: React/TypeScript/Vite/TanStack Query 展示层、共享类型化查询层和
+  GET-only API 已合并；未挂载的权威运行时来源仍按契约显示 `UNAVAILABLE` / `UNKNOWN`。
 - **V1 信息架构**: Overview / Market / Trading / Research / AI-Policy / Safety /
   Operations / Data / Settings；相关子域使用页内 tab，Project Control Center 保持
   Operations / Engineering Evidence。
@@ -248,12 +251,35 @@
   spine；未挂载的 Market / Position / OMS / Accounting / Safety 权威来源在 UI 中明确
   显示 `UNAVAILABLE` / `UNKNOWN`，绝不伪造健康、空仓或 `LIVE_READY`。
 - **契约文档**: `docs/phase-7c-read-only-workbench-contract.md`。
-- **下一门禁**: 通过独立审核并明确合并授权后才能合并；本分支和 Draft PR 不改变
-  Paper / Testnet / Live 权限，也不宣称 Phase 7C 已关闭。
+- **权限边界**: 合并未改变 Paper / Testnet / Live 权限；Quant Terminal 仍为只读展示层。
 
 ---
 
-## Phase 8 — 功能模块接入 ⏳ 25%
+## Phase 8 — 权威生产运行时组合 + 功能模块接入 ⏳ 30%
+
+### Phase 8A — 权威生产运行时组合契约门 ⏳ Draft
+
+- **基线**: `feature/orangeai-split@3f6918e317e608580dfcd565138432be9bebcd21`。
+- **当前事实**: 生产应用仍未拥有 `ProductionSpine`；`createGateway()` 的 Workbench
+  只挂载应用生命周期和 Hermes，不能读取 Market / Position / OMS / Accounting / Safety
+  的权威运行时事实。
+- **冻结方向**: `createGateway()` / `AppGateway` 作为最小应用组合与生命周期边界，
+  按显式 `{exchange, accountId}` 只拥有一个 Production Runtime / `ProductionSpine`；
+  Recovery、Reconciliation 与 Workbench 必须使用同一实例。
+- **安全与持久化**: 生产所有者必须显式提供 durable `FileEventJournal`、
+  `PaperLedgerStore`、合法 collector `MarketDataRuntime`，以及与 `{exchange, accountId}`
+  一致的 typed canonical hard-risk source；当前 raw `KillSwitch.snapshot()` 含 placeholder
+  零值且不满足该边界，禁止 `as any`、内存/假 CLEAR/硬编码零值兜底。
+- **单一执行权威**: 对同一运行时身份，现有订单 API、Agent、SignalRouter、CopyTrading、
+  Arbitrage、DCA/TWAP/Bracket/Trigger、ExecutionQueue 与 position auto-close 必须禁用/
+  fail closed，或进入同一 `ProductionSpine -> PreTradeRiskGateway -> OMS`；禁止双执行权威。
+- **启动边界**: 应用启动不提交订单、不授予 LIVE_READY、不启用 Testnet/Live。
+- **交付物**: `docs/phase-8a-authoritative-production-runtime-composition-contract.md`、
+  `src/runtime/production/ProductionRuntimeCompositionContract.ts` 与聚焦契约测试。
+- **未完成**: 本阶段仅为 Contract Gate，尚未实现生产组合、运行时创建或 Workbench
+  权威绑定，不得宣称 Phase 8A implementation complete。
+- **Phase 8B 延后**: Project Control Center / Hermes activity 跨进程只读桥接、通用
+  observability IPC 与事件聚合延后到 Operations Evidence Read Bridge。
 
 ### 8.1 行情数据层（CCXT + Freqtrade 数据源双写）⏳
 - ✅ `src/data/collector.ts` — Bitget WS 采集器就位
