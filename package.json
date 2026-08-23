@@ -1,6 +1,9 @@
 {
   "name": "clodds",
   "version": "0.2.0-alpha",
+  "workspaces": [
+    "web"
+  ],
   "description": "Open-source AI trading terminal. Trade Polymarket, Kalshi, Betfair, Binance, Bybit, Hyperliquid, Solana DEXs from Telegram, Discord, Slack or web. Arbitrage detection, whale tracking, copy trading, perpetual futures up to 200x, DeFi swaps, MEV protection. Self-hosted, 119 skills, powered by Claude.",
   "main": "dist/index.js",
   "bin": {
@@ -8,8 +11,9 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && node -e \"const{cpSync,readdirSync}=require('fs'),p=require('path');readdirSync('src/skills/bundled',{withFileTypes:true}).filter(d=>d.isDirectory()).forEach(d=>{const s=p.join('src/skills/bundled',d.name,'SKILL.md'),t=p.join('dist/skills/bundled',d.name,'SKILL.md');try{cpSync(s,t)}catch{}})\"",
+    "build": "tsc && npm run build --workspace @dsbot/workbench && node -e \"const{cpSync,readdirSync}=require('fs'),p=require('path');readdirSync('src/skills/bundled',{withFileTypes:true}).filter(d=>d.isDirectory()).forEach(d=>{const s=p.join('src/skills/bundled',d.name,'SKILL.md'),t=p.join('dist/skills/bundled',d.name,'SKILL.md');try{cpSync(s,t)}catch{}})\"",
     "start": "node dist/index.js",
+    "workbench:serve": "npm run build && node dist/bin/workbench-server.js",
     "gateway": "tsx src/gateway/index.ts",
     "worker": "tsx src/bin/worker.ts",
     "monitor:hermes": "tsx src/bin/hermes-monitor.ts",
@@ -17,11 +21,12 @@
     "control-center:run": "node scripts/record-control-center-evidence.mjs",
     "control-center:runtime-smoke": "tsx src/bin/control-center-runtime-smoke.ts",
     "onboard": "tsx src/cli/onboard.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && npm run typecheck --workspace @dsbot/workbench",
     "test": "node scripts/run-tests.mjs",
     "test:validation": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/validation/promotion-approval-gate.test.ts tests/validation/promotion-decision-artifact-store.test.ts tests/validation/reference-infrastructure-proof.test.ts tests/validation/strategy-promotion-gate.test.ts tests/validation/walk-forward.test.ts",
     "test:control-center": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/observability/project-control-center.test.ts tests/observability/control-center-runtime-smoke.test.ts tests/observability/dashboard-server.test.ts tests/observability/task-activity-projector.test.ts",
     "test:workbench-contract": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/observability/workbench-contract.test.ts",
+    "test:workbench": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/observability/workbench-contract.test.ts tests/observability/workbench-implementation.test.ts",
     "test:quant-engine": "python -m unittest discover -s quant_engine/tests -p \"test_*.py\"",
     "ci": "npm run typecheck && npm run test && npm run test:quant-engine && npm run build",
     "security:exceptions": "node scripts/check-audit-exceptions.mjs",

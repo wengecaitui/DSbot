@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#07100f" />
+    <link rel="icon" href="data:," />
+    <title>DSbot Quant Terminal</title>
+    <style>
+      .boot-screen {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        margin: 0;
+        padding: 24px;
+        background: #07100f;
+        color: #e8f0ed;
+        font: 14px/1.6 Inter, ui-sans-serif, system-ui, sans-serif;
+        text-align: center;
+      }
+      .boot-screen strong { display: block; color: #79e6b5; letter-spacing: .08em; }
+      .boot-screen span { display: block; margin-top: 8px; color: #91a69e; }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="boot-screen" role="status" aria-live="polite">
+        <div>
+          <strong>DSBOT QUANT TERMINAL</strong>
+          <span>Loading the read-only workbench…</span>
+          <span>If this message remains, use the application gateway URL ending in /workbench/ and rebuild the frontend assets.</span>
+          <noscript><span>JavaScript is required. Open the application gateway at /workbench/ in a JavaScript-enabled browser.</span></noscript>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

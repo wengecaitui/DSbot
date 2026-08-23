@@ -62,6 +62,7 @@ export interface GatewayServer {
   setCronRouter(router: Router | null): void;
   setLaunchRouter(router: Router | null): void;
   setHermesRouter(router: Router | null): void;
+  setWorkbenchRouter(router: Router | null): void;
   setCommandListHandler(handler: CommandListHandler | null): void;
   setHooksHandler(handler: HooksHandler | null): void;
   setOnSessionDelete(handler: ((key: string) => void) | null): void;
@@ -848,6 +849,31 @@ export function createServer(
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     },
   }));
+
+  // Phase 7C: built React presentation assets. The API remains mounted
+  // separately behind requireAuth; these files contain no runtime authority.
+  const compiledWorkbenchDir = join(__dirname, '../web');
+  const developmentWorkbenchDir = join(__dirname, '../../dist/web');
+  const workbenchDir = existsSync(join(compiledWorkbenchDir, 'index.html'))
+    ? compiledWorkbenchDir
+    : developmentWorkbenchDir;
+  app.use('/workbench', express.static(workbenchDir, {
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'no-cache');
+    },
+  }));
+  app.get(/^\/workbench(?:\/.*)?$/, (req, res) => {
+    if (req.path.split('/').pop()?.includes('.')) {
+      res.status(404).send('Not found');
+      return;
+    }
+    const indexPath = join(workbenchDir, 'index.html');
+    if (!existsSync(indexPath)) {
+      res.status(503).json({ error: 'workbench_assets_unavailable' });
+      return;
+    }
+    res.sendFile(indexPath);
+  });
 
   // Legacy inline WebChat HTML client
   app.get('/webchat/legacy', (_req, res) => {
@@ -2640,7 +2666,7 @@ export function createServer(
           });
         });
 
-        httpServer.listen(config.port, () => {
+        httpServer.listen(config.port, config.host, () => {
           resolve();
         });
       });
@@ -2827,6 +2853,11 @@ export function createServer(
     setHermesRouter(router: Router | null): void {
       if (router) {
         app.use('/api/hermes', router);
+      }
+    },
+    setWorkbenchRouter(router: Router | null): void {
+      if (router) {
+        app.use('/api/workbench/v1', requireAuth, router);
       }
     },
     setCommandListHandler(handler: CommandListHandler | null): void {
