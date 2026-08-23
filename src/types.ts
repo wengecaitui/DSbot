@@ -792,6 +792,7 @@ export interface SkillManagerConfig {
 export interface Config {
   gateway: {
     port: number;
+    host?: string;
     cors?: boolean | string[];
     auth: { token?: string };
   };

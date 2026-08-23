@@ -2666,7 +2666,7 @@ export function createServer(
           });
         });
 
-        httpServer.listen(config.port, () => {
+        httpServer.listen(config.port, config.host, () => {
           resolve();
         });
       });

@@ -202,4 +202,15 @@ describe('Phase 7C shared frontend query boundary', () => {
     assert.match(clientSource, /Authentication is required/);
     assert.match(clientSource, /standalone frontend preview/);
   });
+
+  it('provides an AI-key-independent preview without mounting a production runtime', () => {
+    const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
+    const previewSource = readFileSync('src/bin/workbench-server.ts', 'utf8');
+
+    assert.match(packageJson.scripts['workbench:serve'], /dist\/bin\/workbench-server\.js/);
+    assert.match(previewSource, /mode: 'read-only-preview'/);
+    assert.match(previewSource, /hermes: \(\) => null/);
+    assert.doesNotMatch(previewSource, /createProductionSpine|new ProductionSpine/);
+    assert.doesNotMatch(previewSource, /ANTHROPIC_API_KEY/);
+  });
 });

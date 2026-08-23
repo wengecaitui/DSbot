@@ -13,6 +13,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc && npm run build --workspace @dsbot/workbench && node -e \"const{cpSync,readdirSync}=require('fs'),p=require('path');readdirSync('src/skills/bundled',{withFileTypes:true}).filter(d=>d.isDirectory()).forEach(d=>{const s=p.join('src/skills/bundled',d.name,'SKILL.md'),t=p.join('dist/skills/bundled',d.name,'SKILL.md');try{cpSync(s,t)}catch{}})\"",
     "start": "node dist/index.js",
+    "workbench:serve": "npm run build && node dist/bin/workbench-server.js",
     "gateway": "tsx src/gateway/index.ts",
     "worker": "tsx src/bin/worker.ts",
     "monitor:hermes": "tsx src/bin/hermes-monitor.ts",
