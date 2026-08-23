@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   PHASE_8A_PRODUCTION_RUNTIME_CONTRACT,
+  LEGACY_WRITE_CAPABLE_PATHS,
   PRODUCTION_RUNTIME_STATES,
   assertAuthoritativeSpineIdentity,
   assertProductionRuntimeCompositionContract,
@@ -42,6 +43,47 @@ describe('Phase 8A authoritative production runtime composition contract', () =>
       assert.throws(
         () => assertProductionRuntimeCompositionContract(weakened(patch)),
         /PHASE_8A_CONTRACT_VIOLATION/,
+      );
+    }
+  });
+
+  it('rejects dual execution authority and freezes every reviewed legacy write surface', () => {
+    assert.deepEqual(LEGACY_WRITE_CAPABLE_PATHS, [
+      'POST /api/orders',
+      'agent execution',
+      'SignalRouter',
+      'CopyTrading',
+      'ArbitrageExecutor',
+      'DCA',
+      'TWAP',
+      'Bracket',
+      'TriggerOrderManager',
+      'ExecutionQueue',
+      'position auto-close',
+    ]);
+    for (const patch of [
+      { dualExecutionAuthorityAllowed: true },
+      { legacyExecutionMayBypassAuthoritativeSpine: true },
+      { legacyWritePathPolicy: 'KEEP_LEGACY_EXECUTION' },
+    ]) {
+      assert.throws(
+        () => assertProductionRuntimeCompositionContract(weakened(patch)),
+        /legacy write paths must be disabled or use the owner spine PreTradeRiskGateway and OMS/,
+      );
+    }
+  });
+
+  it('rejects raw KillSwitch snapshots, identity mismatch, and hard-risk type escapes', () => {
+    assert.equal(PHASE_8A_PRODUCTION_RUNTIME_CONTRACT.rawCurrentKillSwitchSnapshotQualifiesAsHardRisk, false);
+    for (const patch of [
+      { rawCurrentKillSwitchSnapshotQualifiesAsHardRisk: true },
+      { hardRiskMustMatchExchangeAccountRuntimeIdentity: false },
+      { hardRiskTypeEscapeAllowed: true },
+      { hardRiskIdentity: 'RAW_KILL_SWITCH_SNAPSHOT' },
+    ]) {
+      assert.throws(
+        () => assertProductionRuntimeCompositionContract(weakened(patch)),
+        /hard risk|hard-risk/,
       );
     }
   });

@@ -23,6 +23,20 @@ export const PRODUCTION_RUNTIME_STATES = [
 
 export type ProductionRuntimeState = (typeof PRODUCTION_RUNTIME_STATES)[number];
 
+export const LEGACY_WRITE_CAPABLE_PATHS = Object.freeze([
+  'POST /api/orders',
+  'agent execution',
+  'SignalRouter',
+  'CopyTrading',
+  'ArbitrageExecutor',
+  'DCA',
+  'TWAP',
+  'Bracket',
+  'TriggerOrderManager',
+  'ExecutionQueue',
+  'position auto-close',
+] as const);
+
 export interface ProductionRuntimeCompositionContract {
   readonly phase: '8A';
   readonly delivery: 'CONTRACT_ONLY';
@@ -39,7 +53,10 @@ export interface ProductionRuntimeCompositionContract {
   readonly explicitAccountIdentityRequired: true;
   readonly explicitExchangeIdentityRequired: true;
   readonly marketRuntimeIdentity: 'OWNER_INSTANCE';
-  readonly hardRiskIdentity: 'OWNER_ACCOUNT_KILL_SWITCH';
+  readonly hardRiskIdentity: 'TYPED_EXCHANGE_ACCOUNT_CANONICAL_SOURCE';
+  readonly rawCurrentKillSwitchSnapshotQualifiesAsHardRisk: false;
+  readonly hardRiskMustMatchExchangeAccountRuntimeIdentity: true;
+  readonly hardRiskTypeEscapeAllowed: false;
   readonly recoverySpineIdentity: 'OWNER_INSTANCE';
   readonly reconciliationSpineIdentity: 'OWNER_INSTANCE';
   readonly workbenchSpineIdentity: 'OWNER_INSTANCE';
@@ -48,6 +65,9 @@ export interface ProductionRuntimeCompositionContract {
   readonly applicationBootSubmitsOrders: false;
   readonly applicationBootGrantsLiveReady: false;
   readonly submissionUnknownAutoRetry: false;
+  readonly dualExecutionAuthorityAllowed: false;
+  readonly legacyExecutionMayBypassAuthoritativeSpine: false;
+  readonly legacyWritePathPolicy: 'DISABLE_OR_SAME_SPINE_PRETRADE_OMS';
   readonly projectControlCenterBridgePhase: '8B';
   readonly activityBridgePhase: '8B';
 }
@@ -68,7 +88,10 @@ export const PHASE_8A_PRODUCTION_RUNTIME_CONTRACT: ProductionRuntimeCompositionC
   explicitAccountIdentityRequired: true,
   explicitExchangeIdentityRequired: true,
   marketRuntimeIdentity: 'OWNER_INSTANCE',
-  hardRiskIdentity: 'OWNER_ACCOUNT_KILL_SWITCH',
+  hardRiskIdentity: 'TYPED_EXCHANGE_ACCOUNT_CANONICAL_SOURCE',
+  rawCurrentKillSwitchSnapshotQualifiesAsHardRisk: false,
+  hardRiskMustMatchExchangeAccountRuntimeIdentity: true,
+  hardRiskTypeEscapeAllowed: false,
   recoverySpineIdentity: 'OWNER_INSTANCE',
   reconciliationSpineIdentity: 'OWNER_INSTANCE',
   workbenchSpineIdentity: 'OWNER_INSTANCE',
@@ -77,6 +100,9 @@ export const PHASE_8A_PRODUCTION_RUNTIME_CONTRACT: ProductionRuntimeCompositionC
   applicationBootSubmitsOrders: false,
   applicationBootGrantsLiveReady: false,
   submissionUnknownAutoRetry: false,
+  dualExecutionAuthorityAllowed: false,
+  legacyExecutionMayBypassAuthoritativeSpine: false,
+  legacyWritePathPolicy: 'DISABLE_OR_SAME_SPINE_PRETRADE_OMS',
   projectControlCenterBridgePhase: '8B',
   activityBridgePhase: '8B',
 });
@@ -102,7 +128,16 @@ export function assertProductionRuntimeCompositionContract(
     violations.push('runtime identity must be explicit');
   }
   if (value.marketRuntimeIdentity !== 'OWNER_INSTANCE') violations.push('market runtime must be the owner instance');
-  if (value.hardRiskIdentity !== 'OWNER_ACCOUNT_KILL_SWITCH') violations.push('hard risk must use the owner account KillSwitch');
+  if (value.hardRiskIdentity !== 'TYPED_EXCHANGE_ACCOUNT_CANONICAL_SOURCE') {
+    violations.push('hard risk must use a typed exchange/account canonical source');
+  }
+  if (
+    value.rawCurrentKillSwitchSnapshotQualifiesAsHardRisk
+    || !value.hardRiskMustMatchExchangeAccountRuntimeIdentity
+    || value.hardRiskTypeEscapeAllowed
+  ) {
+    violations.push('raw KillSwitch snapshots and type escapes cannot satisfy the hard-risk boundary');
+  }
   if (
     value.recoverySpineIdentity !== 'OWNER_INSTANCE'
     || value.reconciliationSpineIdentity !== 'OWNER_INSTANCE'
@@ -117,6 +152,13 @@ export function assertProductionRuntimeCompositionContract(
     violations.push('application boot cannot trade or grant LIVE_READY');
   }
   if (value.submissionUnknownAutoRetry) violations.push('SUBMISSION_UNKNOWN cannot auto-retry');
+  if (
+    value.dualExecutionAuthorityAllowed
+    || value.legacyExecutionMayBypassAuthoritativeSpine
+    || value.legacyWritePathPolicy !== 'DISABLE_OR_SAME_SPINE_PRETRADE_OMS'
+  ) {
+    violations.push('legacy write paths must be disabled or use the owner spine PreTradeRiskGateway and OMS');
+  }
   if (value.projectControlCenterBridgePhase !== '8B' || value.activityBridgePhase !== '8B') {
     violations.push('operations evidence bridges are deferred to Phase 8B');
   }

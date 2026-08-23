@@ -267,8 +267,12 @@
   按显式 `{exchange, accountId}` 只拥有一个 Production Runtime / `ProductionSpine`；
   Recovery、Reconciliation 与 Workbench 必须使用同一实例。
 - **安全与持久化**: 生产所有者必须显式提供 durable `FileEventJournal`、
-  `PaperLedgerStore`、合法 collector `MarketDataRuntime` 与同账户 canonical KillSwitch
-  hard-risk 来源；缺失时 fail closed，不使用内存/假 CLEAR 兜底。
+  `PaperLedgerStore`、合法 collector `MarketDataRuntime`，以及与 `{exchange, accountId}`
+  一致的 typed canonical hard-risk source；当前 raw `KillSwitch.snapshot()` 含 placeholder
+  零值且不满足该边界，禁止 `as any`、内存/假 CLEAR/硬编码零值兜底。
+- **单一执行权威**: 对同一运行时身份，现有订单 API、Agent、SignalRouter、CopyTrading、
+  Arbitrage、DCA/TWAP/Bracket/Trigger、ExecutionQueue 与 position auto-close 必须禁用/
+  fail closed，或进入同一 `ProductionSpine -> PreTradeRiskGateway -> OMS`；禁止双执行权威。
 - **启动边界**: 应用启动不提交订单、不授予 LIVE_READY、不启用 Testnet/Live。
 - **交付物**: `docs/phase-8a-authoritative-production-runtime-composition-contract.md`、
   `src/runtime/production/ProductionRuntimeCompositionContract.ts` 与聚焦契约测试。

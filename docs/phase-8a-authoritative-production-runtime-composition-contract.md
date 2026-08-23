@@ -23,7 +23,7 @@ src/index.ts process lifecycle
     -> one Application Production Runtime Owner per {exchange, accountId}
       -> one ProductionSpine
       -> one owner MarketDataRuntime
-      -> one owner account KillSwitch / hard-risk provider
+      -> one typed exchange/account canonical hard-risk provider
       -> one durable FileEventJournal
       -> one durable PaperLedgerStore
       -> retained RecoveryResult and ReconciliationReport
@@ -80,14 +80,45 @@ The Application Production Runtime Owner creates and stops the one legitimate
 freshness. Startup, Gateway, Workbench, Hermes, and tests cannot publish a synthetic ticker to
 grant readiness.
 
-The owner must also own or receive the one account-bound canonical `KillSwitch` used by the
-runtime safety path. `ProductionSpineConfig.hardRisk` reads that authority; it cannot return a
-hard-coded CLEAR snapshot or silently substitute zero exposure/positions. Repository production
-composition does not currently own this instance, so implementation must close that dependency
-boundary before creating a spine. Missing or incomplete hard-risk facts leave the runtime
-disabled/unavailable; the dashboard cannot supply them.
+The raw snapshot from the current `src/router/KillSwitch.ts` does **not** qualify as the
+`ProductionSpine` hard-risk source. It is exchange-bound but not account-bound, its `snapshot()`
+contains placeholder zero exposure/position facts, and its shape differs from
+`risk/pretrade-risk-types.ts` `HardRiskSnapshot`.
 
-## 5. Startup and authority separation
+The owner must instead provide either an explicit typed adapter over complete canonical facts or
+a unified account-and-exchange-bound canonical risk source. Its identity must match the same
+`{exchange, accountId}` runtime key. `ProductionSpineConfig.hardRisk` reads that authority without
+`as any`, type escape, hard-coded CLEAR, or zero-value fallback. Missing, incomplete, mismatched,
+or invalid facts fail closed and prevent the authoritative spine from being published to read
+surfaces. Repository production composition does not currently own this complete source, so the
+future implementation must close the boundary before publishing a spine.
+
+## 5. No dual execution authority
+
+One `ProductionSpine` object is not sufficient if another write-capable path can still mutate or
+submit orders for the same `{exchange, accountId}` independently. Phase 8A therefore forbids dual
+execution authority and freezes these existing legacy write-capable surfaces:
+
+- `POST /api/orders`;
+- Agent execution;
+- `SignalRouter`;
+- `CopyTrading`;
+- `ArbitrageExecutor`;
+- DCA, TWAP, Bracket, and `TriggerOrderManager`;
+- `ExecutionQueue`;
+- position auto-close.
+
+For the same runtime key, every production order mutation must take exactly one of two paths:
+
+1. be quarantined, disabled, or fail closed; or
+2. route through the exact owner `ProductionSpine` -> `PreTradeRiskGateway` -> owner OMS.
+
+No legacy execution path may bypass the spine, even when the process contains only one spine
+object. The first implementation may choose quarantine/disablement. Phase 8A does not require
+migrating every legacy path yet, but it cannot publish an authoritative runtime while an enabled
+independent execution authority remains for that identity.
+
+## 6. Startup and authority separation
 
 The orchestration/read states are:
 
@@ -128,7 +159,7 @@ boolean, UI state, or application boot cannot invoke or replace this chain.
 `SUBMISSION_UNKNOWN` remains terminal for automatic retry. Recovery, reconciliation, startup,
 and shutdown must never resend it.
 
-## 6. Workbench binding
+## 7. Workbench binding
 
 The future binding is exactly:
 
@@ -147,7 +178,7 @@ runtime state returns `null`/`UNAVAILABLE`/`UNKNOWN`; a read cannot start or rep
 Workbench cannot create, start, recover, reconcile, activate, execute, persist, or shut down the
 runtime. Its router remains GET-only.
 
-## 7. Failure and partial-start model
+## 8. Failure and partial-start model
 
 The default is fail closed:
 
@@ -163,10 +194,12 @@ The default is fail closed:
 | Missing/stale market | No LIVE_READY; no synthetic ticker or repair. |
 | Partial startup | Withdraw read availability first, then unwind only owned resources. |
 | Runtime shutdown | Workbench becomes unavailable/stale; no replacement is created. |
+| Enabled legacy write path | Disable/fail closed or route through the same spine risk/OMS path. |
+| Missing/incomplete hard-risk facts | Do not publish the spine; no raw KillSwitch/zero/CLEAR fallback. |
 
 There is no automatic resend, synthetic repair, fake healthy state, or fallback authority.
 
-## 8. Shutdown ownership
+## 9. Shutdown ownership
 
 `AppGateway.stop()` owns runtime shutdown and calls it exactly once logically; repeated calls are
 idempotent. The owner first withdraws Workbench availability and prevents new activation or
@@ -177,7 +210,7 @@ gateway resources continue their deterministic shutdown after the runtime owner 
 Shutdown cannot construct a replacement runtime. An HTTP read during shutdown returns
 unavailable rather than restarting anything.
 
-## 9. Paper, Testnet, and Live boundaries
+## 10. Paper, Testnet, and Live boundaries
 
 - Paper: the first implementation is Paper-capable only, with explicit durable account identity
   and persistence. Owning the spine does not authorize order submission.
@@ -187,19 +220,19 @@ unavailable rather than restarting anything.
 `ProductionSpine` means the authoritative application runtime composition; it does not mean
 real-money Live.
 
-## 10. Phase 8B boundary
+## 11. Phase 8B boundary
 
 Project Control Center and factual activity remain owned by the separate Hermes monitor process.
 Cross-process read transport, polling/cache, generic observability IPC, and event aggregation are
 deferred to Phase 8B — Operations Evidence Read Bridge. Until then those Workbench domains may
 remain `UNAVAILABLE`/`INCOMPLETE`. Phase 8A must not copy monitor state into trading authority.
 
-## 11. Phase 8A implementation acceptance criteria
+## 12. Phase 8A implementation acceptance criteria
 
 Implementation remains a later, separately authorized change and must prove:
 
 1. `createGateway()` creates at most one authoritative spine per explicit runtime key.
-2. Required durability, market, identity, and hard-risk dependencies fail closed when absent.
+2. Required durability, market, identity, and typed hard-risk dependencies fail closed when absent.
 3. Recovery and reconciliation operate on the exact owner spine; retained evidence is readable.
 4. Workbench receives the exact same reference and repeated reads create nothing.
 5. Missing/stopped runtime is unavailable and no read can restart it.
@@ -209,5 +242,9 @@ Implementation remains a later, separately authorized change and must prove:
 9. No second Kernel, OMS, stores, ledger, accounting, lifecycle, recovery, reconciliation, or
    LIVE_READY truth is created for integration or presentation.
 10. Phase 8B operations bridges remain deferred.
+11. Every legacy write-capable path for the runtime key is disabled/fail-closed or routes through
+    the same spine -> `PreTradeRiskGateway` -> OMS path.
+12. Raw current `KillSwitch.snapshot()`, `as any`, fake CLEAR, and placeholder-zero risk facts
+    cannot satisfy the hard-risk dependency.
 
 This contract gate does not claim any of those implementation items complete.
