@@ -19,6 +19,7 @@ export const PRODUCTION_RUNTIME_STATES = [
   'LIVE_READY',
   'STOPPING',
   'STOPPED',
+  'STOP_FAILED',
 ] as const;
 
 export type ProductionRuntimeState = (typeof PRODUCTION_RUNTIME_STATES)[number];

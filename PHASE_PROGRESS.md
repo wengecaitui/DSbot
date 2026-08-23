@@ -255,14 +255,14 @@
 
 ---
 
-## Phase 8 — 权威生产运行时组合 + 功能模块接入 ⏳ 30%
+## Phase 8 — 权威生产运行时组合 + 功能模块接入 ⏳ 45%
 
-### Phase 8A — 权威生产运行时组合契约门 ⏳ Draft
+### Phase 8A — 权威生产运行时组合 ⏳ Implementation Draft
 
-- **基线**: `feature/orangeai-split@3f6918e317e608580dfcd565138432be9bebcd21`。
-- **当前事实**: 生产应用仍未拥有 `ProductionSpine`；`createGateway()` 的 Workbench
-  只挂载应用生命周期和 Hermes，不能读取 Market / Position / OMS / Accounting / Safety
-  的权威运行时事实。
+- **实现基线**: `feature/orangeai-split@dfdf2ba3d2fa475fb3ba0171082785e5a663d22d`。
+- **当前事实**: `createGateway()` 现组合一个 opt-in、Paper-only 的
+  `ApplicationProductionRuntimeOwner`；配置缺失或不完整时保持 `NOT_CONFIGURED`，不创建
+  `ProductionSpine`，Workbench 的规范域继续 fail closed。
 - **冻结方向**: `createGateway()` / `AppGateway` 作为最小应用组合与生命周期边界，
   按显式 `{exchange, accountId}` 只拥有一个 Production Runtime / `ProductionSpine`；
   Recovery、Reconciliation 与 Workbench 必须使用同一实例。
@@ -274,10 +274,14 @@
   Arbitrage、DCA/TWAP/Bracket/Trigger、ExecutionQueue 与 position auto-close 必须禁用/
   fail closed，或进入同一 `ProductionSpine -> PreTradeRiskGateway -> OMS`；禁止双执行权威。
 - **启动边界**: 应用启动不提交订单、不授予 LIVE_READY、不启用 Testnet/Live。
-- **交付物**: `docs/phase-8a-authoritative-production-runtime-composition-contract.md`、
-  `src/runtime/production/ProductionRuntimeCompositionContract.ts` 与聚焦契约测试。
-- **未完成**: 本阶段仅为 Contract Gate，尚未实现生产组合、运行时创建或 Workbench
-  权威绑定，不得宣称 Phase 8A implementation complete。
+- **实现交付物**: `src/runtime/production/ProductionRuntimeOwner.ts` 在完整显式配置下按
+  durability -> single spine -> recovery -> reconciliation -> market 的顺序启动，并将同一
+  spine 与 retained recovery evidence 只读注入 Workbench；关闭先撤销读取，再幂等清理。
+- **旧执行栈**: 请求 Phase 8A 运行时时，Order API、Agent、SignalRouter、CopyTrading、
+  Arbitrage、DCA/TWAP/Bracket/Trigger、ExecutionQueue 与 position auto-close 统一隔离，
+  不保留第二执行权威。
+- **评审边界**: Implementation 仍处于 Draft PR，未合并；完整 CI 与独立评审通过前不得
+  宣称 Phase 8A release complete，也不得启用 Testnet/Live。
 - **Phase 8B 延后**: Project Control Center / Hermes activity 跨进程只读桥接、通用
   observability IPC 与事件聚合延后到 Operations Evidence Read Bridge。
 

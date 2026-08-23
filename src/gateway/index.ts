@@ -28,6 +28,7 @@ import { initDCAPersistence } from '../execution/dca-persistence';
 import { createFeedManager } from '../feeds';
 import { createSessionManager } from '../sessions';
 import { createAgentManager } from '../agents';
+import { setDirectExchangeExecutionQuarantined } from '../agents/handlers/direct-exchange-execution';
 import { createChannelManager } from '../channels';
 import { createPairingService } from '../pairing';
 import { createMemoryService } from '../memory';
@@ -86,6 +87,10 @@ import {
 } from '../hermes';
 import { createWorkbenchReadAdapter } from '../observability/workbench-read-adapter';
 import { createWorkbenchRouter } from './workbench-routes';
+import {
+  createApplicationProductionRuntimeOwner,
+  type ProductionRuntimePublicReadView,
+} from '../runtime/production/ProductionRuntimeOwner';
 
 // =============================================================================
 // TYPES
@@ -426,6 +431,8 @@ export function createGatewayServer(config?: GatewayConfig): GatewayServer {
 }
 
 export interface AppGateway {
+  /** Read-only Phase 8A evidence. Never exposes the mutable ProductionSpine. */
+  readonly productionRuntime: ProductionRuntimePublicReadView;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -447,6 +454,15 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     config = { ...config, gateway: { ...config.gateway, port: envPort } };
   }
   let currentConfig = config;
+  const productionRuntimeOwner = createApplicationProductionRuntimeOwner(config.productionRuntime);
+  const legacyExecutionAllowed = productionRuntimeOwner.legacyWrites.mode !== 'QUARANTINED';
+  if (!legacyExecutionAllowed) {
+    // Phase 8A no-dual-execution-authority: fail closed any Agent handler that
+    // trades directly against exchange credentials instead of routing through
+    // the authoritative ProductionSpine -> PreTradeRiskGateway -> OMS path.
+    setDirectExchangeExecutionQuarantined('binance', true);
+    setDirectExchangeExecutionQuarantined('bybit', true);
+  }
   configureHttpClient(currentConfig.http);
   const configPath = process.env.CLODDS_CONFIG_PATH || CONFIG_FILE;
   const db = await initDatabase();
@@ -534,6 +550,8 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       mode: 'application-gateway',
     }),
     hermes: () => hermesCoordinator.getSnapshot(),
+    productionSpine: productionRuntimeOwner.authoritativeSpine,
+    recovery: productionRuntimeOwner.read.recovery,
   });
   httpGateway.setWorkbenchRouter(createWorkbenchRouter(workbenchReadAdapter));
 
@@ -660,7 +678,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
 
   // Create execution service for real trading
   let executionService: ExecutionService | null = null;
-  if (config.trading?.enabled) {
+  if (config.trading?.enabled && legacyExecutionAllowed) {
     const poly = config.trading.polymarket;
     const kalshi = config.trading.kalshi;
     const opinionCfg = config.trading.opinion;
@@ -710,6 +728,8 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     } else {
       logger.warn('Trading enabled but no platform credentials configured');
     }
+  } else if (config.trading?.enabled) {
+    logger.warn('Legacy execution is quarantined by the Phase 8A authoritative runtime owner');
   }
 
   // Wire safety + circuit breaker + orchestrator around execution service.
@@ -804,7 +824,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
 
   // Create copy trading service
   let copyTrading: CopyTradingService | null = null;
-  if (config.copyTrading?.enabled && whaleTracker) {
+  if (legacyExecutionAllowed && config.copyTrading?.enabled && whaleTracker) {
     copyTrading = createCopyTradingService(whaleTracker, executionService, {
       followedAddresses: config.copyTrading?.followedAddresses ?? [],
       sizingMode: config.copyTrading?.sizingMode ?? 'fixed',
@@ -831,7 +851,9 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   // Wire DCA HTTP API router (DCA persistence already initialized above)
   {
     const { createDCARouter } = await import('./dca-routes.js');
-    httpGateway.setDCARouter(createDCARouter(executionService ? { execution: executionService } : undefined));
+    if (legacyExecutionAllowed) {
+      httpGateway.setDCARouter(createDCARouter(executionService ? { execution: executionService } : undefined));
+    }
   }
 
   // Wire TWAP + Bracket + Trigger order routers (require executionService)
@@ -1061,7 +1083,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   }
 
   // Initialize auto-arbitrage executor if enabled
-  if (config.arbitrageExecution?.enabled && opportunityFinder) {
+  if (legacyExecutionAllowed && config.arbitrageExecution?.enabled && opportunityFinder) {
     const wantsDryRun = config.arbitrageExecution?.dryRun ?? false;
     const effectiveDryRun = executionService ? wantsDryRun : true;
 
@@ -1092,7 +1114,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
 
   // Initialize signal router if enabled
   const signalRouterCfg = config.signalRouter;
-  if (signalRouterCfg?.enabled) {
+  if (legacyExecutionAllowed && signalRouterCfg?.enabled) {
     const mlModel = (config.mlPipeline?.useMLConfidence !== false && mlPipeline)
       ? mlPipeline.getModel()
       : null;
@@ -1737,7 +1759,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
 
       // Recreate signal router with current config
       const rebuildSignalRouterCfg = currentConfig.signalRouter;
-      if (rebuildSignalRouterCfg?.enabled) {
+      if (legacyExecutionAllowed && rebuildSignalRouterCfg?.enabled) {
         const mlModel = (currentConfig.mlPipeline?.useMLConfidence !== false && mlPipeline)
           ? mlPipeline.getModel()
           : null;
@@ -2556,8 +2578,14 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   httpGateway.setTradingApiRouter(tradingApiRouter);
 
   const baseGateway: AppGateway = {
+    productionRuntime: productionRuntimeOwner.read,
     async start(): Promise<void> {
       logger.info('Starting gateway services');
+
+      // Phase 8A owns the Paper runtime before any legacy application service
+      // starts. Missing config is a no-op/unavailable state; configured
+      // durability, recovery, reconciliation, or market failures abort boot.
+      await productionRuntimeOwner.start();
 
       // Setup graceful shutdown handlers
       setupShutdownHandlers();
@@ -2565,6 +2593,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       // Register shutdown cleanup
       onShutdown(async () => {
         logger.info('Shutting down gateway services');
+        await productionRuntimeOwner.stop();
         if (executionProducer) await executionProducer.close();
         if (botManager) {
           for (const s of botManager.getAllBotStatuses()) {
@@ -2754,6 +2783,10 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       // coordinator's onStop hook does not fire until the delegate stop below
       // completes.
       lifecycleHealth.markUnhealthy();
+
+      // Withdraw the canonical read binding and stop the owned Paper runtime
+      // before any other gateway resource is dismantled.
+      await productionRuntimeOwner.stop();
 
       if (heartbeatService) {
         heartbeatService.stop();
@@ -2946,13 +2979,14 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   // a failed start triggers the compensating rollback that closes the HTTP
   // listener (so the lifecycle truth stays consistent and a later start is
   // retryable) while leaving the coordinator stopped/non-authorizing.
-  return bindHandshakeToLifecycle(baseGateway, {
+  const boundGateway = bindHandshakeToLifecycle(baseGateway, {
     coordinator: hermesCoordinator,
     onStartFailure: async () => {
       // A failed start must leave the lifecycle-health flag false. Mark it
       // unhealthy BEFORE rolling back so a partial start that (incorrectly)
       // flipped it true cannot retain stale health through the rollback.
       lifecycleHealth.markUnhealthy();
+      await productionRuntimeOwner.stop();
       try {
         await httpGateway.stop();
       } catch (error) {
@@ -2960,4 +2994,9 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       }
     },
   });
+  return {
+    productionRuntime: productionRuntimeOwner.read,
+    start: () => boundGateway.start(),
+    stop: () => boundGateway.stop(),
+  };
 }

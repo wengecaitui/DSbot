@@ -18,12 +18,11 @@ import { PaperExecutionService, type ExecuteParams } from '../paper/PaperExecuti
 import type { PaperBrokerPersistence } from '../paper/PaperBroker';
 import type { PaperAccountConfig, PaperFillLedgerEntry } from '../types/paper-account';
 import type { PaperFill } from '../types/paper-fill';
-import type { RiskSnapshot } from '../router/KillSwitch';
 import { createPositionManagerRuntime } from './PositionManagerRuntime';
 import { PositionPlanStore } from './PositionPlanStore';
 import { systemDomainClock } from '../runtime/Clock';
 import { evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
-import type { GatewayInput } from '../risk/pretrade-risk-types';
+import type { AccountBoundHardRiskSnapshot, GatewayInput } from '../risk/pretrade-risk-types';
 import type { TradeIntent } from '../types/trade-intent';
 import type { EventJournalPort } from '../kernel/EventJournalPort';
 import { createFileEventJournal, type FileEventJournal } from '../recovery/FileEventJournal';
@@ -43,7 +42,7 @@ export interface ProductionSpineConfig {
   accountId?: string;
   paperAccount?: PaperAccountConfig;
   persistence?: PaperBrokerPersistence;
-  hardRisk: () => RiskSnapshot;
+  hardRisk: () => AccountBoundHardRiskSnapshot;
   stopPct?: number;
   journal?: EventJournalPort;
   /** Path to durable journal file. Creates FileEventJournal if provided. */
@@ -70,7 +69,7 @@ export interface ProductionSpine {
   protection: ReturnType<typeof createPositionManagerRuntime>;
   adapter: PaperExecutionAdapter;
   service: PaperExecutionService;
-  privateConfig: { hardRisk: () => RiskSnapshot };
+  privateConfig: { hardRisk: () => AccountBoundHardRiskSnapshot };
   /** Set internally by RecoveryManager — read-only to callers */
   readonly recoveryVerified: boolean;
   /** Phase 5B: granted only by the real reconciliation sequence — read-only to callers */
@@ -173,7 +172,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     planStore,
     oms: dynamicPriceOms,
     marketStore,
-    hardRisk: config.hardRisk as any,
+    hardRisk: config.hardRisk,
     stopPct: config.stopPct ?? 0.05,
   });
   // Strip _setLive from public interface — captured for internal use only
@@ -296,13 +295,13 @@ const RECONCILE_TOKEN = Symbol('reconcileToken');
  */
 export async function recoverAndStart(
   spine: ProductionSpine,
-  journalPath: string,
+  journalPath: string | FileEventJournal,
   checkpointPath?: string,
-): Promise<{ recoveryVerified: boolean; mode: string; errors: any[] }> {
+): Promise<import('../recovery/RecoveryManager').RecoveryResult & { readonly errors: readonly unknown[] }> {
   const { recoverFromJournal } = require('../recovery/RecoveryManager') as typeof import('../recovery/RecoveryManager');
   const { createFileEventJournal } = require('../recovery/FileEventJournal') as typeof import('../recovery/FileEventJournal');
 
-  const journal = createFileEventJournal(journalPath);
+  const journal = typeof journalPath === 'string' ? createFileEventJournal(journalPath) : journalPath;
   const projectors = buildProjectorMap(spine);
   const storeDigests = {
     position: spine.positionStore.digest(),
@@ -318,7 +317,7 @@ export async function recoverAndStart(
     if (typeof fn === 'function') await fn();
   }
 
-  return { recoveryVerified: result.recoveryVerified, mode: result.mode, errors: result.replayReport.errors };
+  return { ...result, errors: result.replayReport.errors };
 }
 
 /**
@@ -403,7 +402,7 @@ export async function executeThroughGateway(
     marketSnapshot: marketSnapshot as any,
     positionResolution: pos as any,
     policyResolution: policyStore.resolve(exchange, symbol) as any,
-    hardRisk: hardRiskSnapshot as any,
+    hardRisk: hardRiskSnapshot,
   };
 
   const riskResult = evaluatePreTradeRisk(gatewayInput);
