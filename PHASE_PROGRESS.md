@@ -18,7 +18,7 @@
 | 5 | Freqtrade 数据层整合 | P1 | 🔲待开始 | 0% |
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
 | 7 | Hermes 握手 + Quant Terminal（7A/7B/7C 已合并） | P1 | ✅完成 | 100% |
-| 8 | 权威生产运行时组合 + 功能模块接入 | P1 | ⏳契约门进行中 | 30% |
+| 8 | 权威生产运行时组合 + 功能模块接入 | P1 | ⏳8A已合并/8B契约门 | 60% |
 | 9 | 系统集成 | P2 | 🔲待开始 | 0% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
 
@@ -255,9 +255,9 @@
 
 ---
 
-## Phase 8 — 权威生产运行时组合 + 功能模块接入 ⏳ 45%
+## Phase 8 — 权威生产运行时组合 + 功能模块接入 ⏳ 60%
 
-### Phase 8A — 权威生产运行时组合 ⏳ Implementation Draft
+### Phase 8A — 权威生产运行时组合 ✅ 已合并 (COMPLETE / MERGED)
 
 - **实现基线**: `feature/orangeai-split@dfdf2ba3d2fa475fb3ba0171082785e5a663d22d`。
 - **当前事实**: `createGateway()` 现组合一个 opt-in、Paper-only 的
@@ -280,10 +280,24 @@
 - **旧执行栈**: 请求 Phase 8A 运行时时，Order API、Agent、SignalRouter、CopyTrading、
   Arbitrage、DCA/TWAP/Bracket/Trigger、ExecutionQueue 与 position auto-close 统一隔离，
   不保留第二执行权威。
-- **评审边界**: Implementation 仍处于 Draft PR，未合并；完整 CI 与独立评审通过前不得
-  宣称 Phase 8A release complete，也不得启用 Testnet/Live。
-- **Phase 8B 延后**: Project Control Center / Hermes activity 跨进程只读桥接、通用
-  observability IPC 与事件聚合延后到 Operations Evidence Read Bridge。
+- **合并状态**: Phase 8A 已通过 PR #123 合并。批准实现 head `b435d66c3ab1e66cedde4bfb456d630c4ce8828f`，
+  合并提交 `ad3217b713bafe051610c7f2d3b5cd4cd48b2945`（`feature/orangeai-split`）。
+  仍为 Paper-only；未启用 Testnet/Live，未授予 LIVE_READY，boot ORDER_SUBMISSIONS=0。
+- **Phase 8B**: Project Control Center / Hermes activity 跨进程只读桥接、通用 observability IPC
+  与事件聚合 → 见下方 Phase 8B Contract Gate。
+
+### Phase 8B — Operations Evidence Read Bridge ⏳ Contract Gate
+
+- **状态**: Contract Gate（契约设计已冻结，实现未授权）。
+- **契约文档**: `docs/phase-8b-operations-evidence-read-bridge-contract.md`。
+- **可执行契约**: `src/observability/OperationsEvidenceReadBridgeContract.ts`。
+- **契约测试**: `tests/observability/operations-evidence-read-bridge-contract.test.ts`（15 项，`npm run test:phase-8b-contract`）。
+- **定位**: EVIDENCE PLANE（证据面），非 CONTROL PLANE（控制面）；只读、单向、观测性。
+- **冻结不变式**: 外部 Hermes runtime evidence ≠ HandshakeCoordinator；source 失败降级为
+  UNKNOWN/UNAVAILABLE/INCOMPLETE，绝不伪造 healthy/zero；raw evidence 发布前必须 normalization/redaction；
+  ObservableAgentEvent 保持唯一 activity 事件信封；每 AppGateway 仅一个 bridge，非第二 runtime；
+  交易权威（Market/Position/Order/Accounting/Recovery/Reconciliation/LIVE_READY）不变。
+- **实现未授权**: 不接入生产 wiring、不加控制端点、不改交易权威。
 
 ### 8.1 行情数据层（CCXT + Freqtrade 数据源双写）⏳
 - ✅ `src/data/collector.ts` — Bitget WS 采集器就位

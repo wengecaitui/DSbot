@@ -29,6 +29,7 @@
     "test:workbench": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/observability/workbench-contract.test.ts tests/observability/workbench-implementation.test.ts",
     "test:phase-8a-contract": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/runtime/production-runtime-composition-contract.test.ts",
     "test:phase-8a-implementation": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/runtime/production-runtime-composition-implementation.test.ts",
+    "test:phase-8b-contract": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/observability/operations-evidence-read-bridge-contract.test.ts",
     "test:quant-engine": "python -m unittest discover -s quant_engine/tests -p \"test_*.py\"",
     "ci": "npm run typecheck && npm run test && npm run test:quant-engine && npm run build",
     "security:exceptions": "node scripts/check-audit-exceptions.mjs",
