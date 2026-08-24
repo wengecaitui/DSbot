@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 
 const SENSITIVE_KEY = /(?:api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token)/i;
 const INLINE_SECRET = /\b(api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token)(\s*[:=]\s*)([^\s,;]+)/gi;
-const BEARER = /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi;
+const BEARER = /\bBearer\s+[^\s,;]+/gi;
 const SECRET_VALUE = '<REDACTED>';
 
 export interface RedactionResult<T> {

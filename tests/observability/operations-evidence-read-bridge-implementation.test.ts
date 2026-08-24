@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import {
   createOperationsEvidenceReadBridge,
@@ -11,6 +13,8 @@ import { createGitWorkspaceAdapter } from '../../src/observability/adapters/git-
 import { createHermesRuntimeAdapter } from '../../src/observability/adapters/hermes-runtime-adapter';
 import { createHermesLogAdapter } from '../../src/observability/adapters/hermes-log-adapter';
 import { createWorkbenchReadAdapter } from '../../src/observability/workbench-read-adapter';
+import { createProjectControlCenter, type ControlCenterConfig } from '../../src/observability/project-control-center';
+import { EvidenceCommandTimeoutError, runBoundedEvidenceCommand } from '../../src/observability/bounded-command';
 import type { CoordinatorSnapshot } from '../../src/hermes/types';
 import type {
   ObservableAgentEvent,
@@ -289,6 +293,73 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     });
   });
 
+  describe('Activity evidence truth', () => {
+    it('keeps healthy buffered activity AVAILABLE/FRESH', async () => {
+      const { pcc } = fakePcc();
+      const probe = fakeAdapter('activity', [rawEvent({ source: 'process', action: 'runtime.observed' })]);
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
+      await bridge.start();
+      const activity = workbenchFor(bridge).activity();
+      assert.equal(activity.availability, 'AVAILABLE');
+      assert.equal(activity.freshness, 'FRESH');
+      assert.equal(activity.data?.events.length, 1);
+      assert.equal(activity.provenance.lastUpdatedAt, bridge.read.status().lastUpdatedAt);
+      await bridge.stop();
+    });
+
+    it('keeps historical events readable but not AVAILABLE/FRESH after bridge stop', async () => {
+      const { pcc } = fakePcc();
+      const probe = fakeAdapter('activity', [rawEvent({ source: 'process', action: 'runtime.observed' })]);
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
+      await bridge.start();
+      await bridge.stop();
+      const activity = workbenchFor(bridge).activity();
+      assert.equal(activity.data?.events.length, 1);
+      assert.notEqual(activity.availability, 'AVAILABLE');
+      assert.notEqual(activity.freshness, 'FRESH');
+    });
+
+    it('cannot report buffered activity AVAILABLE/FRESH while a configured source is failing', async () => {
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
+      const probe = fakeAdapter('activity', [rawEvent({ source: 'git', action: 'git.snapshot' })]);
+      const { pcc } = fakePcc();
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [probe.adapter], sourceHealth: health });
+      await bridge.start();
+      health.callbacks('git-workspace').onError(new Error('GIT_FAILED'));
+      const activity = workbenchFor(bridge).activity();
+      assert.equal(activity.data?.events.length, 1);
+      assert.equal(activity.availability, 'INCOMPLETE');
+      assert.equal(activity.freshness, 'STALE');
+      await bridge.stop();
+    });
+  });
+
+  describe('published error redaction', () => {
+    it('redacts and bounds source/PCC error messages before Workbench publication', async () => {
+      const rawError = [
+        'Authorization: Bearer BEARER_SECRET',
+        'token=TOKEN_SECRET',
+        'password=PASSWORD_SECRET',
+        'apiKey=APIKEY_SECRET',
+        'x'.repeat(1_000),
+      ].join(' ');
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
+      health.callbacks('git-workspace').onError(new Error(rawError));
+      const { pcc } = fakePcc({ refreshError: new Error(rawError) });
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sourceHealth: health });
+      await bridge.start();
+      const serialized = JSON.stringify(workbenchFor(bridge).operations());
+      for (const secret of ['BEARER_SECRET', 'TOKEN_SECRET', 'PASSWORD_SECRET', 'APIKEY_SECRET']) {
+        assert.ok(!serialized.includes(secret), `Workbench must not expose ${secret}`);
+      }
+      assert.match(serialized, /<REDACTED>/);
+      const status = bridge.read.status();
+      assert.ok((status.sources[0].lastError?.length ?? 0) <= 512);
+      assert.ok((status.projectControlCenter.lastError?.length ?? 0) <= 512);
+      await bridge.stop();
+    });
+  });
+
   describe('Project Control Center freshness and terminal lifecycle', () => {
     it('refreshes PCC again and publishes changed HEAD, PR, and CI evidence', async () => {
       let refreshes = 0;
@@ -382,6 +453,96 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       await bridge.start();
       await bridge.stop();
       await assert.rejects(() => bridge.start(), /terminal after stop/);
+    });
+
+    it('turns a hanging PCC command into bounded evidence failure without blocking start', async () => {
+      const config = JSON.parse(readFileSync(new URL('../../config/control-center/project-state.json', import.meta.url), 'utf8')) as ControlCenterConfig;
+      const pcc = createProjectControlCenter({
+        repoPath: '.', config,
+        readFile: async () => { throw new Error('not needed before command timeout'); },
+        runCommand: (_executable, _args, _cwd, signal) => new Promise((_resolve, reject) => {
+          const fail = () => reject(signal?.reason ?? new Error('aborted'));
+          if (signal?.aborted) fail();
+          else signal?.addEventListener('abort', fail, { once: true });
+        }),
+      });
+      const bridge = createOperationsEvidenceReadBridge({
+        projectControlCenter: pcc,
+        projectControlCenterRefreshTimeoutMs: 100,
+      });
+      const started = Date.now();
+      await bridge.start();
+      assert.ok(Date.now() - started < 1_000, 'initial evidence timeout must not hang gateway progression');
+      assert.equal(bridge.read.status().running, true);
+      assert.equal(bridge.read.status().projectControlCenter.state, 'FAILING');
+      assert.match(bridge.read.status().projectControlCenter.lastError ?? '', /timed out after 100 ms/);
+      await bridge.stop();
+    });
+
+    it('aborts an in-flight PCC refresh so stop remains bounded', async () => {
+      let refreshes = 0;
+      let aborts = 0;
+      const snapshot = makePccSnapshot();
+      const pcc: ProjectControlCenter = {
+        async refresh(signal) {
+          refreshes += 1;
+          if (refreshes === 1) return;
+          await new Promise<void>((_resolve, reject) => {
+            const fail = () => { aborts += 1; reject(signal?.reason ?? new Error('aborted')); };
+            if (signal?.aborted) fail();
+            else signal?.addEventListener('abort', fail, { once: true });
+          });
+        },
+        observe() {}, snapshot() { return snapshot; },
+      };
+      const bridge = createOperationsEvidenceReadBridge({
+        projectControlCenter: pcc,
+        projectControlCenterRefreshIntervalMs: 100,
+        projectControlCenterRefreshTimeoutMs: 10_000,
+      });
+      await bridge.start();
+      await sleep(150);
+      const stopped = Date.now();
+      await bridge.stop();
+      assert.ok(Date.now() - stopped < 1_000, 'stop must abort rather than await a hanging refresh deadline');
+      assert.equal(aborts, 1);
+      const afterStop = refreshes;
+      await sleep(150);
+      assert.equal(refreshes, afterStop);
+    });
+  });
+
+  describe('native command deadlines', () => {
+    it('terminates a timed-out child process instead of leaving orphan work', async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'phase8b-command-'));
+      const marker = join(directory, 'orphan.txt');
+      try {
+        const child = `setTimeout(() => require('fs').writeFileSync(${JSON.stringify(marker)}, 'orphan'), 500); setInterval(() => {}, 1000);`;
+        await assert.rejects(
+          () => runBoundedEvidenceCommand(process.execPath, ['-e', child], { timeoutMs: 100 }),
+          EvidenceCommandTimeoutError,
+        );
+        await sleep(600);
+        assert.equal(existsSync(marker), false, 'terminated child must not execute delayed work');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it('publishes a Git command timeout as FAILING source status', async () => {
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
+      const callbacks = health.callbacks('git-workspace');
+      const adapter = createGitWorkspaceAdapter({
+        repoPath: '.', intervalMs: 100, commandTimeoutMs: 100,
+        runCommand: async () => { throw new EvidenceCommandTimeoutError(100); },
+        onSuccess: callbacks.onSuccess, onError: callbacks.onError,
+      });
+      const { pcc } = fakePcc();
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [adapter], sourceHealth: health });
+      await bridge.start();
+      assert.equal(bridge.read.status().sources[0].state, 'FAILING');
+      assert.match(bridge.read.status().sources[0].lastError ?? '', /timed out after 100 ms/);
+      await bridge.stop();
     });
   });
 

@@ -10,6 +10,13 @@ import { createObservableMonitor } from './monitor';
 import { createObservableStateProjector } from './state-projector';
 import type { ObservableAgentEvent, ObservableEventSourceAdapter } from './contracts';
 import type { ProjectControlCenter, ProjectControlCenterSnapshot } from './project-control-center';
+import { redactText } from './redaction';
+
+const MAX_EVIDENCE_ERROR_LENGTH = 512;
+
+function sanitizeEvidenceError(error: Error): string {
+  return redactText(error.message).value.slice(0, MAX_EVIDENCE_ERROR_LENGTH);
+}
 
 export type OperationsEvidenceSourceState = 'UNCONFIGURED' | 'STOPPED' | 'HEALTHY' | 'FAILING';
 export type OperationsEvidenceAvailability = 'AVAILABLE' | 'INCOMPLETE' | 'UNAVAILABLE';
@@ -108,7 +115,7 @@ export function createOperationsEvidenceSourceHealthModel(
             state: 'FAILING',
             lastFailureAt: now(),
             failureCount: current.failureCount + 1,
-            lastError: error.message,
+            lastError: sanitizeEvidenceError(error),
           }));
         },
       });
@@ -135,6 +142,8 @@ export interface OperationsEvidenceReadBridgeOptions {
   readonly defaultRunId?: string;
   /** Bounded PCC refresh interval. Default 30 seconds; minimum 100 ms. */
   readonly projectControlCenterRefreshIntervalMs?: number;
+  /** Hard deadline for a PCC refresh. Default 10 seconds; minimum 100 ms. */
+  readonly projectControlCenterRefreshTimeoutMs?: number;
   readonly onSourceFailure?: (source: string, error: Error) => void;
   readonly now?: () => number;
 }
@@ -161,6 +170,10 @@ export function createOperationsEvidenceReadBridge(
   const pccRefreshIntervalMs = options.projectControlCenterRefreshIntervalMs ?? 30_000;
   if (!Number.isInteger(pccRefreshIntervalMs) || pccRefreshIntervalMs < 100) {
     throw new Error('projectControlCenterRefreshIntervalMs must be an integer greater than or equal to 100');
+  }
+  const pccRefreshTimeoutMs = options.projectControlCenterRefreshTimeoutMs ?? 10_000;
+  if (!Number.isInteger(pccRefreshTimeoutMs) || pccRefreshTimeoutMs < 100) {
+    throw new Error('projectControlCenterRefreshTimeoutMs must be an integer greater than or equal to 100');
   }
   const now = options.now ?? (() => Date.now());
   const projectControlCenter = options.projectControlCenter ?? null;
@@ -206,6 +219,7 @@ export function createOperationsEvidenceReadBridge(
   let stopPromise: Promise<void> | null = null;
   let pccRefreshTimer: NodeJS.Timeout | undefined;
   let pccRefreshInFlight: Promise<void> | null = null;
+  let pccRefreshAbort: AbortController | null = null;
   let pccSnapshot: ProjectControlCenterSnapshot | null = null;
   let pccState: OperationsEvidenceSourceState = projectControlCenter ? 'STOPPED' : 'UNCONFIGURED';
   let pccLastSuccessfulRefreshAt: number | null = null;
@@ -233,9 +247,15 @@ export function createOperationsEvidenceReadBridge(
     if (!projectControlCenter) return;
     if (pccRefreshInFlight) return pccRefreshInFlight;
     const generation = lifecycleGeneration;
+    const controller = new AbortController();
+    pccRefreshAbort = controller;
+    const timeout = setTimeout(() => {
+      controller.abort(new Error(`Project Control Center refresh timed out after ${pccRefreshTimeoutMs} ms`));
+    }, pccRefreshTimeoutMs);
+    timeout.unref();
     const operation = (async () => {
       try {
-        await projectControlCenter.refresh();
+        await projectControlCenter.refresh(controller.signal);
         const refreshed = structuredClone(projectControlCenter.snapshot());
         if (lifecycle !== 'STOPPED' && lifecycleGeneration === generation) {
           pccSnapshot = refreshed;
@@ -244,18 +264,24 @@ export function createOperationsEvidenceReadBridge(
           pccLastError = null;
         }
       } catch (cause) {
-        const error = cause instanceof Error ? cause : new Error(String(cause));
+        const abortReason = controller.signal.aborted && controller.signal.reason instanceof Error
+          ? controller.signal.reason : null;
+        const error = abortReason ?? (cause instanceof Error ? cause : new Error(String(cause)));
         if (lifecycle !== 'STOPPED' && lifecycleGeneration === generation) {
           pccState = 'FAILING';
           pccLastFailureAt = now();
-          pccLastError = error.message;
+          pccLastError = sanitizeEvidenceError(error);
           recordFailure('project-control-center.refresh', error);
         }
       }
     })();
     pccRefreshInFlight = operation;
     try { await operation; }
-    finally { if (pccRefreshInFlight === operation) pccRefreshInFlight = null; }
+    finally {
+      clearTimeout(timeout);
+      if (pccRefreshAbort === controller) pccRefreshAbort = null;
+      if (pccRefreshInFlight === operation) pccRefreshInFlight = null;
+    }
   }
 
   function snapshotActivity(): readonly ObservableAgentEvent[] {
@@ -357,6 +383,7 @@ export function createOperationsEvidenceReadBridge(
       stoppedAt = now();
       if (pccRefreshTimer) clearInterval(pccRefreshTimer);
       pccRefreshTimer = undefined;
+      pccRefreshAbort?.abort(new Error('Project Control Center refresh stopped'));
       await pccRefreshInFlight;
       try { await monitor.stop(); } catch { /* monitor already reported the evidence failure */ }
       options.sourceHealth?.stop();

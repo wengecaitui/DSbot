@@ -273,11 +273,16 @@ export function createWorkbenchReadAdapter(options: WorkbenchReadAdapterOptions)
   function activity(capturedAt = capture()): ReadOnlySnapshot<ActivityOverviewSnapshot> {
     if (!options.activity) return unavailable(capturedAt, 'observability-event-source', 'runtime event source is not mounted');
     const events = [...options.activity()];
+    const evidenceStatus = options.operationsEvidenceStatus?.() ?? null;
+    const current = evidenceStatus?.availability === 'AVAILABLE' && evidenceStatus.freshness === 'FRESH';
     return {
-      availability: 'AVAILABLE',
-      freshness: events.length > 0 ? 'FRESH' : 'UNKNOWN',
-      provenance: provenance(capturedAt, 'observability-event-source', null, null, null),
+      availability: current ? 'AVAILABLE' : 'INCOMPLETE',
+      freshness: current && events.length > 0
+        ? 'FRESH'
+        : evidenceStatus?.freshness === 'STALE' ? 'STALE' : 'UNKNOWN',
+      provenance: provenance(capturedAt, 'OperationsEvidenceReadBridge', null, null, evidenceStatus?.lastUpdatedAt ?? null),
       data: { events },
+      ...(!current ? { reason: 'Activity evidence is unavailable, incomplete, stopped, or stale' } : {}),
     };
   }
 

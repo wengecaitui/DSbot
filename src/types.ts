@@ -801,6 +801,8 @@ export interface OperationsEvidenceConfig {
   maxRecentEvents?: number;
   /** Conservative Project Control Center refresh interval in ms (default 30000, minimum 100). */
   projectControlCenterRefreshIntervalMs?: number;
+  /** Hard deadline for one Project Control Center refresh in ms (default 10000, minimum 100). */
+  projectControlCenterRefreshTimeoutMs?: number;
   /** Opt-in external Hermes runtime observation (state file, processes, ports, health). */
   hermesRuntime?: {
     stateFile?: string;

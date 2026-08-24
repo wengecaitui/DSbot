@@ -1,16 +1,13 @@
-import { execFile as execFileCallback } from 'node:child_process';
 import { readFile as readFileDefault } from 'node:fs/promises';
 import * as path from 'node:path';
-import { promisify } from 'node:util';
 import type { ObservableAgentEvent } from './contracts';
+import { DEFAULT_EVIDENCE_COMMAND_TIMEOUT_MS, assertEvidenceTimeout, runBoundedEvidenceCommand } from './bounded-command';
 import {
   CONTROL_CENTER_RUNTIME_BLOCKER_PREFIX,
   controlCenterDefinitionSha256,
   isCurrentPassingRuntimeReceipt,
   type ControlCenterRuntimeSmokeReceipt,
 } from './control-center-runtime-smoke';
-
-const execFile = promisify(execFileCallback);
 
 export const CONTROL_CENTER_STATUSES = [
   'PLANNED',
@@ -164,14 +161,15 @@ export interface ProjectControlCenterOptions {
   testEvidencePath?: string;
   runtimeSmokePath?: string;
   config?: ControlCenterConfig;
-  runCommand?: (executable: string, args: string[], cwd: string) => Promise<string>;
+  commandTimeoutMs?: number;
+  runCommand?: (executable: string, args: string[], cwd: string, signal?: AbortSignal) => Promise<string>;
   readFile?: (file: string) => Promise<string>;
   now?: () => Date;
   maxTimeline?: number;
 }
 
 export interface ProjectControlCenter {
-  refresh(): Promise<void>;
+  refresh(signal?: AbortSignal): Promise<void>;
   observe(event: ObservableAgentEvent): void;
   snapshot(): ProjectControlCenterSnapshot;
 }
@@ -284,10 +282,10 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     path.join(repoPath, 'deployments', 'control-center', 'grafana', 'provisioning', 'datasources', 'datasources.yml'),
   ];
   const readFile = options.readFile ?? (file => readFileDefault(file, 'utf8'));
-  const runCommand = options.runCommand ?? (async (executable, args, cwd) => {
-    const result = await execFile(executable, args, { cwd, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
-    return result.stdout.trim();
-  });
+  const commandTimeoutMs = assertEvidenceTimeout(options.commandTimeoutMs ?? DEFAULT_EVIDENCE_COMMAND_TIMEOUT_MS);
+  const runCommand = options.runCommand ?? ((executable, args, cwd, signal) => runBoundedEvidenceCommand(
+    executable, args, { cwd, signal, timeoutMs: commandTimeoutMs, maxBuffer: 4 * 1024 * 1024 },
+  ));
   const now = options.now ?? (() => new Date());
   const maxTimeline = options.maxTimeline ?? 100;
   if (!Number.isInteger(maxTimeline) || maxTimeline <= 0) throw new Error('maxTimeline must be a positive integer');
@@ -302,8 +300,8 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     while (timeline.length > maxTimeline) timeline.shift();
   }
 
-  async function optional(executable: string, args: string[]): Promise<string | undefined> {
-    try { return await runCommand(executable, args, repoPath); } catch { return undefined; }
+  async function optional(executable: string, args: string[], signal?: AbortSignal): Promise<string | undefined> {
+    try { return await runCommand(executable, args, repoPath, signal); } catch { return undefined; }
   }
 
   function parseCommitSha(value: string | undefined): string | undefined {
@@ -311,12 +309,12 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     return sha && /^[a-f0-9]{40}$/.test(sha) ? sha : undefined;
   }
 
-  async function readRemoteHead(current: ControlCenterConfig, branch: string): Promise<string | undefined> {
-    const gitHead = parseCommitSha(await optional('git', ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`]));
+  async function readRemoteHead(current: ControlCenterConfig, branch: string, signal?: AbortSignal): Promise<string | undefined> {
+    const gitHead = parseCommitSha(await optional('git', ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`], signal));
     if (gitHead) return gitHead;
     return parseCommitSha(await optional('gh', [
       'api', `repos/${current.repository}/commits/${encodeURIComponent(branch)}`, '--jq', '.sha',
-    ]));
+    ], signal));
   }
 
   async function loadTests(head: string, current: ControlCenterConfig, dataGaps: string[]): Promise<ControlCenterTestEvidence[]> {
@@ -351,13 +349,13 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     return [...fileTests, ...observedTests].filter(test => !test.commitSha || test.commitSha === head).slice(-50);
   }
 
-  async function loadPullRequest(current: ControlCenterConfig, expectedHead: string | undefined, dataGaps: string[]): Promise<ControlCenterPullRequest | undefined> {
+  async function loadPullRequest(current: ControlCenterConfig, expectedHead: string | undefined, dataGaps: string[], signal?: AbortSignal): Promise<ControlCenterPullRequest | undefined> {
     try {
       const raw = await runCommand('gh', [
         'pr', 'list', '--repo', current.repository, '--head', current.deliveryBranch,
         '--state', 'all', '--limit', '10',
         '--json', 'number,url,state,isDraft,headRefOid,mergeCommit,reviewDecision,statusCheckRollup',
-      ], repoPath);
+      ], repoPath, signal);
       const items = JSON.parse(raw) as GhPullRequest[];
       const item = items.find(candidate => expectedHead !== undefined && candidate.headRefOid === expectedHead) ?? items[0];
       if (!item) return undefined;
@@ -405,19 +403,19 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
   }
 
   return {
-    async refresh() {
+    async refresh(signal) {
       const dataGaps: string[] = [];
       const current = fixedConfig ?? validateConfig(JSON.parse(await readFile(configPath)));
       const [worktree, branch, head, remote, upstream, status, integrationHead, remoteBranchHead, localDeliveryHead] = await Promise.all([
-        runCommand('git', ['rev-parse', '--show-toplevel'], repoPath),
-        runCommand('git', ['branch', '--show-current'], repoPath),
-        runCommand('git', ['rev-parse', 'HEAD'], repoPath),
-        runCommand('git', ['remote', 'get-url', 'origin'], repoPath),
-        optional('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
-        runCommand('git', ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all'], repoPath),
-        readRemoteHead(current, current.integrationBranch),
-        readRemoteHead(current, current.deliveryBranch),
-        optional('git', ['rev-parse', `refs/heads/${current.deliveryBranch}`]),
+        runCommand('git', ['rev-parse', '--show-toplevel'], repoPath, signal),
+        runCommand('git', ['branch', '--show-current'], repoPath, signal),
+        runCommand('git', ['rev-parse', 'HEAD'], repoPath, signal),
+        runCommand('git', ['remote', 'get-url', 'origin'], repoPath, signal),
+        optional('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], signal),
+        runCommand('git', ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all'], repoPath, signal),
+        readRemoteHead(current, current.integrationBranch, signal),
+        readRemoteHead(current, current.deliveryBranch, signal),
+        optional('git', ['rev-parse', `refs/heads/${current.deliveryBranch}`], signal),
       ]);
       const deliveryReferenceHead = remoteBranchHead ?? (/^[a-f0-9]{40}$/.test(localDeliveryHead ?? '') ? localDeliveryHead : undefined);
       const identity = normalizeRepository(remote);
@@ -441,7 +439,7 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
       const runtimeVerified = changedFiles.length === 0 && runtimeDefinitionSha256 !== undefined && isCurrentPassingRuntimeReceipt(
         runtimeSmoke, identity, head, integrationHead, current.integrationBranch, runtimeDefinitionSha256,
       );
-      const pullRequest = await loadPullRequest(current, deliveryReferenceHead, dataGaps);
+      const pullRequest = await loadPullRequest(current, deliveryReferenceHead, dataGaps, signal);
       const checks = pullRequest?.checks ?? [];
       const headShaMatchesDeliveryRef = pullRequest !== undefined && pullRequest.headSha === remoteBranchHead;
       const observedCheckNames = new Set(checks.map(check => check.name));

@@ -606,6 +606,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     sourceHealth: operationsEvidenceSourceHealth,
     maxRecentEvents: config.operationsEvidence?.maxRecentEvents,
     projectControlCenterRefreshIntervalMs: config.operationsEvidence?.projectControlCenterRefreshIntervalMs,
+    projectControlCenterRefreshTimeoutMs: config.operationsEvidence?.projectControlCenterRefreshTimeoutMs,
     defaultRunId: 'dsbot-gateway',
   });
 
