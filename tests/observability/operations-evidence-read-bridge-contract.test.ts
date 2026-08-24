@@ -178,6 +178,7 @@ describe('Phase 8B Operations Evidence Read Bridge contract', () => {
     assert.doesNotThrow(() => assertOperationsEvidenceReadBridgeContract(OPERATIONS_EVIDENCE_READ_BRIDGE_CONTRACT));
 
     for (const patch of [
+      { phase: '8A' },
       { delivery: 'IMPLEMENTATION' },
       { plane: 'CONTROL_PLANE' },
       { isControlPlane: true },
@@ -193,6 +194,7 @@ describe('Phase 8B Operations Evidence Read Bridge contract', () => {
       { projectControlCenterDomain: 'trading' },
       { projectControlCenterReadOnlyDashboard: false },
       { projectControlCenterGrantsApproval: true },
+      { projectControlCenterTradingEnvironmentActivated: true },
       { canonicalActivityEvent: 'HermesRuntimeEvidence' },
       { rawEvidenceRequiresNormalizationBeforePublication: false },
       { mayPublishSecretValue: true },

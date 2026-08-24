@@ -336,6 +336,7 @@ export function assertOperationsEvidenceReadBridgeContract(
   value: OperationsEvidenceReadBridgeContract,
 ): void {
   const violations: string[] = [];
+  if (value.phase !== '8B') violations.push('Phase 8B contract phase must be 8B');
   if (value.delivery !== 'CONTRACT_ONLY') violations.push('Phase 8B cannot claim implementation delivery');
   if (value.plane !== 'EVIDENCE_PLANE' || value.isControlPlane !== false) {
     violations.push('Phase 8B bridge must be an evidence plane, not a control plane');
@@ -358,8 +359,12 @@ export function assertOperationsEvidenceReadBridgeContract(
   if (value.projectControlCenterDomain !== 'operations') {
     violations.push('Project Control Center must remain Operations evidence');
   }
-  if (!value.projectControlCenterReadOnlyDashboard || value.projectControlCenterGrantsApproval) {
-    violations.push('Project Control Center must remain read-only and fail-closed on approval');
+  if (
+    !value.projectControlCenterReadOnlyDashboard
+    || value.projectControlCenterGrantsApproval
+    || value.projectControlCenterTradingEnvironmentActivated
+  ) {
+    violations.push('Project Control Center must remain read-only, fail-closed on approval, and trading-environment-inactive');
   }
   if (value.canonicalActivityEvent !== 'ObservableAgentEvent') {
     violations.push('ObservableAgentEvent must remain the canonical activity event envelope');
