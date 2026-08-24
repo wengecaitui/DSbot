@@ -252,7 +252,6 @@ export function createOperationsEvidenceReadBridge(
     const timeout = setTimeout(() => {
       controller.abort(new Error(`Project Control Center refresh timed out after ${pccRefreshTimeoutMs} ms`));
     }, pccRefreshTimeoutMs);
-    timeout.unref();
     const operation = (async () => {
       try {
         await projectControlCenter.refresh(controller.signal);
