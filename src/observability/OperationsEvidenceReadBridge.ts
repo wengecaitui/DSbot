@@ -1,21 +1,37 @@
 /**
  * Phase 8B — Operations Evidence Read Bridge implementation.
  *
- * Owns the observational evidence plane that feeds the Workbench Operations
- * domain: a Project Control Center snapshot, a bounded recent-event buffer of
- * normalized/redacted ObservableAgentEvent records, and (optionally) read-only
- * source adapters. It is an EVIDENCE PLANE, never a CONTROL PLANE.
- *
- * The bridge never touches trading authority: no OMS, no risk admission, no
- * recovery, no reconciliation, no LIVE_READY, no order submission, and no
- * generic command execution. External Hermes runtime evidence is
- * OBSERVED_SOURCE_ONLY and never mutates HandshakeCoordinator health.
+ * This is an evidence plane only. It publishes defensively copied Project
+ * Control Center and normalized activity evidence plus the current health of
+ * configured read sources. None of these facts can influence trading authority.
  */
 
 import { createObservableMonitor } from './monitor';
 import { createObservableStateProjector } from './state-projector';
 import type { ObservableAgentEvent, ObservableEventSourceAdapter } from './contracts';
 import type { ProjectControlCenter, ProjectControlCenterSnapshot } from './project-control-center';
+
+export type OperationsEvidenceSourceState = 'UNCONFIGURED' | 'STOPPED' | 'HEALTHY' | 'FAILING';
+export type OperationsEvidenceAvailability = 'AVAILABLE' | 'INCOMPLETE' | 'UNAVAILABLE';
+export type OperationsEvidenceFreshness = 'FRESH' | 'STALE' | 'UNKNOWN';
+
+export interface OperationsEvidenceSourceStatus {
+  readonly source: string;
+  readonly configured: boolean;
+  readonly state: OperationsEvidenceSourceState;
+  readonly lastSuccessfulPollAt: number | null;
+  readonly lastFailureAt: number | null;
+  readonly failureCount: number;
+  readonly lastError: string | null;
+}
+
+export interface ProjectControlCenterEvidenceStatus {
+  readonly configured: boolean;
+  readonly state: OperationsEvidenceSourceState;
+  readonly lastSuccessfulRefreshAt: number | null;
+  readonly lastFailureAt: number | null;
+  readonly lastError: string | null;
+}
 
 export interface OperationsEvidenceBridgeStatus {
   readonly running: boolean;
@@ -25,16 +41,100 @@ export interface OperationsEvidenceBridgeStatus {
   readonly recentEventCount: number;
   readonly projectControlCenterAvailable: boolean;
   readonly sourceFailures: number;
+  readonly sources: readonly OperationsEvidenceSourceStatus[];
+  readonly projectControlCenter: ProjectControlCenterEvidenceStatus;
+  readonly availability: OperationsEvidenceAvailability;
+  readonly freshness: OperationsEvidenceFreshness;
+  readonly lastUpdatedAt: number | null;
+}
+
+export interface OperationsEvidenceSourceHealthCallbacks {
+  readonly onSuccess: () => void;
+  readonly onError: (error: Error) => void;
+}
+
+export interface OperationsEvidenceSourceHealthModel {
+  callbacks(source: string): OperationsEvidenceSourceHealthCallbacks;
+  snapshot(): readonly OperationsEvidenceSourceStatus[];
+  stop(): void;
+}
+
+export interface OperationsEvidenceSourceConfiguration {
+  readonly source: string;
+  readonly configured: boolean;
+}
+
+/** Current-state model shared by adapter callbacks and the bridge. */
+export function createOperationsEvidenceSourceHealthModel(
+  configurations: readonly OperationsEvidenceSourceConfiguration[],
+  now: () => number = () => Date.now(),
+): OperationsEvidenceSourceHealthModel {
+  const statuses = new Map<string, OperationsEvidenceSourceStatus>();
+  for (const configuration of configurations) {
+    if (statuses.has(configuration.source)) throw new Error(`duplicate evidence source: ${configuration.source}`);
+    statuses.set(configuration.source, {
+      source: configuration.source,
+      configured: configuration.configured,
+      state: configuration.configured ? 'STOPPED' : 'UNCONFIGURED',
+      lastSuccessfulPollAt: null,
+      lastFailureAt: null,
+      failureCount: 0,
+      lastError: null,
+    });
+  }
+
+  function update(source: string, updater: (current: OperationsEvidenceSourceStatus) => OperationsEvidenceSourceStatus): void {
+    const current = statuses.get(source);
+    if (!current) throw new Error(`unknown evidence source: ${source}`);
+    if (!current.configured) return;
+    statuses.set(source, updater(current));
+  }
+
+  return Object.freeze({
+    callbacks(source: string): OperationsEvidenceSourceHealthCallbacks {
+      if (!statuses.has(source)) throw new Error(`unknown evidence source: ${source}`);
+      return Object.freeze({
+        onSuccess(): void {
+          update(source, (current) => ({
+            ...current,
+            state: 'HEALTHY',
+            lastSuccessfulPollAt: now(),
+            lastError: null,
+          }));
+        },
+        onError(error: Error): void {
+          update(source, (current) => ({
+            ...current,
+            state: 'FAILING',
+            lastFailureAt: now(),
+            failureCount: current.failureCount + 1,
+            lastError: error.message,
+          }));
+        },
+      });
+    },
+    snapshot(): readonly OperationsEvidenceSourceStatus[] {
+      return [...statuses.values()]
+        .sort((left, right) => left.source.localeCompare(right.source))
+        .map((status) => Object.freeze({ ...status }));
+    },
+    stop(): void {
+      for (const [source, current] of statuses) {
+        if (current.configured) statuses.set(source, { ...current, state: 'STOPPED' });
+      }
+    },
+  });
 }
 
 export interface OperationsEvidenceReadBridgeOptions {
-  /** Injected Project Control Center instance (optional). The bridge never constructs one. */
   readonly projectControlCenter?: ProjectControlCenter;
-  /** Read-only source adapters (optional). Empty by default — external paths are opt-in. */
   readonly sources?: readonly ObservableEventSourceAdapter[];
+  /** Current status populated by configured adapters' success/error callbacks. */
+  readonly sourceHealth?: OperationsEvidenceSourceHealthModel;
   readonly maxRecentEvents?: number;
   readonly defaultRunId?: string;
-  /** Evidence-plane failure observer. Never influences trading authority. */
+  /** Bounded PCC refresh interval. Default 30 seconds; minimum 100 ms. */
+  readonly projectControlCenterRefreshIntervalMs?: number;
   readonly onSourceFailure?: (source: string, error: Error) => void;
   readonly now?: () => number;
 }
@@ -58,22 +158,25 @@ export function createOperationsEvidenceReadBridge(
   if (!Number.isInteger(maxRecentEvents) || maxRecentEvents <= 0) {
     throw new Error('maxRecentEvents must be a positive integer');
   }
+  const pccRefreshIntervalMs = options.projectControlCenterRefreshIntervalMs ?? 30_000;
+  if (!Number.isInteger(pccRefreshIntervalMs) || pccRefreshIntervalMs < 100) {
+    throw new Error('projectControlCenterRefreshIntervalMs must be an integer greater than or equal to 100');
+  }
   const now = options.now ?? (() => Date.now());
   const projectControlCenter = options.projectControlCenter ?? null;
   const sources = [...(options.sources ?? [])];
 
-  // ── Bounded recent-event buffer (dedup by eventId, defensive copy on read) ──
   const events: ObservableAgentEvent[] = [];
   const bufferedIds = new Set<string>();
-  let sourceFailures = 0;
+  let bridgeFailures = 0;
 
   function recordFailure(source: string, error: Error): void {
-    sourceFailures += 1;
-    try { options.onSourceFailure?.(source, error); } catch { /* never escalate evidence failure */ }
+    bridgeFailures += 1;
+    try { options.onSourceFailure?.(source, error); } catch { /* evidence observers cannot escalate */ }
   }
 
   function pushEvent(event: ObservableAgentEvent): void {
-    if (bufferedIds.has(event.eventId)) return; // no duplicate eventId publication
+    if (bufferedIds.has(event.eventId)) return;
     bufferedIds.add(event.eventId);
     events.push(structuredClone(event));
     while (events.length > maxRecentEvents) {
@@ -93,58 +196,153 @@ export function createOperationsEvidenceReadBridge(
     onError: (error, context) => { recordFailure(context, error); },
   });
 
+  type Lifecycle = 'NEW' | 'STARTING' | 'RUNNING' | 'STOPPED';
+  let lifecycle: Lifecycle = 'NEW';
+  let lifecycleGeneration = 0;
   let running = false;
   let startedAt: number | null = null;
   let stoppedAt: number | null = null;
-  let pccAvailable = false;
   let startPromise: Promise<void> | null = null;
   let stopPromise: Promise<void> | null = null;
+  let pccRefreshTimer: NodeJS.Timeout | undefined;
+  let pccRefreshInFlight: Promise<void> | null = null;
+  let pccSnapshot: ProjectControlCenterSnapshot | null = null;
+  let pccState: OperationsEvidenceSourceState = projectControlCenter ? 'STOPPED' : 'UNCONFIGURED';
+  let pccLastSuccessfulRefreshAt: number | null = null;
+  let pccLastFailureAt: number | null = null;
+  let pccLastError: string | null = null;
+
+  function isStopped(): boolean {
+    return lifecycle === 'STOPPED';
+  }
+
+  function sourceStatuses(): readonly OperationsEvidenceSourceStatus[] {
+    if (options.sourceHealth) return options.sourceHealth.snapshot();
+    return sources.map((source) => Object.freeze({
+      source: source.name,
+      configured: true,
+      state: running ? 'HEALTHY' as const : 'STOPPED' as const,
+      lastSuccessfulPollAt: null,
+      lastFailureAt: null,
+      failureCount: 0,
+      lastError: null,
+    }));
+  }
+
+  async function refreshProjectControlCenter(): Promise<void> {
+    if (!projectControlCenter) return;
+    if (pccRefreshInFlight) return pccRefreshInFlight;
+    const generation = lifecycleGeneration;
+    const operation = (async () => {
+      try {
+        await projectControlCenter.refresh();
+        const refreshed = structuredClone(projectControlCenter.snapshot());
+        if (lifecycle !== 'STOPPED' && lifecycleGeneration === generation) {
+          pccSnapshot = refreshed;
+          pccState = 'HEALTHY';
+          pccLastSuccessfulRefreshAt = now();
+          pccLastError = null;
+        }
+      } catch (cause) {
+        const error = cause instanceof Error ? cause : new Error(String(cause));
+        if (lifecycle !== 'STOPPED' && lifecycleGeneration === generation) {
+          pccState = 'FAILING';
+          pccLastFailureAt = now();
+          pccLastError = error.message;
+          recordFailure('project-control-center.refresh', error);
+        }
+      }
+    })();
+    pccRefreshInFlight = operation;
+    try { await operation; }
+    finally { if (pccRefreshInFlight === operation) pccRefreshInFlight = null; }
+  }
 
   function snapshotActivity(): readonly ObservableAgentEvent[] {
     return events.map((event) => structuredClone(event));
   }
 
+  function buildStatus(): OperationsEvidenceBridgeStatus {
+    const currentSources = sourceStatuses();
+    const configuredSources = currentSources.filter((source) => source.configured);
+    const sourceFailing = configuredSources.some((source) => source.state === 'FAILING');
+    const sourceNotCurrent = configuredSources.some((source) => source.state !== 'HEALTHY');
+    const pccAvailable = running && pccSnapshot !== null;
+    const pccTooOld = pccLastSuccessfulRefreshAt !== null
+      && now() - pccLastSuccessfulRefreshAt > pccRefreshIntervalMs * 2;
+    const pccCurrent = pccState === 'HEALTHY' && pccAvailable && !pccTooOld;
+    const availability: OperationsEvidenceAvailability = !running
+      ? 'UNAVAILABLE'
+      : pccCurrent && !sourceNotCurrent ? 'AVAILABLE' : 'INCOMPLETE';
+    const freshness: OperationsEvidenceFreshness = !running || !pccSnapshot
+      ? 'UNKNOWN'
+      : pccState === 'FAILING' || pccTooOld || sourceFailing ? 'STALE'
+        : pccCurrent && !sourceNotCurrent ? 'FRESH' : 'UNKNOWN';
+    const lastUpdates = [
+      pccLastSuccessfulRefreshAt,
+      ...configuredSources.map((source) => source.lastSuccessfulPollAt),
+    ].filter((value): value is number => value !== null && Number.isFinite(value));
+    return Object.freeze({
+      running,
+      startedAt,
+      stoppedAt,
+      sourceCount: sources.length,
+      recentEventCount: events.length,
+      projectControlCenterAvailable: pccAvailable,
+      sourceFailures: bridgeFailures + currentSources.reduce((total, source) => total + source.failureCount, 0),
+      sources: currentSources,
+      projectControlCenter: Object.freeze({
+        configured: projectControlCenter !== null,
+        state: pccState,
+        lastSuccessfulRefreshAt: pccLastSuccessfulRefreshAt,
+        lastFailureAt: pccLastFailureAt,
+        lastError: pccLastError,
+      }),
+      availability,
+      freshness,
+      lastUpdatedAt: lastUpdates.length > 0 ? Math.max(...lastUpdates) : null,
+    });
+  }
+
   const read: OperationsEvidenceReadView = Object.freeze({
     projectControlCenter(): ProjectControlCenterSnapshot | null {
-      if (!pccAvailable || !projectControlCenter) return null;
-      try { return projectControlCenter.snapshot(); } catch { return null; }
+      if (!running || !pccSnapshot) return null;
+      return structuredClone(pccSnapshot);
     },
     activity: snapshotActivity,
-    status(): OperationsEvidenceBridgeStatus {
-      return Object.freeze({
-        running,
-        startedAt,
-        stoppedAt,
-        sourceCount: sources.length,
-        recentEventCount: events.length,
-        projectControlCenterAvailable: pccAvailable,
-        sourceFailures,
-      });
-    },
+    status: buildStatus,
   });
 
   async function start(): Promise<void> {
+    if (lifecycle === 'STOPPED') throw new Error('Operations Evidence Read Bridge is terminal after stop');
     if (startPromise) return startPromise;
+    lifecycle = 'STARTING';
+    lifecycleGeneration += 1;
     startPromise = (async () => {
-      // 1. Refresh Project Control Center first; failure is isolated to the evidence plane.
-      if (projectControlCenter) {
-        try {
-          await projectControlCenter.refresh();
-          pccAvailable = true;
-        } catch (error) {
-          pccAvailable = false;
-          recordFailure('project-control-center.refresh', error instanceof Error ? error : new Error(String(error)));
-        }
-      }
-      // 2. Start the observable monitor (and its sources). A source-start failure is
-      //    rolled back by the monitor and reported via its onError hook; it is isolated
-      //    here and never becomes a trading side effect.
+      await refreshProjectControlCenter();
+      if (isStopped()) return;
       try {
         await monitor.start();
+        if (isStopped()) {
+          await monitor.stop();
+          options.sourceHealth?.stop();
+          return;
+        }
         running = true;
+        lifecycle = 'RUNNING';
         startedAt = now();
+        if (projectControlCenter) {
+          pccRefreshTimer = setInterval(() => {
+            if (lifecycle === 'RUNNING') void refreshProjectControlCenter();
+          }, pccRefreshIntervalMs);
+          pccRefreshTimer.unref();
+        }
       } catch {
         running = false;
+        lifecycle = 'STOPPED';
+        stoppedAt = now();
+        pccState = projectControlCenter ? 'STOPPED' : 'UNCONFIGURED';
+        options.sourceHealth?.stop();
       }
     })();
     return startPromise;
@@ -153,14 +351,16 @@ export function createOperationsEvidenceReadBridge(
   async function stop(): Promise<void> {
     if (stopPromise) return stopPromise;
     stopPromise = (async () => {
+      lifecycle = 'STOPPED';
+      lifecycleGeneration += 1;
       running = false;
       stoppedAt = now();
-      pccAvailable = false;
-      // Wait for in-flight normalized events; stop failures are already reported by
-      // the monitor's onError hook and must not prevent authoritative trading shutdown.
-      try {
-        await monitor.stop();
-      } catch { /* already reported */ }
+      if (pccRefreshTimer) clearInterval(pccRefreshTimer);
+      pccRefreshTimer = undefined;
+      await pccRefreshInFlight;
+      try { await monitor.stop(); } catch { /* monitor already reported the evidence failure */ }
+      options.sourceHealth?.stop();
+      pccState = projectControlCenter ? 'STOPPED' : 'UNCONFIGURED';
     })();
     return stopPromise;
   }

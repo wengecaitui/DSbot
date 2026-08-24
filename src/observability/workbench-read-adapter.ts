@@ -4,6 +4,7 @@ import type { ProductionSpine } from '../position/ProductionSpine';
 import type { RecoveryResult } from '../recovery/RecoveryManager';
 import type { VersionedPolicySnapshot } from '../types/policy-snapshot';
 import type { ObservableAgentEvent } from './contracts';
+import type { OperationsEvidenceBridgeStatus } from './OperationsEvidenceReadBridge';
 import type { ProjectControlCenterSnapshot } from './project-control-center';
 import {
   createWorkbenchOverviewSnapshot,
@@ -63,6 +64,7 @@ export interface WorkbenchReadAdapterOptions {
   readonly recovery?: () => RecoveryResult | null;
   readonly projectControlCenter?: () => ProjectControlCenterSnapshot | null;
   readonly activity?: () => readonly ObservableAgentEvent[];
+  readonly operationsEvidenceStatus?: () => OperationsEvidenceBridgeStatus;
 }
 
 export interface WorkbenchReadAdapter {
@@ -283,13 +285,23 @@ export function createWorkbenchReadAdapter(options: WorkbenchReadAdapterOptions)
     const hermes = options.hermes();
     const projectControlCenter = options.projectControlCenter?.() ?? null;
     const recentEvents = options.activity ? [...options.activity()] : [];
-    const incomplete = projectControlCenter === null || !options.activity;
+    const evidenceStatus = options.operationsEvidenceStatus?.() ?? null;
+    const incomplete = projectControlCenter === null
+      || !options.activity
+      || evidenceStatus === null
+      || evidenceStatus.availability !== 'AVAILABLE';
     return {
       availability: incomplete ? 'INCOMPLETE' : 'AVAILABLE',
-      freshness: hermes?.health === 'healthy' ? 'FRESH' : 'UNKNOWN',
-      provenance: provenance(capturedAt, 'HandshakeCoordinator+ProjectControlCenter', hermes?.generation ?? null, hermes?.generation ?? null, hermes?.lastHealthConfirmedAt ?? null),
-      data: { hermes, recentEvents, projectControlCenter, controlCenterDomain: 'operations' },
-      ...(incomplete ? { reason: 'Project Control Center or runtime event evidence is unavailable' } : {}),
+      freshness: evidenceStatus?.freshness ?? 'UNKNOWN',
+      provenance: provenance(capturedAt, 'OperationsEvidenceReadBridge+ProjectControlCenter', null, null, evidenceStatus?.lastUpdatedAt ?? null),
+      data: {
+        hermes,
+        recentEvents,
+        projectControlCenter,
+        evidenceStatus: evidenceStatus ? structuredClone(evidenceStatus) : null,
+        controlCenterDomain: 'operations',
+      },
+      ...(incomplete ? { reason: 'Operations evidence is unavailable, incomplete, stopped, or stale' } : {}),
     };
   }
 

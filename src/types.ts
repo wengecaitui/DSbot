@@ -799,6 +799,8 @@ export interface OperationsEvidenceConfig {
   repoPath?: string;
   /** Bound for the recent-event buffer (default 500). */
   maxRecentEvents?: number;
+  /** Conservative Project Control Center refresh interval in ms (default 30000, minimum 100). */
+  projectControlCenterRefreshIntervalMs?: number;
   /** Opt-in external Hermes runtime observation (state file, processes, ports, health). */
   hermesRuntime?: {
     stateFile?: string;

@@ -23,6 +23,7 @@ export interface HermesRuntimeAdapterOptions {
   ports?: Array<{ host?: string; port: number }>;
   healthUrl?: string;
   probe?: () => Promise<HermesRuntimeSnapshot>;
+  onSuccess?: () => void;
   onError?: (error: Error) => void;
 }
 
@@ -91,7 +92,7 @@ export function createHermesRuntimeAdapter(options: HermesRuntimeAdapterOptions)
   };
   const probe = options.probe ?? defaultProbe;
   return createPollingAdapter({
-    name: 'hermes-runtime', intervalMs: options.intervalMs, onError: options.onError,
+    name: 'hermes-runtime', intervalMs: options.intervalMs, onSuccess: options.onSuccess, onError: options.onError,
     async poll(sink) {
       const current = await probe();
       const currentSerialized = JSON.stringify(current);

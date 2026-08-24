@@ -87,7 +87,10 @@ import {
 } from '../hermes';
 import { createWorkbenchReadAdapter } from '../observability/workbench-read-adapter';
 import { createWorkbenchRouter } from './workbench-routes';
-import { createOperationsEvidenceReadBridge } from '../observability/OperationsEvidenceReadBridge';
+import {
+  createOperationsEvidenceReadBridge,
+  createOperationsEvidenceSourceHealthModel,
+} from '../observability/OperationsEvidenceReadBridge';
 import { createProjectControlCenter } from '../observability/project-control-center';
 import type { ObservableEventSourceAdapter } from '../observability/contracts';
 import { createHermesRuntimeAdapter } from '../observability/adapters/hermes-runtime-adapter';
@@ -556,31 +559,53 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   // bridge never touches trading authority.
   const operationsEvidenceRepoPath = config.operationsEvidence?.repoPath ?? process.cwd();
   const operationsEvidenceSources: ObservableEventSourceAdapter[] = [];
-  if (config.operationsEvidence?.hermesRuntime?.stateFile) {
+  const hermesRuntimeConfig = config.operationsEvidence?.hermesRuntime;
+  const hermesLogConfig = config.operationsEvidence?.hermesLogs;
+  const gitWorkspaceConfig = config.operationsEvidence?.git;
+  const hermesRuntimeConfigured = Boolean(hermesRuntimeConfig?.stateFile);
+  const hermesLogConfigured = Boolean(hermesLogConfig?.files?.length);
+  const gitWorkspaceConfigured = gitWorkspaceConfig?.enabled === true;
+  const operationsEvidenceSourceHealth = createOperationsEvidenceSourceHealthModel([
+    { source: 'git-workspace', configured: gitWorkspaceConfigured },
+    { source: 'hermes-log', configured: hermesLogConfigured },
+    { source: 'hermes-runtime', configured: hermesRuntimeConfigured },
+  ]);
+  if (hermesRuntimeConfig?.stateFile) {
+    const health = operationsEvidenceSourceHealth.callbacks('hermes-runtime');
     operationsEvidenceSources.push(createHermesRuntimeAdapter({
-      stateFile: config.operationsEvidence.hermesRuntime.stateFile,
-      processNames: config.operationsEvidence.hermesRuntime.processNames,
-      ports: config.operationsEvidence.hermesRuntime.ports,
-      healthUrl: config.operationsEvidence.hermesRuntime.healthUrl,
-      intervalMs: config.operationsEvidence.hermesRuntime.intervalMs,
+      stateFile: hermesRuntimeConfig.stateFile,
+      processNames: hermesRuntimeConfig.processNames,
+      ports: hermesRuntimeConfig.ports,
+      healthUrl: hermesRuntimeConfig.healthUrl,
+      intervalMs: hermesRuntimeConfig.intervalMs,
+      onSuccess: health.onSuccess,
+      onError: health.onError,
     }));
   }
-  if (config.operationsEvidence?.hermesLogs?.files?.length) {
+  if (hermesLogConfig?.files?.length) {
+    const health = operationsEvidenceSourceHealth.callbacks('hermes-log');
     operationsEvidenceSources.push(createHermesLogAdapter({
-      files: config.operationsEvidence.hermesLogs.files,
-      intervalMs: config.operationsEvidence.hermesLogs.intervalMs,
+      files: hermesLogConfig.files,
+      intervalMs: hermesLogConfig.intervalMs,
+      onSuccess: health.onSuccess,
+      onError: health.onError,
     }));
   }
-  if (config.operationsEvidence?.git?.enabled) {
+  if (gitWorkspaceConfigured) {
+    const health = operationsEvidenceSourceHealth.callbacks('git-workspace');
     operationsEvidenceSources.push(createGitWorkspaceAdapter({
       repoPath: operationsEvidenceRepoPath,
-      intervalMs: config.operationsEvidence.git.intervalMs,
+      intervalMs: gitWorkspaceConfig.intervalMs,
+      onSuccess: health.onSuccess,
+      onError: health.onError,
     }));
   }
   const operationsEvidenceBridge = createOperationsEvidenceReadBridge({
     projectControlCenter: createProjectControlCenter({ repoPath: operationsEvidenceRepoPath }),
     sources: operationsEvidenceSources,
+    sourceHealth: operationsEvidenceSourceHealth,
     maxRecentEvents: config.operationsEvidence?.maxRecentEvents,
+    projectControlCenterRefreshIntervalMs: config.operationsEvidence?.projectControlCenterRefreshIntervalMs,
     defaultRunId: 'dsbot-gateway',
   });
 
@@ -596,6 +621,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     recovery: productionRuntimeOwner.read.recovery,
     projectControlCenter: operationsEvidenceBridge.read.projectControlCenter,
     activity: operationsEvidenceBridge.read.activity,
+    operationsEvidenceStatus: operationsEvidenceBridge.read.status,
   });
   httpGateway.setWorkbenchRouter(createWorkbenchRouter(workbenchReadAdapter));
 

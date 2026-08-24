@@ -9,6 +9,9 @@ export interface HermesLogAdapterOptions {
   startAtEnd?: boolean;
   emitUnclassified?: boolean;
   maxBytesPerPoll?: number;
+  /** Testable/read-only stat seam; defaults to fs.stat. */
+  readStat?: (file: string) => Promise<{ size: number }>;
+  onSuccess?: () => void;
   onError?: (error: Error) => void;
 }
 
@@ -32,6 +35,7 @@ export function createHermesLogAdapter(options: HermesLogAdapterOptions): Observ
   const cursors = new Map<string, FileCursor>();
   const startAtEnd = options.startAtEnd ?? true;
   const maxBytesPerPoll = options.maxBytesPerPoll ?? 256 * 1024;
+  const readStat = options.readStat ?? ((file: string) => fs.stat(file));
   if (!Number.isInteger(maxBytesPerPoll) || maxBytesPerPoll <= 0) throw new Error('maxBytesPerPoll must be a positive integer');
 
   async function emitLine(sink: ObservableEventSink, file: string, line: string): Promise<void> {
@@ -49,13 +53,13 @@ export function createHermesLogAdapter(options: HermesLogAdapterOptions): Observ
   }
 
   return createPollingAdapter({
-    name: 'hermes-log', intervalMs: options.intervalMs, onError: options.onError,
+    name: 'hermes-log', intervalMs: options.intervalMs, onSuccess: options.onSuccess, onError: options.onError,
     async poll(sink) {
       for (const file of files) {
         let cursor = cursors.get(file);
         if (!cursor) { cursor = { offset: 0, carry: '', initialized: false, unavailable: false }; cursors.set(file, cursor); }
         let stat;
-        try { stat = await fs.stat(file); }
+        try { stat = await readStat(file); }
         catch (cause) {
           if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause;
           if (!cursor.unavailable) {

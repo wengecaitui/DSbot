@@ -16,6 +16,7 @@ import type { PositionPlan } from '../position/position-plan-types';
 import type { ReconciliationReport } from '../reconciliation/reconciliation-types';
 import type { RecoveryResult } from '../recovery/RecoveryManager';
 import type { ObservableAgentEvent } from './contracts';
+import type { OperationsEvidenceBridgeStatus } from './OperationsEvidenceReadBridge';
 import type { ProjectControlCenterSnapshot } from './project-control-center';
 import type { PositionResolution } from '../types/position-state';
 
@@ -229,6 +230,7 @@ export interface OperationsOverviewSnapshot {
   readonly hermes: CoordinatorSnapshot | null;
   readonly recentEvents: readonly ObservableAgentEvent[];
   readonly projectControlCenter: ProjectControlCenterSnapshot | null;
+  readonly evidenceStatus: OperationsEvidenceBridgeStatus | null;
   readonly controlCenterDomain: 'operations';
 }
 

@@ -3,9 +3,15 @@ import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import {
   createOperationsEvidenceReadBridge,
+  createOperationsEvidenceSourceHealthModel,
   type OperationsEvidenceReadBridge,
 } from '../../src/observability/OperationsEvidenceReadBridge';
 import { createPollingAdapter } from '../../src/observability/adapters/polling-adapter';
+import { createGitWorkspaceAdapter } from '../../src/observability/adapters/git-workspace-adapter';
+import { createHermesRuntimeAdapter } from '../../src/observability/adapters/hermes-runtime-adapter';
+import { createHermesLogAdapter } from '../../src/observability/adapters/hermes-log-adapter';
+import { createWorkbenchReadAdapter } from '../../src/observability/workbench-read-adapter';
+import type { CoordinatorSnapshot } from '../../src/hermes/types';
 import type {
   ObservableAgentEvent,
   ObservableEventSink,
@@ -80,6 +86,24 @@ function rawEvent(partial: Partial<RawObservableEvent> & { action: string; sourc
 const bridgeSource = () => readFileSync(new URL('../../src/observability/OperationsEvidenceReadBridge.ts', import.meta.url), 'utf8');
 const gatewaySource = () => readFileSync(new URL('../../src/gateway/index.ts', import.meta.url), 'utf8');
 
+const healthyHermes: CoordinatorSnapshot = {
+  state: 'running', generation: 1, health: 'healthy', circuitState: 'closed',
+  consecutiveHealthFailures: 0, startedAt: 1, stoppedAt: null,
+  lastHealthConfirmedAt: 1, lastHealthStatus: 'healthy',
+  trackedReceiptCount: 0, consumedReceiptCount: 0,
+};
+
+function workbenchFor(bridge: OperationsEvidenceReadBridge) {
+  return createWorkbenchReadAdapter({
+    now: () => Date.now(),
+    runtime: () => ({ health: 'HEALTHY', environment: 'unknown', mode: 'test' }),
+    hermes: () => healthyHermes,
+    projectControlCenter: bridge.read.projectControlCenter,
+    activity: bridge.read.activity,
+    operationsEvidenceStatus: bridge.read.status,
+  });
+}
+
 describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
   describe('ownership and lifecycle', () => {
     it('creates exactly one bridge and repeated start does not duplicate sources', async () => {
@@ -122,14 +146,18 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
   });
 
   describe('workbench binding', () => {
-    it('publishes exact defensive PCC evidence after a successful refresh', async () => {
+    it('publishes actually defensive PCC evidence after a successful refresh', async () => {
       const { pcc, snapshot } = fakePcc();
       const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc });
       await bridge.start();
       const published = bridge.read.projectControlCenter();
       assert.ok(published, 'PCC must be published after refresh');
-      assert.strictEqual(published, snapshot, 'bridge must return the exact injected snapshot');
+      assert.notStrictEqual(published, snapshot, 'bridge must not expose the injected snapshot reference');
+      assert.deepEqual(published, snapshot);
+      published.repository.commitSha = 'b'.repeat(40);
+      assert.equal(bridge.read.projectControlCenter()?.repository.commitSha, 'a'.repeat(40));
       assert.equal(bridge.read.status().projectControlCenterAvailable, true);
+      await bridge.stop();
     });
 
     it('publishes null PCC when refresh fails (no stale-snapshot masquerade)', async () => {
@@ -139,6 +167,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       assert.equal(bridge.read.projectControlCenter(), null);
       assert.equal(bridge.read.status().projectControlCenterAvailable, false);
       assert.ok(bridge.read.status().sourceFailures >= 1);
+      await bridge.stop();
     });
 
     it('routes normalized source events into the bounded activity buffer', async () => {
@@ -159,6 +188,200 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
       await bridge.start();
       assert.equal(observed().length, 1);
+      await bridge.stop();
+    });
+  });
+
+  describe('current source failure truth', () => {
+    it('makes a configured Git poll failure visible and prevents AVAILABLE/FRESH Operations', async () => {
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
+      const callbacks = health.callbacks('git-workspace');
+      const adapter = createGitWorkspaceAdapter({
+        repoPath: '.', intervalMs: 100,
+        readSnapshot: async () => { throw new Error('GIT_POLL_FAILED'); },
+        onSuccess: callbacks.onSuccess, onError: callbacks.onError,
+      });
+      const { pcc } = fakePcc();
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [adapter], sourceHealth: health });
+      await bridge.start();
+      const status = bridge.read.status();
+      assert.equal(status.sources[0].state, 'FAILING');
+      assert.equal(status.sources[0].lastError, 'GIT_POLL_FAILED');
+      const operations = workbenchFor(bridge).operations();
+      assert.notEqual(operations.availability, 'AVAILABLE');
+      assert.notEqual(operations.freshness, 'FRESH', 'healthy HandshakeCoordinator cannot mask source failure');
+      await bridge.stop();
+    });
+
+    it('makes a configured Hermes runtime poll failure visible', async () => {
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'hermes-runtime', configured: true }]);
+      const callbacks = health.callbacks('hermes-runtime');
+      const adapter = createHermesRuntimeAdapter({
+        stateFile: 'missing-state.json', intervalMs: 100,
+        probe: async () => { throw new Error('HERMES_RUNTIME_POLL_FAILED'); },
+        onSuccess: callbacks.onSuccess, onError: callbacks.onError,
+      });
+      const { pcc } = fakePcc();
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [adapter], sourceHealth: health });
+      await bridge.start();
+      assert.deepEqual(
+        bridge.read.status().sources.map(({ source, state, lastError }) => ({ source, state, lastError })),
+        [{ source: 'hermes-runtime', state: 'FAILING', lastError: 'HERMES_RUNTIME_POLL_FAILED' }],
+      );
+      await bridge.stop();
+    });
+
+    it('makes a configured Hermes log poll failure visible', async () => {
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'hermes-log', configured: true }]);
+      const callbacks = health.callbacks('hermes-log');
+      const adapter = createHermesLogAdapter({
+        files: ['hermes.log'], intervalMs: 100,
+        readStat: async () => { throw Object.assign(new Error('HERMES_LOG_POLL_FAILED'), { code: 'EACCES' }); },
+        onSuccess: callbacks.onSuccess, onError: callbacks.onError,
+      });
+      const { pcc } = fakePcc();
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [adapter], sourceHealth: health });
+      await bridge.start();
+      assert.equal(bridge.read.status().sources[0].state, 'FAILING');
+      assert.equal(bridge.read.status().sources[0].lastError, 'HERMES_LOG_POLL_FAILED');
+      await bridge.stop();
+    });
+
+    it('recovers current source health after a later successful poll', async () => {
+      let attempts = 0;
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
+      const callbacks = health.callbacks('git-workspace');
+      const adapter = createGitWorkspaceAdapter({
+        repoPath: '.', intervalMs: 100,
+        readSnapshot: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('TRANSIENT_GIT_FAILURE');
+          return { branch: 'repair', head: 'c'.repeat(40), entries: [] };
+        },
+        onSuccess: callbacks.onSuccess, onError: callbacks.onError,
+      });
+      const { pcc } = fakePcc();
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [adapter], sourceHealth: health });
+      await bridge.start();
+      assert.equal(bridge.read.status().sources[0].state, 'FAILING');
+      await sleep(180);
+      const recovered = bridge.read.status();
+      assert.equal(recovered.sources[0].state, 'HEALTHY');
+      assert.equal(recovered.sources[0].failureCount, 1, 'history remains diagnostic, not current health');
+      assert.equal(recovered.availability, 'AVAILABLE');
+      assert.equal(recovered.freshness, 'FRESH');
+      await bridge.stop();
+    });
+
+    it('distinguishes unconfigured from configured-and-failing sources', () => {
+      const health = createOperationsEvidenceSourceHealthModel([
+        { source: 'git-workspace', configured: false },
+        { source: 'hermes-runtime', configured: true },
+      ]);
+      health.callbacks('hermes-runtime').onError(new Error('FAILED'));
+      assert.deepEqual(
+        health.snapshot().map(({ source, configured, state }) => ({ source, configured, state })),
+        [
+          { source: 'git-workspace', configured: false, state: 'UNCONFIGURED' },
+          { source: 'hermes-runtime', configured: true, state: 'FAILING' },
+        ],
+      );
+    });
+  });
+
+  describe('Project Control Center freshness and terminal lifecycle', () => {
+    it('refreshes PCC again and publishes changed HEAD, PR, and CI evidence', async () => {
+      let refreshes = 0;
+      let current = makePccSnapshot();
+      const pcc: ProjectControlCenter = {
+        async refresh() {
+          refreshes += 1;
+          if (refreshes === 2) {
+            current = structuredClone(current);
+            current.repository.commitSha = 'd'.repeat(40);
+            current.pullRequest = { number: 125, url: 'https://example.test/pr/125', state: 'OPEN', isDraft: true, headSha: 'd'.repeat(40), checks: [] };
+            current.ci.status = 'PASS';
+          }
+        },
+        observe() {},
+        snapshot() { return current; },
+      };
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, projectControlCenterRefreshIntervalMs: 100 });
+      await bridge.start();
+      assert.equal(bridge.read.projectControlCenter()?.repository.commitSha, 'a'.repeat(40));
+      await sleep(150);
+      const refreshed = bridge.read.projectControlCenter();
+      assert.ok(refreshes >= 2);
+      assert.equal(refreshed?.repository.commitSha, 'd'.repeat(40));
+      assert.equal(refreshed?.pullRequest?.number, 125);
+      assert.equal(refreshed?.ci.status, 'PASS');
+      assert.ok(bridge.read.status().projectControlCenter.lastSuccessfulRefreshAt !== null);
+      await bridge.stop();
+    });
+
+    it('retains last-known-good PCC as STALE after refresh failure', async () => {
+      let refreshes = 0;
+      const snapshot = makePccSnapshot();
+      const pcc: ProjectControlCenter = {
+        async refresh() {
+          refreshes += 1;
+          if (refreshes > 1) throw new Error('PCC_REFRESH_FAILED_AFTER_START');
+        },
+        observe() {},
+        snapshot() { return snapshot; },
+      };
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, projectControlCenterRefreshIntervalMs: 100 });
+      await bridge.start();
+      await sleep(150);
+      assert.equal(bridge.read.projectControlCenter()?.repository.commitSha, 'a'.repeat(40));
+      assert.equal(bridge.read.status().projectControlCenter.state, 'FAILING');
+      assert.equal(bridge.read.status().freshness, 'STALE');
+      const operations = workbenchFor(bridge).operations();
+      assert.equal(operations.availability, 'INCOMPLETE');
+      assert.equal(operations.freshness, 'STALE', 'handshake health is not Operations freshness authority');
+      await bridge.stop();
+    });
+
+    it('marks PCC stale when successful evidence exceeds its bounded maximum age', async () => {
+      let clock = 1_000;
+      const { pcc } = fakePcc();
+      const bridge = createOperationsEvidenceReadBridge({
+        projectControlCenter: pcc,
+        projectControlCenterRefreshIntervalMs: 100,
+        now: () => clock,
+      });
+      await bridge.start();
+      assert.equal(bridge.read.status().freshness, 'FRESH');
+      clock = 1_201;
+      assert.equal(bridge.read.status().freshness, 'STALE');
+      assert.equal(workbenchFor(bridge).operations().availability, 'INCOMPLETE');
+      await bridge.stop();
+    });
+
+    it('stops both PCC refresh and source polling with no orphan activity', async () => {
+      let refreshes = 0;
+      let polls = 0;
+      const snapshot = makePccSnapshot();
+      const pcc: ProjectControlCenter = {
+        async refresh() { refreshes += 1; }, observe() {}, snapshot() { return snapshot; },
+      };
+      const poller = createPollingAdapter({ name: 'poll-probe', intervalMs: 100, poll: () => { polls += 1; } });
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [poller], projectControlCenterRefreshIntervalMs: 100 });
+      await bridge.start();
+      await sleep(150);
+      await bridge.stop();
+      const stopped = { refreshes, polls };
+      await sleep(180);
+      assert.deepEqual({ refreshes, polls }, stopped);
+      assert.equal(bridge.read.status().projectControlCenter.state, 'STOPPED');
+      assert.equal(bridge.read.status().availability, 'UNAVAILABLE');
+    });
+
+    it('rejects start after stop instead of silently reusing the old start promise', async () => {
+      const bridge = createOperationsEvidenceReadBridge({});
+      await bridge.start();
+      await bridge.stop();
+      await assert.rejects(() => bridge.start(), /terminal after stop/);
     });
   });
 
@@ -251,6 +474,14 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       assert.doesNotMatch(source, /activateLiveReadiness|setLiveReady/);
       const gateway = gatewaySource();
       assert.match(gateway, /hermes: \(\) => hermesCoordinator\.getSnapshot\(\)/, 'runtime.hermes must stay bound to the coordinator snapshot');
+    });
+
+    it('wires all actual gateway adapters into source health and Workbench status', () => {
+      const gateway = gatewaySource();
+      assert.equal((gateway.match(/onError: health\.onError/g) ?? []).length, 3);
+      assert.equal((gateway.match(/onSuccess: health\.onSuccess/g) ?? []).length, 3);
+      assert.match(gateway, /sourceHealth: operationsEvidenceSourceHealth/);
+      assert.match(gateway, /operationsEvidenceStatus: operationsEvidenceBridge\.read\.status/);
     });
   });
 

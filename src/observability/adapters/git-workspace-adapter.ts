@@ -11,6 +11,7 @@ export interface GitWorkspaceAdapterOptions {
   repoPath: string;
   intervalMs?: number;
   readSnapshot?: () => Promise<GitSnapshot>;
+  onSuccess?: () => void;
   onError?: (error: Error) => void;
 }
 
@@ -33,7 +34,7 @@ export function createGitWorkspaceAdapter(options: GitWorkspaceAdapterOptions): 
   let previous: GitSnapshot | undefined;
   let previousSerialized: string | undefined;
   return createPollingAdapter({
-    name: 'git-workspace', intervalMs: options.intervalMs, onError: options.onError,
+    name: 'git-workspace', intervalMs: options.intervalMs, onSuccess: options.onSuccess, onError: options.onError,
     async poll(sink) {
       const current = await readSnapshot();
       const serialized = JSON.stringify(current);
