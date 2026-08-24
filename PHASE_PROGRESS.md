@@ -18,7 +18,7 @@
 | 5 | Freqtrade 数据层整合 | P1 | 🔲待开始 | 0% |
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
 | 7 | Hermes 握手 + Quant Terminal（7A/7B/7C 已合并） | P1 | ✅完成 | 100% |
-| 8 | 权威生产运行时组合 + 功能模块接入 | P1 | ⏳8A已合并/8B契约门 | 60% |
+| 8 | 权威生产运行时组合 + 功能模块接入 | P1 | ⏳8A已合并/8B实现中 | 70% |
 | 9 | 系统集成 | P2 | 🔲待开始 | 0% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
 
@@ -284,20 +284,39 @@
   合并提交 `ad3217b713bafe051610c7f2d3b5cd4cd48b2945`（`feature/orangeai-split`）。
   仍为 Paper-only；未启用 Testnet/Live，未授予 LIVE_READY，boot ORDER_SUBMISSIONS=0。
 - **Phase 8B**: Project Control Center / Hermes activity 跨进程只读桥接、通用 observability IPC
-  与事件聚合 → 见下方 Phase 8B Contract Gate。
+  与事件聚合 → 见下方 Phase 8B（契约已合并，实现进行中）。
 
-### Phase 8B — Operations Evidence Read Bridge ⏳ Contract Gate
+### Phase 8B — Operations Evidence Read Bridge ✅ 契约已合并 / ⏳ 实现进行中
 
-- **状态**: Contract Gate（契约设计已冻结，实现未授权）。
+#### 8B Contract（✅ 已合并）
+
+- **契约 PR**: #124（`docs(observability): Phase 8B Operations Evidence Read Bridge contract`）。
+- **批准契约 head**: `bd116411750edb3ef974c74f44d22f36616b8a2b`。
+- **合并提交**: `b14d9c9454eb899020f9d1fea5e46fd9c68d0832`（`feature/orangeai-split`）。
 - **契约文档**: `docs/phase-8b-operations-evidence-read-bridge-contract.md`。
 - **可执行契约**: `src/observability/OperationsEvidenceReadBridgeContract.ts`。
-- **契约测试**: `tests/observability/operations-evidence-read-bridge-contract.test.ts`（15 项，`npm run test:phase-8b-contract`）。
+- **契约测试**: `tests/observability/operations-evidence-read-bridge-contract.test.ts`（15 项）。
 - **定位**: EVIDENCE PLANE（证据面），非 CONTROL PLANE（控制面）；只读、单向、观测性。
-- **冻结不变式**: 外部 Hermes runtime evidence ≠ HandshakeCoordinator；source 失败降级为
-  UNKNOWN/UNAVAILABLE/INCOMPLETE，绝不伪造 healthy/zero；raw evidence 发布前必须 normalization/redaction；
-  ObservableAgentEvent 保持唯一 activity 事件信封；每 AppGateway 仅一个 bridge，非第二 runtime；
-  交易权威（Market/Position/Order/Accounting/Recovery/Reconciliation/LIVE_READY）不变。
-- **实现未授权**: 不接入生产 wiring、不加控制端点、不改交易权威。
+
+#### 8B Implementation（⏳ IN PROGRESS / Draft PR）
+
+- **状态**: Implementation 进行中，Draft PR，未合并。
+- **实现模块**: `src/observability/OperationsEvidenceReadBridge.ts` — 应用生命周期拥有的唯一
+  Operations Evidence Read Bridge，内部持有 ProjectControlCenter 快照 + 有界 recent-event buffer
+  （normalized/redacted `ObservableAgentEvent`），通过 `read.projectControlCenter()` /
+  `read.activity()` 注入 `WorkbenchReadAdapter`；不通过 AppGateway 公开 start/stop/source。
+- **网关接线**: `createGateway()` 在 `productionRuntimeOwner` 之后组合 bridge，将 read provider
+  绑定到 Workbench，并在 `baseGateway.start()` / `stop()` 中启动/停止（source 失败隔离，绝不
+  阻断权威交易启动/关闭）。
+- **source 策略**: 外部 source adapter（Hermes runtime/log、git）按 `config.operationsEvidence`
+  opt-in；路径不硬编码，缺失即事实性不启动；filesystem watcher 不默认启用。
+- **实现测试**: `tests/observability/operations-evidence-read-bridge-implementation.test.ts`
+  （ownership / lifecycle / workbench / Hermes 权威分离 / 失败隔离 / 事件语义 / redaction）。
+- **冻结不变式（保持不变）**: 外部 Hermes runtime evidence ≠ HandshakeCoordinator；source 失败
+  降级为 UNKNOWN/UNAVAILABLE/INCOMPLETE，绝不伪造 healthy/zero；raw evidence 发布前必须
+  normalization/redaction；ObservableAgentEvent 保持唯一 activity 事件信封；每 AppGateway 仅一个
+  bridge，非第二 runtime；交易权威不变；boot ORDER_SUBMISSIONS=0、不授予 LIVE_READY。
+- **未授权**: 不 merge、不启用 Testnet/Live、不加控制端点、不建 command RPC。
 
 ### 8.1 行情数据层（CCXT + Freqtrade 数据源双写）⏳
 - ✅ `src/data/collector.ts` — Bitget WS 采集器就位

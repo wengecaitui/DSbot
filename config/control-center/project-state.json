@@ -2,18 +2,21 @@
   "schemaVersion": "1.0",
   "repository": "wengecaitui/DSbot",
   "integrationBranch": "feature/orangeai-split",
-  "deliveryBranch": "agent/control-center-runtime-smoke",
-  "currentCapability": "Project Control Center",
-  "currentTask": "Add a SHA-bound, fail-closed receipt for the Dashboard + DevLake + Grafana runtime evidence loop",
-  "activeAgent": "Codex orchestrator; Hermes evidence is observable-only",
-  "nextAction": "After merge, run the read-only runtime smoke from a clean integration worktree where Docker and the loopback Dashboard are already running; do not start a trading environment",
+  "deliveryBranch": "agent/phase-8b-operations-evidence-read-bridge-implementation",
+  "currentCapability": "Phase 8B Operations Evidence Read Bridge",
+  "currentTask": "implement the observational Operations Evidence Read Bridge (evidence plane only)",
+  "activeAgent": "Hermes Phase 8B Implementation Agent",
+  "nextAction": "Create a Draft PR against feature/orangeai-split; keep the bridge observational-only; do not merge and do not enable Testnet/Live",
   "requiredLocalGates": [
-    { "id": "focused", "executable": "npm.cmd", "args": ["run", "test:control-center"] },
+    { "id": "phase-8b-contract", "executable": "npm.cmd", "args": ["run", "test:phase-8b-contract"] },
+    { "id": "phase-8b-implementation", "executable": "npm.cmd", "args": ["run", "test:phase-8b-implementation"] },
+    { "id": "phase-8a-contract", "executable": "npm.cmd", "args": ["run", "test:phase-8a-contract"] },
+    { "id": "phase-8a-implementation", "executable": "npm.cmd", "args": ["run", "test:phase-8a-implementation"] },
+    { "id": "workbench", "executable": "npm.cmd", "args": ["run", "test:workbench"] },
     { "id": "full-node", "executable": "npm.cmd", "args": ["test"] },
     { "id": "full-python", "executable": "npm.cmd", "args": ["run", "test:quant-engine"] },
     { "id": "typecheck", "executable": "npm.cmd", "args": ["run", "typecheck"] },
-    { "id": "build", "executable": "npm.cmd", "args": ["run", "build"] },
-    { "id": "security", "executable": "npm.cmd", "args": ["run", "security:audit"] }
+    { "id": "build", "executable": "npm.cmd", "args": ["run", "build"] }
   ],
   "requiredRemoteChecks": [
     "build",
@@ -22,9 +25,7 @@
     "Security Audit"
   ],
   "promotedStrategyCount": 0,
-  "blockers": [
-    "CONTROL_CENTER_RUNTIME_UNVERIFIED: com.docker.service is stopped and the current process lacks permission to start it; Grafana Infinity to Dashboard API reachability and the DevLake/Grafana container runtime remain unverified"
-  ],
+  "blockers": [],
   "approvals": {
     "replay": {
       "approved": false,

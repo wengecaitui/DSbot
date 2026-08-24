@@ -87,6 +87,12 @@ import {
 } from '../hermes';
 import { createWorkbenchReadAdapter } from '../observability/workbench-read-adapter';
 import { createWorkbenchRouter } from './workbench-routes';
+import { createOperationsEvidenceReadBridge } from '../observability/OperationsEvidenceReadBridge';
+import { createProjectControlCenter } from '../observability/project-control-center';
+import type { ObservableEventSourceAdapter } from '../observability/contracts';
+import { createHermesRuntimeAdapter } from '../observability/adapters/hermes-runtime-adapter';
+import { createHermesLogAdapter } from '../observability/adapters/hermes-log-adapter';
+import { createGitWorkspaceAdapter } from '../observability/adapters/git-workspace-adapter';
 import {
   createApplicationProductionRuntimeOwner,
   type ProductionRuntimePublicReadView,
@@ -542,6 +548,42 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     authenticator: hermesAuthenticator,
   });
   httpGateway.setHermesRouter(hermesTransport);
+
+  // ── Phase 8B: Operations Evidence Read Bridge (evidence plane only) ──────
+  // The bridge owns the Project Control Center snapshot and the bounded recent
+  // ObservableAgentEvent buffer. External source adapters (Hermes runtime/log,
+  // git) are opt-in and read-only; absence is factual, never guessed. The
+  // bridge never touches trading authority.
+  const operationsEvidenceRepoPath = config.operationsEvidence?.repoPath ?? process.cwd();
+  const operationsEvidenceSources: ObservableEventSourceAdapter[] = [];
+  if (config.operationsEvidence?.hermesRuntime?.stateFile) {
+    operationsEvidenceSources.push(createHermesRuntimeAdapter({
+      stateFile: config.operationsEvidence.hermesRuntime.stateFile,
+      processNames: config.operationsEvidence.hermesRuntime.processNames,
+      ports: config.operationsEvidence.hermesRuntime.ports,
+      healthUrl: config.operationsEvidence.hermesRuntime.healthUrl,
+      intervalMs: config.operationsEvidence.hermesRuntime.intervalMs,
+    }));
+  }
+  if (config.operationsEvidence?.hermesLogs?.files?.length) {
+    operationsEvidenceSources.push(createHermesLogAdapter({
+      files: config.operationsEvidence.hermesLogs.files,
+      intervalMs: config.operationsEvidence.hermesLogs.intervalMs,
+    }));
+  }
+  if (config.operationsEvidence?.git?.enabled) {
+    operationsEvidenceSources.push(createGitWorkspaceAdapter({
+      repoPath: operationsEvidenceRepoPath,
+      intervalMs: config.operationsEvidence.git.intervalMs,
+    }));
+  }
+  const operationsEvidenceBridge = createOperationsEvidenceReadBridge({
+    projectControlCenter: createProjectControlCenter({ repoPath: operationsEvidenceRepoPath }),
+    sources: operationsEvidenceSources,
+    maxRecentEvents: config.operationsEvidence?.maxRecentEvents,
+    defaultRunId: 'dsbot-gateway',
+  });
+
   const workbenchReadAdapter = createWorkbenchReadAdapter({
     now: () => Date.now(),
     runtime: () => ({
@@ -552,6 +594,8 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     hermes: () => hermesCoordinator.getSnapshot(),
     productionSpine: productionRuntimeOwner.authoritativeSpine,
     recovery: productionRuntimeOwner.read.recovery,
+    projectControlCenter: operationsEvidenceBridge.read.projectControlCenter,
+    activity: operationsEvidenceBridge.read.activity,
   });
   httpGateway.setWorkbenchRouter(createWorkbenchRouter(workbenchReadAdapter));
 
@@ -2587,6 +2631,11 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       // durability, recovery, reconciliation, or market failures abort boot.
       await productionRuntimeOwner.start();
 
+      // Phase 8B: start the observational evidence bridge AFTER the authoritative
+      // runtime. Source failures are isolated inside the bridge and never abort
+      // trading startup.
+      await operationsEvidenceBridge.start();
+
       // Setup graceful shutdown handlers
       setupShutdownHandlers();
 
@@ -2594,6 +2643,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       onShutdown(async () => {
         logger.info('Shutting down gateway services');
         await productionRuntimeOwner.stop();
+        await operationsEvidenceBridge.stop();
         if (executionProducer) await executionProducer.close();
         if (botManager) {
           for (const s of botManager.getAllBotStatuses()) {
@@ -2787,6 +2837,10 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       // Withdraw the canonical read binding and stop the owned Paper runtime
       // before any other gateway resource is dismantled.
       await productionRuntimeOwner.stop();
+
+      // Stop the observational evidence bridge after the authoritative runtime.
+      // Its stop failure is isolated and never prevents trading shutdown.
+      await operationsEvidenceBridge.stop();
 
       if (heartbeatService) {
         heartbeatService.stop();
