@@ -28,6 +28,37 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForAbort(signal?: AbortSignal, onAbort?: () => void): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const abort = () => {
+      onAbort?.();
+      reject(signal?.reason ?? new Error('aborted'));
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function phase8bConfig(): ControlCenterConfig {
+  return JSON.parse(readFileSync(new URL('../../config/control-center/project-state.json', import.meta.url), 'utf8')) as ControlCenterConfig;
+}
+
+function successfulPccCommand(executable: string, args: string[], config: ControlCenterConfig): string {
+  const head = 'a'.repeat(40);
+  const command = args.join(' ');
+  if (executable === 'gh' && args[0] === 'pr' && args[1] === 'list') return '[]';
+  if (executable === 'gh' && args[0] === 'api') return head;
+  if (command === 'rev-parse --show-toplevel') return '/repo';
+  if (command === 'branch --show-current') return config.deliveryBranch;
+  if (command === 'rev-parse HEAD') return head;
+  if (command === 'remote get-url origin') return 'https://github.com/wengecaitui/DSbot.git';
+  if (args[0] === 'ls-remote') return `${head}\t${args.at(-1)}`;
+  if (command.includes('status --porcelain=v1')) return '';
+  if (command.includes('--abbrev-ref --symbolic-full-name')) return `origin/${config.deliveryBranch}`;
+  if (command.startsWith('rev-parse refs/heads/')) return head;
+  throw new Error(`Unexpected PCC command: ${executable} ${command}`);
+}
+
 function makePccSnapshot(): ProjectControlCenterSnapshot {
   const approval = { approved: false as const, source: 'test', limitation: 'test' };
   return {
@@ -341,6 +372,16 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
         'token=TOKEN_SECRET',
         'password=PASSWORD_SECRET',
         'apiKey=APIKEY_SECRET',
+        'cookie=COOKIE_SECRET',
+        'privateKey=PRIVATE_KEY_SECRET',
+        'secret=PLAIN_SECRET',
+        'HERMES_BRIDGE_TOKEN=HERMES_SECRET',
+        'OPENAI_API_KEY=OPENAI_SECRET',
+        'ANTHROPIC_API_KEY=ANTHROPIC_SECRET',
+        'access_token=ACCESS_SECRET',
+        'GH_TOKEN=GH_SECRET',
+        'DB_PASSWORD=DB_SECRET',
+        'DATABASE_SECRET=DATABASE_SECRET_VALUE',
         'x'.repeat(1_000),
       ].join(' ');
       const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
@@ -349,7 +390,11 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sourceHealth: health });
       await bridge.start();
       const serialized = JSON.stringify(workbenchFor(bridge).operations());
-      for (const secret of ['BEARER_SECRET', 'TOKEN_SECRET', 'PASSWORD_SECRET', 'APIKEY_SECRET']) {
+      for (const secret of [
+        'BEARER_SECRET', 'TOKEN_SECRET', 'PASSWORD_SECRET', 'APIKEY_SECRET', 'COOKIE_SECRET',
+        'PRIVATE_KEY_SECRET', 'PLAIN_SECRET', 'HERMES_SECRET', 'OPENAI_SECRET', 'ANTHROPIC_SECRET',
+        'ACCESS_SECRET', 'GH_SECRET', 'DB_SECRET', 'DATABASE_SECRET_VALUE',
+      ]) {
         assert.ok(!serialized.includes(secret), `Workbench must not expose ${secret}`);
       }
       assert.match(serialized, /<REDACTED>/);
@@ -509,6 +554,151 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       const afterStop = refreshes;
       await sleep(150);
       assert.equal(refreshes, afterStop);
+    });
+
+    it('fails closed when an optional remote-head query exceeds the refresh deadline', async () => {
+      const config = phase8bConfig();
+      const pcc = createProjectControlCenter({
+        repoPath: '.', config,
+        readFile: async () => '{}',
+        runCommand: (executable, args, _cwd, signal) => {
+          if (executable === 'git' && args[0] === 'ls-remote' && args.at(-1)?.includes(config.integrationBranch)) {
+            return waitForAbort(signal);
+          }
+          return Promise.resolve(successfulPccCommand(executable, args, config));
+        },
+      });
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, projectControlCenterRefreshTimeoutMs: 100 });
+      await bridge.start();
+      const status = bridge.read.status();
+      assert.equal(status.projectControlCenter.state, 'FAILING');
+      assert.equal(bridge.read.projectControlCenter(), null);
+      assert.notEqual(workbenchFor(bridge).operations().availability, 'AVAILABLE');
+      assert.notEqual(workbenchFor(bridge).operations().freshness, 'FRESH');
+      await bridge.stop();
+    });
+
+    it('fails closed when gh pr list exceeds the refresh deadline after earlier evidence succeeds', async () => {
+      const config = phase8bConfig();
+      const pcc = createProjectControlCenter({
+        repoPath: '.', config,
+        readFile: async () => '{}',
+        runCommand: (executable, args, _cwd, signal) => {
+          if (executable === 'gh' && args[0] === 'pr' && args[1] === 'list') return waitForAbort(signal);
+          return Promise.resolve(successfulPccCommand(executable, args, config));
+        },
+      });
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, projectControlCenterRefreshTimeoutMs: 100 });
+      await bridge.start();
+      assert.equal(bridge.read.status().projectControlCenter.state, 'FAILING');
+      assert.equal(bridge.read.projectControlCenter(), null);
+      assert.notEqual(workbenchFor(bridge).operations().freshness, 'FRESH');
+      await bridge.stop();
+    });
+
+    it('refuses HEALTHY when a PCC implementation swallows abort and resolves after the deadline', async () => {
+      const snapshot = makePccSnapshot();
+      const pcc: ProjectControlCenter = {
+        async refresh(signal) {
+          await waitForAbort(signal).catch(() => undefined);
+        },
+        observe() {},
+        snapshot() { return snapshot; },
+      };
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, projectControlCenterRefreshTimeoutMs: 100 });
+      await bridge.start();
+      assert.equal(bridge.read.status().projectControlCenter.state, 'FAILING');
+      assert.equal(bridge.read.projectControlCenter(), null);
+      assert.notEqual(workbenchFor(bridge).operations().availability, 'AVAILABLE');
+      assert.notEqual(workbenchFor(bridge).operations().freshness, 'FRESH');
+      await bridge.stop();
+    });
+
+    it('propagates an already-aborted signal before optional evidence can run', async () => {
+      const config = phase8bConfig();
+      let commandCalls = 0;
+      const reason = Object.assign(new Error('PCC_ABORTED_BEFORE_OPTIONAL'), { name: 'AbortError' });
+      const controller = new AbortController();
+      controller.abort(reason);
+      const pcc = createProjectControlCenter({
+        repoPath: '.', config,
+        readFile: async () => '{}',
+        runCommand: async () => { commandCalls += 1; return ''; },
+      });
+      await assert.rejects(() => pcc.refresh(controller.signal), error => error === reason);
+      assert.equal(commandCalls, 0);
+    });
+
+    it('bounds a hanging PCC file read during bridge start', async () => {
+      const pcc = createProjectControlCenter({
+        repoPath: '.',
+        readFile: (_file, signal) => waitForAbort(signal),
+        runCommand: async () => { throw new Error('commands must not run before config read'); },
+      });
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, projectControlCenterRefreshTimeoutMs: 100 });
+      const started = Date.now();
+      await bridge.start();
+      assert.ok(Date.now() - started < 1_000);
+      assert.equal(bridge.read.status().projectControlCenter.state, 'FAILING');
+      assert.equal(bridge.read.projectControlCenter(), null);
+      await bridge.stop();
+    });
+
+    it('retains last-known-good PCC only as stale after a later PR deadline', async () => {
+      const config = phase8bConfig();
+      let prReads = 0;
+      const pcc = createProjectControlCenter({
+        repoPath: '.', config,
+        readFile: async () => '{}',
+        runCommand: (executable, args, _cwd, signal) => {
+          if (executable === 'gh' && args[0] === 'pr' && args[1] === 'list' && ++prReads > 1) return waitForAbort(signal);
+          return Promise.resolve(successfulPccCommand(executable, args, config));
+        },
+      });
+      const bridge = createOperationsEvidenceReadBridge({
+        projectControlCenter: pcc,
+        projectControlCenterRefreshIntervalMs: 100,
+        projectControlCenterRefreshTimeoutMs: 100,
+      });
+      await bridge.start();
+      assert.ok(bridge.read.projectControlCenter());
+      await sleep(260);
+      assert.ok(bridge.read.projectControlCenter(), 'last-known-good snapshot remains readable');
+      assert.equal(bridge.read.status().projectControlCenter.state, 'FAILING');
+      const operations = workbenchFor(bridge).operations();
+      assert.equal(operations.availability, 'INCOMPLETE');
+      assert.equal(operations.freshness, 'STALE');
+      await bridge.stop();
+    });
+
+    it('aborts an in-flight PCC file refresh so stop remains bounded', async () => {
+      const config = phase8bConfig();
+      let testEvidenceReads = 0;
+      let aborts = 0;
+      const pcc = createProjectControlCenter({
+        repoPath: '.', config,
+        readFile: (file, signal) => {
+          if (file.endsWith('control-center-tests.json') && ++testEvidenceReads > 1) {
+            return waitForAbort(signal, () => { aborts += 1; });
+          }
+          return Promise.resolve('{}');
+        },
+        runCommand: (executable, args) => Promise.resolve(successfulPccCommand(executable, args, config)),
+      });
+      const bridge = createOperationsEvidenceReadBridge({
+        projectControlCenter: pcc,
+        projectControlCenterRefreshIntervalMs: 100,
+        projectControlCenterRefreshTimeoutMs: 10_000,
+      });
+      await bridge.start();
+      await sleep(150);
+      const stopped = Date.now();
+      await bridge.stop();
+      assert.ok(Date.now() - stopped < 1_000);
+      assert.equal(aborts, 1);
+      const afterStop = testEvidenceReads;
+      await sleep(150);
+      assert.equal(testEvidenceReads, afterStop);
     });
   });
 

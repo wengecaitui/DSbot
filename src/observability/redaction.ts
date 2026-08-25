@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 
 const SENSITIVE_KEY = /(?:api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token)/i;
-const INLINE_SECRET = /\b(api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token)(\s*[:=]\s*)([^\s,;]+)/gi;
+const INLINE_ASSIGNMENT = /\b([A-Za-z_][A-Za-z0-9_-]*)(\s*[:=]\s*)([^\s,;]+)/g;
 const BEARER = /\bBearer\s+[^\s,;]+/gi;
 const SECRET_VALUE = '<REDACTED>';
 
@@ -20,7 +20,8 @@ export function redactText(input: string): RedactionResult<string> {
     redactions.add('bearer');
     return `Bearer ${SECRET_VALUE}`;
   });
-  value = value.replace(INLINE_SECRET, (_match, key: string, separator: string) => {
+  value = value.replace(INLINE_ASSIGNMENT, (match, key: string, separator: string) => {
+    if (!SENSITIVE_KEY.test(key)) return match;
     redactions.add(key.toLowerCase());
     return `${key}${separator}${SECRET_VALUE}`;
   });

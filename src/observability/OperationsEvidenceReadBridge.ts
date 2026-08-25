@@ -255,6 +255,7 @@ export function createOperationsEvidenceReadBridge(
     const operation = (async () => {
       try {
         await projectControlCenter.refresh(controller.signal);
+        controller.signal.throwIfAborted();
         const refreshed = structuredClone(projectControlCenter.snapshot());
         if (lifecycle !== 'STOPPED' && lifecycleGeneration === generation) {
           pccSnapshot = refreshed;
