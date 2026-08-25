@@ -110,6 +110,10 @@ function publicMemberNames(adapter: object): readonly string[] {
   const names = new Set<string>();
   let current: object | null = adapter;
   while (current !== null && current !== Object.prototype) {
+    const symbols = Object.getOwnPropertySymbols(current);
+    if (symbols.length > 0) {
+      violation(`ADAPTER_SYMBOL_PROPERTY_FORBIDDEN:${String(symbols[0])}`);
+    }
     for (const name of Object.getOwnPropertyNames(current)) {
       if (name === 'constructor') continue;
       const descriptor = Object.getOwnPropertyDescriptor(current, name);
@@ -215,9 +219,11 @@ function abortReason(signal: AbortSignal): unknown {
 }
 
 /**
- * Contract boundary for a future adapter call. The concrete adapter must own
- * and cancel its I/O when the signal aborts. This guard ensures an abort can
- * never be converted into a successful (including partial) page.
+ * Contract boundary for a future adapter call. `timeoutMs` is a required,
+ * bounded input; Phase 9A does not create a timer or race the adapter promise.
+ * A concrete adapter must own its transport deadline and cancel its I/O when
+ * the signal aborts. This guard only ensures an observed abort can never be
+ * converted into a successful (including partial) page.
  */
 export async function fetchOneResearchPage(
   adapter: ResearchProviderAdapter,
@@ -283,6 +289,9 @@ export const PHASE_9A_RESEARCH_ADAPTER_BOUNDARY = Object.freeze({
   pagesPerFetch: 1,
   readOnly: true,
   requestTimeoutMustBeEnforcedByAdapter: true,
+  genericTimeoutWrapperImplemented: false,
+  transportDeadlineEnforcementDeferredToConcreteAdapter: true,
+  ownedIoCancellationMustBeProvenByConcreteAdapter: true,
   abortMustRejectWithoutSuccessfulPartialPage: true,
   productionAuthority: false,
   realProviderImplemented: false,

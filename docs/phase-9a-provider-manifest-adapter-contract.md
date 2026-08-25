@@ -52,7 +52,7 @@ secret-manager:<identifier>
 runtime:<identifier>
 ```
 
-An API key, token, password, authorization header, cookie or private key embedded as a value fails validation. This contract stores no credential and introduces no provider account or network client.
+An API key, token, password, authorization header, cookie, private key, credential field or credential-bearing URI userinfo embedded as a value fails validation. Sensitive-key detection is semantic across camelCase, snake_case and kebab-case compound names. Symbol-keyed configuration is also rejected because it cannot bypass the string-key inspection. This contract stores no credential and introduces no provider account or network client.
 
 ## 3. Time and point-in-time rule
 
@@ -86,9 +86,11 @@ validateConfiguration(configuration: unknown): void
 fetch(request: ResearchFetchRequest, signal: AbortSignal): Promise<ResearchFetchPage>
 ```
 
-Each fetch request has an explicit record limit and timeout, plus an optional cursor and/or half-open range. One call returns one bounded page with `records`, `nextCursor | null`, and `complete`.
+Each fetch request has an explicit record limit and required bounded `timeoutMs` input, plus an optional cursor and/or half-open range. One call returns one bounded page with `records`, `nextCursor | null`, and `complete`.
 
-An adapter must reject cancellation and terminate the I/O it owns. Cancellation must not resolve as a successful partial page. The Phase 9A boundary checks cancellation before and after the adapter promise; a future concrete adapter must separately prove that its transport actually honors the signal and timeout. Phase 9A introduces neither a lifecycle (`start`/`stop`) nor continuous streaming.
+An adapter must reject cancellation and terminate the I/O it owns. Cancellation must not resolve as a successful partial page. The Phase 9A boundary checks cancellation before and after the adapter promise, but it does not create a timer, use `Promise.race`, or generically enforce a network deadline. Runtime transport deadline enforcement is deferred to each concrete provider implementation, which must prove that it owns and cancels the underlying I/O when its bounded timeout or abort signal fires. Phase 9A introduces neither a lifecycle (`start`/`stop`) nor continuous streaming.
+
+The adapter object and every inspected prototype must have zero symbol-keyed public properties. This fail-closed rule prevents capabilities hidden from ordinary string-key surface inspection.
 
 Forbidden capabilities include trading, order submission/cancellation, publication into `MarketDataRuntime`, `LIVE_READY` mutation, production writes, shell/process execution, filesystem mutation and Git mutation.
 

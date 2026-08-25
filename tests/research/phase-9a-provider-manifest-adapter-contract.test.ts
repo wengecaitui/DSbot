@@ -144,6 +144,73 @@ describe('Phase 9A provider manifest and bounded adapter contract', () => {
     }
   });
 
+  it('rejects literal credentials through generic compound sensitive-key semantics', () => {
+    const literalCases: readonly Record<string, string>[] = [
+      { credential: 'CREDENTIAL_LITERAL' },
+      { credentials: 'CREDENTIALS_LITERAL' },
+      { accessToken: 'ACCESS_TOKEN_LITERAL' },
+      { access_token: 'ACCESS_TOKEN_LITERAL' },
+      { 'access-token': 'ACCESS_TOKEN_LITERAL' },
+      { refreshToken: 'REFRESH_TOKEN_LITERAL' },
+      { refresh_token: 'REFRESH_TOKEN_LITERAL' },
+      { 'refresh-token': 'REFRESH_TOKEN_LITERAL' },
+      { clientSecret: 'CLIENT_SECRET_LITERAL' },
+      { client_secret: 'CLIENT_SECRET_LITERAL' },
+      { 'client-secret': 'CLIENT_SECRET_LITERAL' },
+      { dbPassword: 'DB_PASSWORD_LITERAL' },
+      { db_password: 'DB_PASSWORD_LITERAL' },
+      { 'db-password': 'DB_PASSWORD_LITERAL' },
+      { authorizationHeader: 'AUTHORIZATION_HEADER_LITERAL' },
+      { authorization_header: 'AUTHORIZATION_HEADER_LITERAL' },
+      { 'authorization-header': 'AUTHORIZATION_HEADER_LITERAL' },
+    ];
+    for (const configuration of literalCases) {
+      assert.throws(() => assertExternalReferenceOnlyConfiguration(configuration), /INLINE_SECRET/);
+    }
+
+    for (const configuration of [
+      { credential: 'env:RESEARCH_API_KEY' },
+      { accessToken: 'runtime:research-token' },
+      { client_secret: 'secret-manager:provider-key' },
+    ]) {
+      assert.doesNotThrow(() => assertExternalReferenceOnlyConfiguration(configuration));
+    }
+    assert.doesNotThrow(() => assertProviderManifest(validManifest()));
+  });
+
+  it('rejects credential-bearing URI userinfo wherever it appears in configuration', () => {
+    for (const uri of [
+      'postgres://user:password@host/db',
+      'mongodb://user:password@host/db',
+      'redis://:password@host',
+      'https://user:password@host/path',
+      'postgres://user@host/db',
+    ]) {
+      assert.throws(() => assertExternalReferenceOnlyConfiguration({ endpoint: uri }), /INLINE_SECRET/);
+    }
+  });
+
+  it('rejects symbol-keyed adapter, prototype, and configuration properties', () => {
+    const symbolCapability = Object.assign(adapter(), { [Symbol('trade')]: () => undefined });
+    assert.throws(
+      () => assertResearchProviderAdapterSurface(symbolCapability),
+      /ADAPTER_SYMBOL_PROPERTY_FORBIDDEN/,
+    );
+
+    const symbolPrototype = { [Symbol('trade')]: () => undefined };
+    const prototypeCapability = Object.assign(Object.create(symbolPrototype), adapter());
+    assert.throws(
+      () => assertResearchProviderAdapterSurface(prototypeCapability),
+      /ADAPTER_SYMBOL_PROPERTY_FORBIDDEN/,
+    );
+
+    const symbolConfiguration = { endpoint: 'provider-defined', [Symbol('credential')]: 'INLINE_SECRET' };
+    assert.throws(
+      () => assertExternalReferenceOnlyConfiguration(symbolConfiguration),
+      /CONFIGURATION_SYMBOL_PROPERTY/,
+    );
+  });
+
   it('requires explicit availableAtAuthority and evidence appropriate to that authority', () => {
     const missing = clone(validManifest());
     delete missing.timeSemantics.availableAtAuthority;
@@ -179,6 +246,9 @@ describe('Phase 9A provider manifest and bounded adapter contract', () => {
     assert.equal(PHASE_9A_RESEARCH_ADAPTER_BOUNDARY.continuousStreamingAllowed, false);
     assert.equal(PHASE_9A_RESEARCH_ADAPTER_BOUNDARY.pagesPerFetch, 1);
     assert.equal(PHASE_9A_RESEARCH_ADAPTER_BOUNDARY.requestTimeoutMustBeEnforcedByAdapter, true);
+    assert.equal(PHASE_9A_RESEARCH_ADAPTER_BOUNDARY.genericTimeoutWrapperImplemented, false);
+    assert.equal(PHASE_9A_RESEARCH_ADAPTER_BOUNDARY.transportDeadlineEnforcementDeferredToConcreteAdapter, true);
+    assert.equal(PHASE_9A_RESEARCH_ADAPTER_BOUNDARY.ownedIoCancellationMustBeProvenByConcreteAdapter, true);
     assert.equal(PHASE_9A_RESEARCH_ADAPTER_BOUNDARY.abortMustRejectWithoutSuccessfulPartialPage, true);
 
     const widened = { ...adapter(), trade: () => undefined };

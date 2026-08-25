@@ -83,8 +83,30 @@ export interface ProviderManifest {
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/;
 const VERSION = /^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$/;
 const EXTERNAL_REFERENCE = /^(env|secret-manager|runtime):[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$/;
-const SECRET_KEY = /(?:^|[_-])(authorization|cookie|password|passphrase|private[_-]?key|secret|token|api[_-]?key)(?:$|[_-])/i;
 const SECRET_VALUE = /(?:bearer\s+\S+|-----BEGIN [^-]*PRIVATE KEY-----|(?:password|passphrase|private[_-]?key|secret|token|api[_-]?key)\s*[=:]\s*[^\s,;]+)/i;
+const URI_WITH_USERINFO = /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#\s]*@/;
+const SENSITIVE_KEY_WORDS = new Set([
+  'authorization', 'cookie', 'credential', 'credentials', 'password',
+  'passphrase', 'secret', 'token',
+]);
+
+function configurationKeyWords(key: string): readonly string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter((word) => word.length > 0)
+    .map((word) => word.toLowerCase());
+}
+
+function isSensitiveConfigurationKey(key: string): boolean {
+  const words = configurationKeyWords(key);
+  const compact = words.join('');
+  if (compact === 'credentialreferences') return false;
+  return words.some((word) => SENSITIVE_KEY_WORDS.has(word))
+    || compact.includes('apikey')
+    || compact.includes('privatekey');
+}
 
 function violation(reason: string): never {
   throw new Error(`PHASE_9A_PROVIDER_MANIFEST_INVALID:${reason}`);
@@ -156,10 +178,13 @@ export function assertExternalReferenceOnlyConfiguration(value: unknown): void {
 
   function inspect(current: unknown, path: string): void {
     if (typeof current === 'string') {
-      if (SECRET_VALUE.test(current)) violation(`INLINE_SECRET:${path}`);
+      if (SECRET_VALUE.test(current) || URI_WITH_USERINFO.test(current)) violation(`INLINE_SECRET:${path}`);
       return;
     }
     if (current === null || typeof current !== 'object') return;
+    if (Object.getOwnPropertySymbols(current).length > 0) {
+      violation(`CONFIGURATION_SYMBOL_PROPERTY:${path}`);
+    }
     if (seen.has(current)) violation(`CONFIGURATION_CYCLE:${path}`);
     seen.add(current);
     try {
@@ -171,7 +196,7 @@ export function assertExternalReferenceOnlyConfiguration(value: unknown): void {
       for (const [key, descriptor] of Object.entries(descriptors)) {
         if (descriptor.get !== undefined || descriptor.set !== undefined) violation(`CONFIGURATION_ACCESSOR:${path}.${key}`);
         const item = descriptor.value;
-        if (SECRET_KEY.test(key)) {
+        if (isSensitiveConfigurationKey(key)) {
           if (typeof item !== 'string' || !EXTERNAL_REFERENCE.test(item)) {
             violation(`INLINE_SECRET:${path}.${key}`);
           }
