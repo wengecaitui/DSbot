@@ -102,7 +102,6 @@ function configurationKeyWords(key: string): readonly string[] {
 function isSensitiveConfigurationKey(key: string): boolean {
   const words = configurationKeyWords(key);
   const compact = words.join('');
-  if (compact === 'credentialreferences') return false;
   return words.some((word) => SENSITIVE_KEY_WORDS.has(word))
     || compact.includes('apikey')
     || compact.includes('privatekey');
@@ -169,11 +168,10 @@ function assertCredentialReference(value: unknown): void {
   }
 }
 
-/**
- * Reject credential material in adapter configuration. Secret-shaped fields
- * may contain only an external locator, never inline material.
- */
-export function assertExternalReferenceOnlyConfiguration(value: unknown): void {
+function inspectExternalReferenceOnlyConfiguration(
+  value: unknown,
+  allowValidatedManifestCredentialReferences: boolean,
+): void {
   const seen = new WeakSet<object>();
 
   function inspect(current: unknown, path: string): void {
@@ -196,7 +194,10 @@ export function assertExternalReferenceOnlyConfiguration(value: unknown): void {
       for (const [key, descriptor] of Object.entries(descriptors)) {
         if (descriptor.get !== undefined || descriptor.set !== undefined) violation(`CONFIGURATION_ACCESSOR:${path}.${key}`);
         const item = descriptor.value;
-        if (isSensitiveConfigurationKey(key)) {
+        const isValidatedManifestCredentialReferences = allowValidatedManifestCredentialReferences
+          && path === '$.auth'
+          && key === 'credentialReferences';
+        if (isSensitiveConfigurationKey(key) && !isValidatedManifestCredentialReferences) {
           if (typeof item !== 'string' || !EXTERNAL_REFERENCE.test(item)) {
             violation(`INLINE_SECRET:${path}.${key}`);
           }
@@ -210,6 +211,14 @@ export function assertExternalReferenceOnlyConfiguration(value: unknown): void {
   }
 
   inspect(value, '$');
+}
+
+/**
+ * Reject credential material in adapter configuration. Secret-shaped fields
+ * may contain only an external locator, never inline material.
+ */
+export function assertExternalReferenceOnlyConfiguration(value: unknown): void {
+  inspectExternalReferenceOnlyConfiguration(value, false);
 }
 
 /** Strict, fail-closed runtime validator for untrusted manifest input. */
@@ -295,7 +304,7 @@ export function assertProviderManifest(value: unknown): asserts value is Provide
   }
 
   if (manifest.productionAuthority !== false) violation('PRODUCTION_AUTHORITY_MUST_BE_FALSE');
-  assertExternalReferenceOnlyConfiguration(manifest);
+  inspectExternalReferenceOnlyConfiguration(manifest, true);
 }
 
 export const PHASE_9A_PROVIDER_MANIFEST_BOUNDARY = Object.freeze({

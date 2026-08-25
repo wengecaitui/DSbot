@@ -178,6 +178,22 @@ describe('Phase 9A provider manifest and bounded adapter contract', () => {
     assert.doesNotThrow(() => assertProviderManifest(validManifest()));
   });
 
+  it('allows only the validated manifest auth credentialReferences container', () => {
+    assert.doesNotThrow(() => assertProviderManifest(validManifest()));
+
+    for (const configuration of [
+      { credentialReferences: 'LITERAL_SECRET' },
+      { auth: { credentialReferences: 'LITERAL_SECRET' } },
+    ]) {
+      assert.throws(() => assertExternalReferenceOnlyConfiguration(configuration), /INLINE_SECRET/);
+    }
+
+    assert.throws(
+      () => validateResearchProviderConfiguration(adapter(), { credentialReferences: 'LITERAL_SECRET' }),
+      /INLINE_SECRET/,
+    );
+  });
+
   it('rejects credential-bearing URI userinfo wherever it appears in configuration', () => {
     for (const uri of [
       'postgres://user:password@host/db',
