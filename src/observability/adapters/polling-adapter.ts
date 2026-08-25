@@ -4,6 +4,7 @@ export interface PollingAdapterOptions {
   name: string;
   intervalMs?: number;
   poll(sink: ObservableEventSink): void | Promise<void>;
+  onSuccess?: () => void;
   onError?: (error: Error) => void;
 }
 
@@ -20,8 +21,13 @@ export function createPollingAdapter(options: PollingAdapterOptions): Observable
     if (!running) return Promise.resolve();
     inFlight = inFlight.then(async () => {
       if (!running) return;
-      try { await options.poll(sink); }
-      catch (cause) { options.onError?.(cause instanceof Error ? cause : new Error(String(cause))); }
+      try {
+        await options.poll(sink);
+        try { options.onSuccess?.(); } catch { /* evidence status observers cannot break polling */ }
+      } catch (cause) {
+        try { options.onError?.(cause instanceof Error ? cause : new Error(String(cause))); }
+        catch { /* evidence status observers cannot break polling */ }
+      }
     });
     return inFlight;
   }
@@ -33,6 +39,7 @@ export function createPollingAdapter(options: PollingAdapterOptions): Observable
       running = true;
       await run(sink);
       timer = setInterval(() => { void run(sink); }, intervalMs);
+      timer.unref();
     },
     async stop() {
       if (!running) return;

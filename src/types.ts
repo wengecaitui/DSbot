@@ -789,9 +789,45 @@ export interface SkillManagerConfig {
 // CONFIG
 // =============================================================================
 
+/**
+ * Phase 8B: observational Operations Evidence Read Bridge configuration.
+ * Narrow and observability-only. Absence of external source config is
+ * represented factually (no source started), never guessed or hardcoded.
+ */
+export interface OperationsEvidenceConfig {
+  /** Explicit DSbot repository path for git/PCC observation. Defaults to process.cwd(). */
+  repoPath?: string;
+  /** Bound for the recent-event buffer (default 500). */
+  maxRecentEvents?: number;
+  /** Conservative Project Control Center refresh interval in ms (default 30000, minimum 100). */
+  projectControlCenterRefreshIntervalMs?: number;
+  /** Hard deadline for one Project Control Center refresh in ms (default 10000, minimum 100). */
+  projectControlCenterRefreshTimeoutMs?: number;
+  /** Opt-in external Hermes runtime observation (state file, processes, ports, health). */
+  hermesRuntime?: {
+    stateFile?: string;
+    processNames?: string[];
+    ports?: Array<{ host?: string; port: number }>;
+    healthUrl?: string;
+    intervalMs?: number;
+  };
+  /** Opt-in external Hermes log observation (explicit file paths only). */
+  hermesLogs?: {
+    files?: string[];
+    intervalMs?: number;
+  };
+  /** Opt-in git workspace observation of the DSbot repository. */
+  git?: {
+    enabled?: boolean;
+    intervalMs?: number;
+  };
+}
+
 export interface Config {
   /** Phase 8A: explicit, Paper-only authoritative runtime. Absent is fail-closed. */
   productionRuntime?: import('./runtime/production/ProductionRuntimeOwner').ProductionRuntimeConfig;
+  /** Phase 8B: observational Operations Evidence Read Bridge (evidence plane only). */
+  operationsEvidence?: OperationsEvidenceConfig;
   gateway: {
     port: number;
     host?: string;

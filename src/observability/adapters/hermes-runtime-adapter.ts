@@ -1,12 +1,10 @@
 import { promises as fs } from 'fs';
-import { execFile as execFileCallback } from 'child_process';
 import * as net from 'net';
 import * as path from 'path';
-import { promisify } from 'util';
 import type { ObservableEventSourceAdapter } from '../contracts';
+import { DEFAULT_EVIDENCE_COMMAND_TIMEOUT_MS, assertEvidenceTimeout, runBoundedEvidenceCommand } from '../bounded-command';
 import { createPollingAdapter } from './polling-adapter';
 
-const execFile = promisify(execFileCallback);
 export const HERMES_REQUIRED_RUNTIME_PORTS = [8_642] as const;
 export interface RuntimeProcessState { name: string; pid: number; alive: boolean; }
 export interface RuntimePortState { host: string; port: number; listening: boolean; }
@@ -22,7 +20,10 @@ export interface HermesRuntimeAdapterOptions {
   processNames?: string[];
   ports?: Array<{ host?: string; port: number }>;
   healthUrl?: string;
+  commandTimeoutMs?: number;
+  runProcessCommand?: (executable: string, args: readonly string[], timeoutMs: number) => Promise<string>;
   probe?: () => Promise<HermesRuntimeSnapshot>;
+  onSuccess?: () => void;
   onError?: (error: Error) => void;
 }
 
@@ -39,19 +40,22 @@ function probePort(host: string, port: number, timeoutMs = 750): Promise<boolean
     socket.once('error', () => finish(false));
   });
 }
-async function discoverProcesses(names: string[]): Promise<RuntimeProcessState[]> {
+async function discoverProcesses(
+  names: string[],
+  runCommand: (executable: string, args: readonly string[]) => Promise<string>,
+): Promise<RuntimeProcessState[]> {
   const safeNames = names.filter(name => /^[A-Za-z0-9_.-]+$/.test(name));
   if (safeNames.length === 0) return [];
   if (process.platform === 'win32') {
     const quoted = safeNames.map(name => `'${name}'`).join(',');
     const command = `Get-Process -Name ${quoted} -ErrorAction SilentlyContinue | Select-Object Id,ProcessName | ConvertTo-Json -Compress`;
-    const result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, maxBuffer: 1024 * 1024 });
-    if (!result.stdout.trim()) return [];
-    const decoded = JSON.parse(result.stdout) as { Id: number; ProcessName: string } | Array<{ Id: number; ProcessName: string }>;
+    const output = await runCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command]);
+    if (!output) return [];
+    const decoded = JSON.parse(output) as { Id: number; ProcessName: string } | Array<{ Id: number; ProcessName: string }>;
     return (Array.isArray(decoded) ? decoded : [decoded]).map(item => ({ name: item.ProcessName, pid: item.Id, alive: true }));
   }
-  const result = await execFile('ps', ['-eo', 'pid=,comm='], { maxBuffer: 1024 * 1024 });
-  return result.stdout.split(/\r?\n/).flatMap(line => {
+  const output = await runCommand('ps', ['-eo', 'pid=,comm=']);
+  return output.split(/\r?\n/).flatMap(line => {
     const match = line.trim().match(/^(\d+)\s+(.+)$/);
     if (!match || !safeNames.includes(path.basename(match[2]))) return [];
     return [{ name: path.basename(match[2]), pid: Number(match[1]), alive: true }];
@@ -62,6 +66,10 @@ export function createHermesRuntimeAdapter(options: HermesRuntimeAdapterOptions)
   const stateFile = path.resolve(options.stateFile);
   const ports = options.ports ?? [];
   const processNames = options.processNames ?? ['Hermes'];
+  const commandTimeoutMs = assertEvidenceTimeout(options.commandTimeoutMs ?? DEFAULT_EVIDENCE_COMMAND_TIMEOUT_MS);
+  const runProcessCommand = options.runProcessCommand
+    ? (executable: string, args: readonly string[]) => options.runProcessCommand!(executable, args, commandTimeoutMs)
+    : (executable: string, args: readonly string[]) => runBoundedEvidenceCommand(executable, args, { timeoutMs: commandTimeoutMs, maxBuffer: 1024 * 1024 });
   let previous: HermesRuntimeSnapshot | undefined;
   let serialized: string | undefined;
   const defaultProbe = async (): Promise<HermesRuntimeSnapshot> => {
@@ -77,7 +85,7 @@ export function createHermesRuntimeAdapter(options: HermesRuntimeAdapterOptions)
         platforms, updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : undefined,
       };
     } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause; }
-    const discovered: RuntimeProcessState[] = await discoverProcesses(processNames).catch((): RuntimeProcessState[] => []);
+    const discovered: RuntimeProcessState[] = await discoverProcesses(processNames, runProcessCommand);
     if (gateway?.pid) discovered.push({ name: 'hermes-gateway', pid: gateway.pid, alive: isPidAlive(gateway.pid) });
     const portStates = await Promise.all(ports.map(async item => ({ host: item.host ?? '127.0.0.1', port: item.port, listening: await probePort(item.host ?? '127.0.0.1', item.port) })));
     let health: HermesRuntimeSnapshot['health'];
@@ -91,7 +99,7 @@ export function createHermesRuntimeAdapter(options: HermesRuntimeAdapterOptions)
   };
   const probe = options.probe ?? defaultProbe;
   return createPollingAdapter({
-    name: 'hermes-runtime', intervalMs: options.intervalMs, onError: options.onError,
+    name: 'hermes-runtime', intervalMs: options.intervalMs, onSuccess: options.onSuccess, onError: options.onError,
     async poll(sink) {
       const current = await probe();
       const currentSerialized = JSON.stringify(current);

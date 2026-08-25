@@ -1,16 +1,13 @@
-import { execFile as execFileCallback } from 'node:child_process';
 import { readFile as readFileDefault } from 'node:fs/promises';
 import * as path from 'node:path';
-import { promisify } from 'node:util';
 import type { ObservableAgentEvent } from './contracts';
+import { DEFAULT_EVIDENCE_COMMAND_TIMEOUT_MS, assertEvidenceTimeout, runBoundedEvidenceCommand } from './bounded-command';
 import {
   CONTROL_CENTER_RUNTIME_BLOCKER_PREFIX,
   controlCenterDefinitionSha256,
   isCurrentPassingRuntimeReceipt,
   type ControlCenterRuntimeSmokeReceipt,
 } from './control-center-runtime-smoke';
-
-const execFile = promisify(execFileCallback);
 
 export const CONTROL_CENTER_STATUSES = [
   'PLANNED',
@@ -164,16 +161,25 @@ export interface ProjectControlCenterOptions {
   testEvidencePath?: string;
   runtimeSmokePath?: string;
   config?: ControlCenterConfig;
-  runCommand?: (executable: string, args: string[], cwd: string) => Promise<string>;
-  readFile?: (file: string) => Promise<string>;
+  commandTimeoutMs?: number;
+  runCommand?: (executable: string, args: string[], cwd: string, signal?: AbortSignal) => Promise<string>;
+  readFile?: (file: string, signal?: AbortSignal) => Promise<string>;
   now?: () => Date;
   maxTimeline?: number;
 }
 
 export interface ProjectControlCenter {
-  refresh(): Promise<void>;
+  refresh(signal?: AbortSignal): Promise<void>;
   observe(event: ObservableAgentEvent): void;
   snapshot(): ProjectControlCenterSnapshot;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  if (signal.reason !== undefined) throw signal.reason;
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  throw error;
 }
 
 function assertNonEmpty(value: unknown, field: string): asserts value is string {
@@ -283,11 +289,11 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     path.join(repoPath, 'deployments', 'control-center', 'grafana', 'dashboards', 'dsbot-project-state.json'),
     path.join(repoPath, 'deployments', 'control-center', 'grafana', 'provisioning', 'datasources', 'datasources.yml'),
   ];
-  const readFile = options.readFile ?? (file => readFileDefault(file, 'utf8'));
-  const runCommand = options.runCommand ?? (async (executable, args, cwd) => {
-    const result = await execFile(executable, args, { cwd, windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
-    return result.stdout.trim();
-  });
+  const readFile = options.readFile ?? ((file, signal) => readFileDefault(file, { encoding: 'utf8', signal }));
+  const commandTimeoutMs = assertEvidenceTimeout(options.commandTimeoutMs ?? DEFAULT_EVIDENCE_COMMAND_TIMEOUT_MS);
+  const runCommand = options.runCommand ?? ((executable, args, cwd, signal) => runBoundedEvidenceCommand(
+    executable, args, { cwd, signal, timeoutMs: commandTimeoutMs, maxBuffer: 4 * 1024 * 1024 },
+  ));
   const now = options.now ?? (() => new Date());
   const maxTimeline = options.maxTimeline ?? 100;
   if (!Number.isInteger(maxTimeline) || maxTimeline <= 0) throw new Error('maxTimeline must be a positive integer');
@@ -302,8 +308,23 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     while (timeline.length > maxTimeline) timeline.shift();
   }
 
-  async function optional(executable: string, args: string[]): Promise<string | undefined> {
-    try { return await runCommand(executable, args, repoPath); } catch { return undefined; }
+  async function optional(executable: string, args: string[], signal?: AbortSignal): Promise<string | undefined> {
+    throwIfAborted(signal);
+    try {
+      const value = await runCommand(executable, args, repoPath, signal);
+      throwIfAborted(signal);
+      return value;
+    } catch {
+      throwIfAborted(signal);
+      return undefined;
+    }
+  }
+
+  async function readEvidenceFile(file: string, signal?: AbortSignal): Promise<string> {
+    throwIfAborted(signal);
+    const value = await readFile(file, signal);
+    throwIfAborted(signal);
+    return value;
   }
 
   function parseCommitSha(value: string | undefined): string | undefined {
@@ -311,18 +332,18 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     return sha && /^[a-f0-9]{40}$/.test(sha) ? sha : undefined;
   }
 
-  async function readRemoteHead(current: ControlCenterConfig, branch: string): Promise<string | undefined> {
-    const gitHead = parseCommitSha(await optional('git', ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`]));
+  async function readRemoteHead(current: ControlCenterConfig, branch: string, signal?: AbortSignal): Promise<string | undefined> {
+    const gitHead = parseCommitSha(await optional('git', ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`], signal));
     if (gitHead) return gitHead;
     return parseCommitSha(await optional('gh', [
       'api', `repos/${current.repository}/commits/${encodeURIComponent(branch)}`, '--jq', '.sha',
-    ]));
+    ], signal));
   }
 
-  async function loadTests(head: string, current: ControlCenterConfig, dataGaps: string[]): Promise<ControlCenterTestEvidence[]> {
+  async function loadTests(head: string, current: ControlCenterConfig, dataGaps: string[], signal?: AbortSignal): Promise<ControlCenterTestEvidence[]> {
     let fileTests: ControlCenterTestEvidence[] = [];
     try {
-      const parsed = JSON.parse(await readFile(testEvidencePath)) as TestEvidenceFile;
+      const parsed = JSON.parse(await readEvidenceFile(testEvidencePath, signal)) as TestEvidenceFile;
       if (parsed.schemaVersion !== '2.0' || !Array.isArray(parsed.commands)) throw new Error('schema mismatch');
       const gateById = new Map(current.requiredLocalGates.map(gate => [gate.id, gate]));
       for (const command of parsed.commands) {
@@ -346,18 +367,19 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
       const missingLocalGates = current.requiredLocalGates.filter(gate => !observedGateIds.has(gate.id)).map(gate => gate.id);
       if (missingLocalGates.length) dataGaps.push(`Missing clean SHA-bound local gates: ${missingLocalGates.join(', ')}`);
     } catch {
+      throwIfAborted(signal);
       dataGaps.push(`Local test evidence unavailable at ${testEvidencePath}`);
     }
     return [...fileTests, ...observedTests].filter(test => !test.commitSha || test.commitSha === head).slice(-50);
   }
 
-  async function loadPullRequest(current: ControlCenterConfig, expectedHead: string | undefined, dataGaps: string[]): Promise<ControlCenterPullRequest | undefined> {
+  async function loadPullRequest(current: ControlCenterConfig, expectedHead: string | undefined, dataGaps: string[], signal?: AbortSignal): Promise<ControlCenterPullRequest | undefined> {
     try {
       const raw = await runCommand('gh', [
         'pr', 'list', '--repo', current.repository, '--head', current.deliveryBranch,
         '--state', 'all', '--limit', '10',
         '--json', 'number,url,state,isDraft,headRefOid,mergeCommit,reviewDecision,statusCheckRollup',
-      ], repoPath);
+      ], repoPath, signal);
       const items = JSON.parse(raw) as GhPullRequest[];
       const item = items.find(candidate => expectedHead !== undefined && candidate.headRefOid === expectedHead) ?? items[0];
       if (!item) return undefined;
@@ -373,6 +395,7 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
         checks,
       };
     } catch {
+      throwIfAborted(signal);
       dataGaps.push('GitHub PR/CI evidence unavailable from authenticated gh CLI');
       return undefined;
     }
@@ -386,9 +409,10 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
     expectedDefinitionSha256: string | undefined,
     worktreeClean: boolean,
     dataGaps: string[],
+    signal?: AbortSignal,
   ): Promise<ControlCenterRuntimeSmokeReceipt | undefined> {
     try {
-      const value = JSON.parse(await readFile(runtimeSmokePath)) as unknown;
+      const value = JSON.parse(await readEvidenceFile(runtimeSmokePath, signal)) as unknown;
       if (!value || typeof value !== 'object') throw new Error('receipt is not an object');
       const receipt = value as ControlCenterRuntimeSmokeReceipt;
       if (receipt.schemaVersion !== '1.0' || receipt.kind !== 'dsbot.control-center-runtime-smoke') throw new Error('schema mismatch');
@@ -399,25 +423,27 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
       }
       return structuredClone(receipt);
     } catch {
+      throwIfAborted(signal);
       dataGaps.push(`Control Center runtime smoke receipt unavailable at ${runtimeSmokePath}`);
       return undefined;
     }
   }
 
   return {
-    async refresh() {
+    async refresh(signal) {
+      throwIfAborted(signal);
       const dataGaps: string[] = [];
-      const current = fixedConfig ?? validateConfig(JSON.parse(await readFile(configPath)));
+      const current = fixedConfig ?? validateConfig(JSON.parse(await readEvidenceFile(configPath, signal)));
       const [worktree, branch, head, remote, upstream, status, integrationHead, remoteBranchHead, localDeliveryHead] = await Promise.all([
-        runCommand('git', ['rev-parse', '--show-toplevel'], repoPath),
-        runCommand('git', ['branch', '--show-current'], repoPath),
-        runCommand('git', ['rev-parse', 'HEAD'], repoPath),
-        runCommand('git', ['remote', 'get-url', 'origin'], repoPath),
-        optional('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
-        runCommand('git', ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all'], repoPath),
-        readRemoteHead(current, current.integrationBranch),
-        readRemoteHead(current, current.deliveryBranch),
-        optional('git', ['rev-parse', `refs/heads/${current.deliveryBranch}`]),
+        runCommand('git', ['rev-parse', '--show-toplevel'], repoPath, signal),
+        runCommand('git', ['branch', '--show-current'], repoPath, signal),
+        runCommand('git', ['rev-parse', 'HEAD'], repoPath, signal),
+        runCommand('git', ['remote', 'get-url', 'origin'], repoPath, signal),
+        optional('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], signal),
+        runCommand('git', ['-c', 'core.quotepath=false', 'status', '--porcelain=v1', '--untracked-files=all'], repoPath, signal),
+        readRemoteHead(current, current.integrationBranch, signal),
+        readRemoteHead(current, current.deliveryBranch, signal),
+        optional('git', ['rev-parse', `refs/heads/${current.deliveryBranch}`], signal),
       ]);
       const deliveryReferenceHead = remoteBranchHead ?? (/^[a-f0-9]{40}$/.test(localDeliveryHead ?? '') ? localDeliveryHead : undefined);
       const identity = normalizeRepository(remote);
@@ -428,20 +454,24 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
         dataGaps.push(`Remote delivery ref origin/${current.deliveryBranch} is unavailable from Git and GitHub; any local ref is identity continuity only`);
       }
       const changedFiles = parseChangedFiles(status);
-      const localTests = await loadTests(head, current, dataGaps);
+      const localTests = await loadTests(head, current, dataGaps, signal);
       let runtimeDefinitionSha256: string | undefined;
       try {
-        runtimeDefinitionSha256 = controlCenterDefinitionSha256(await Promise.all(runtimeDefinitionPaths.map(readFile)));
+        runtimeDefinitionSha256 = controlCenterDefinitionSha256(await Promise.all(
+          runtimeDefinitionPaths.map(file => readEvidenceFile(file, signal)),
+        ));
       } catch {
+        throwIfAborted(signal);
         dataGaps.push('Control Center runtime deployment definitions are unavailable for receipt validation');
       }
       const runtimeSmoke = await loadRuntimeSmoke(
-        identity, head, integrationHead, current.integrationBranch, runtimeDefinitionSha256, changedFiles.length === 0, dataGaps,
+        identity, head, integrationHead, current.integrationBranch, runtimeDefinitionSha256, changedFiles.length === 0, dataGaps, signal,
       );
       const runtimeVerified = changedFiles.length === 0 && runtimeDefinitionSha256 !== undefined && isCurrentPassingRuntimeReceipt(
         runtimeSmoke, identity, head, integrationHead, current.integrationBranch, runtimeDefinitionSha256,
       );
-      const pullRequest = await loadPullRequest(current, deliveryReferenceHead, dataGaps);
+      const pullRequest = await loadPullRequest(current, deliveryReferenceHead, dataGaps, signal);
+      throwIfAborted(signal);
       const checks = pullRequest?.checks ?? [];
       const headShaMatchesDeliveryRef = pullRequest !== undefined && pullRequest.headSha === remoteBranchHead;
       const observedCheckNames = new Set(checks.map(check => check.name));
@@ -465,6 +495,7 @@ export function createProjectControlCenter(options: ProjectControlCenterOptions)
       const statusValue = identityVerified
         ? deriveStatus({ config: effectiveConfig, branch, head, remoteBranchHead, deliveryReferenceHead, integrationHead, changedFiles, localTests, pullRequest })
         : 'BLOCKED';
+      throwIfAborted(signal);
       snapshot = {
         schemaVersion: '1.0',
         kind: 'dsbot.project-control-center',

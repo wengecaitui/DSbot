@@ -1,8 +1,9 @@
 import { createHash } from 'crypto';
 
-const SENSITIVE_KEY = /(?:api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token)/i;
-const INLINE_SECRET = /\b(api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token)(\s*[:=]\s*)([^\s,;]+)/gi;
-const BEARER = /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi;
+const SENSITIVE_KEY = /(?:api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token|credentials?)/i;
+const INLINE_ASSIGNMENT = /\b([A-Za-z_][A-Za-z0-9_-]*)(\s*[:=]\s*)(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;]+)/g;
+const BEARER = /\bBearer\s+[^\s,;]+/gi;
+const URI_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)([^@\s/?#]+)@/gi;
 const SECRET_VALUE = '<REDACTED>';
 
 export interface RedactionResult<T> {
@@ -16,11 +17,16 @@ export function digestCommand(command: string): string {
 
 export function redactText(input: string): RedactionResult<string> {
   const redactions = new Set<string>();
-  let value = input.replace(BEARER, () => {
+  let value = input.replace(URI_USERINFO, (_match, scheme: string) => {
+    redactions.add('uri_userinfo');
+    return `${scheme}${SECRET_VALUE}@`;
+  });
+  value = value.replace(BEARER, () => {
     redactions.add('bearer');
     return `Bearer ${SECRET_VALUE}`;
   });
-  value = value.replace(INLINE_SECRET, (_match, key: string, separator: string) => {
+  value = value.replace(INLINE_ASSIGNMENT, (match, key: string, separator: string) => {
+    if (!SENSITIVE_KEY.test(key)) return match;
     redactions.add(key.toLowerCase());
     return `${key}${separator}${SECRET_VALUE}`;
   });
