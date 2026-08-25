@@ -179,6 +179,41 @@ export function createOperationsEvidenceReadBridge(
   const projectControlCenter = options.projectControlCenter ?? null;
   const sources = [...(options.sources ?? [])];
 
+  function validatedSourceStatuses(): readonly OperationsEvidenceSourceStatus[] {
+    if (sources.length > 0 && !options.sourceHealth) {
+      throw new Error('sourceHealth is required when evidence sources are configured');
+    }
+    const statuses = options.sourceHealth?.snapshot() ?? [];
+    const statusBySource = new Map<string, OperationsEvidenceSourceStatus>();
+    for (const status of statuses) {
+      if (statusBySource.has(status.source)) {
+        throw new Error(`duplicate evidence source health: ${status.source}`);
+      }
+      statusBySource.set(status.source, status);
+    }
+    const adapterNames = new Set<string>();
+    for (const source of sources) {
+      if (adapterNames.has(source.name)) {
+        throw new Error(`duplicate evidence source adapter: ${source.name}`);
+      }
+      adapterNames.add(source.name);
+      const status = statusBySource.get(source.name);
+      if (!status) throw new Error(`missing evidence source health: ${source.name}`);
+      if (!status.configured) throw new Error(`evidence source health is unconfigured: ${source.name}`);
+    }
+    for (const status of statuses) {
+      if (status.configured && !adapterNames.has(status.source)) {
+        throw new Error(`configured evidence source health has no adapter: ${status.source}`);
+      }
+    }
+    return statuses;
+  }
+
+  // Validate the ownership mapping before any source can start. The same
+  // validation is repeated on reads so a custom mutable health provider cannot
+  // silently drop or duplicate an instantiated adapter later.
+  validatedSourceStatuses();
+
   const events: ObservableAgentEvent[] = [];
   const bufferedIds = new Set<string>();
   let bridgeFailures = 0;
@@ -231,16 +266,7 @@ export function createOperationsEvidenceReadBridge(
   }
 
   function sourceStatuses(): readonly OperationsEvidenceSourceStatus[] {
-    if (options.sourceHealth) return options.sourceHealth.snapshot();
-    return sources.map((source) => Object.freeze({
-      source: source.name,
-      configured: true,
-      state: running ? 'HEALTHY' as const : 'STOPPED' as const,
-      lastSuccessfulPollAt: null,
-      lastFailureAt: null,
-      failureCount: 0,
-      lastError: null,
-    }));
+    return validatedSourceStatuses();
   }
 
   async function refreshProjectControlCenter(): Promise<void> {

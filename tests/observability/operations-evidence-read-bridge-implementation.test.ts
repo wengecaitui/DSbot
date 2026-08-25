@@ -7,6 +7,9 @@ import {
   createOperationsEvidenceReadBridge,
   createOperationsEvidenceSourceHealthModel,
   type OperationsEvidenceReadBridge,
+  type OperationsEvidenceReadBridgeOptions,
+  type OperationsEvidenceSourceHealthModel,
+  type OperationsEvidenceSourceStatus,
 } from '../../src/observability/OperationsEvidenceReadBridge';
 import { createPollingAdapter } from '../../src/observability/adapters/polling-adapter';
 import { createGitWorkspaceAdapter } from '../../src/observability/adapters/git-workspace-adapter';
@@ -15,6 +18,8 @@ import { createHermesLogAdapter } from '../../src/observability/adapters/hermes-
 import { createWorkbenchReadAdapter } from '../../src/observability/workbench-read-adapter';
 import { createProjectControlCenter, type ControlCenterConfig } from '../../src/observability/project-control-center';
 import { EvidenceCommandTimeoutError, runBoundedEvidenceCommand } from '../../src/observability/bounded-command';
+import { rollbackFailedGatewayStart } from '../../src/gateway/start-failure-rollback';
+import { bindHandshakeToLifecycle, createHandshakeCoordinator } from '../../src/hermes';
 import type { CoordinatorSnapshot } from '../../src/hermes/types';
 import type {
   ObservableAgentEvent,
@@ -114,12 +119,38 @@ function fakeAdapter(name: string, events: RawObservableEvent[] = [], opts?: { s
   return { adapter, starts: () => starts, stops: () => stops };
 }
 
+function createTestBridge(
+  options: OperationsEvidenceReadBridgeOptions & { sources: readonly ObservableEventSourceAdapter[] },
+): OperationsEvidenceReadBridge {
+  const health = createOperationsEvidenceSourceHealthModel(
+    options.sources.map((source) => ({ source: source.name, configured: true })),
+  );
+  const sources = options.sources.map((source): ObservableEventSourceAdapter => {
+    const callbacks = health.callbacks(source.name);
+    return {
+      name: source.name,
+      async start(sink) {
+        try {
+          await source.start(sink);
+          callbacks.onSuccess();
+        } catch (cause) {
+          callbacks.onError(cause instanceof Error ? cause : new Error(String(cause)));
+          throw cause;
+        }
+      },
+      stop: () => source.stop(),
+    };
+  });
+  return createOperationsEvidenceReadBridge({ ...options, sources, sourceHealth: health });
+}
+
 function rawEvent(partial: Partial<RawObservableEvent> & { action: string; source: RawObservableEvent['source'] }): RawObservableEvent {
   return partial;
 }
 
 const bridgeSource = () => readFileSync(new URL('../../src/observability/OperationsEvidenceReadBridge.ts', import.meta.url), 'utf8');
 const gatewaySource = () => readFileSync(new URL('../../src/gateway/index.ts', import.meta.url), 'utf8');
+const pollingAdapterSource = () => readFileSync(new URL('../../src/observability/adapters/polling-adapter.ts', import.meta.url), 'utf8');
 
 const healthyHermes: CoordinatorSnapshot = {
   state: 'running', generation: 1, health: 'healthy', circuitState: 'closed',
@@ -143,7 +174,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
   describe('ownership and lifecycle', () => {
     it('creates exactly one bridge and repeated start does not duplicate sources', async () => {
       const probe = fakeAdapter('probe');
-      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter] });
+      const bridge = createTestBridge({ sources: [probe.adapter] });
       await bridge.start();
       await bridge.start();
       assert.equal(probe.starts(), 1, 'repeated start must not start the source twice');
@@ -156,7 +187,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
 
     it('isolates a failing source start without throwing', async () => {
       const failing = fakeAdapter('failing', [], { startError: new Error('SOURCE_START_FAILED') });
-      const bridge = createOperationsEvidenceReadBridge({ sources: [failing.adapter] });
+      const bridge = createTestBridge({ sources: [failing.adapter] });
       await assert.doesNotReject(() => bridge.start());
       assert.equal(bridge.read.status().running, false, 'bridge must not claim running on source-start failure');
       assert.ok(bridge.read.status().sourceFailures >= 1);
@@ -164,7 +195,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
 
     it('isolates a failing source stop without throwing', async () => {
       const failing = fakeAdapter('stop-failing', [], { stopError: new Error('SOURCE_STOP_FAILED') });
-      const bridge = createOperationsEvidenceReadBridge({ sources: [failing.adapter] });
+      const bridge = createTestBridge({ sources: [failing.adapter] });
       await bridge.start();
       await assert.doesNotReject(() => bridge.stop());
       assert.equal(bridge.read.status().running, false);
@@ -177,6 +208,79 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       for (const forbidden of ['start', 'stop', 'monitor', 'sources', 'sink', 'ingest']) {
         assert.ok(!(forbidden in bridge.read), `read view must not expose ${forbidden}`);
       }
+    });
+
+    it('rejects configured adapters without a source-health authority', () => {
+      const probe = fakeAdapter('probe');
+      assert.throws(
+        () => createOperationsEvidenceReadBridge({ sources: [probe.adapter] }),
+        /sourceHealth is required/,
+      );
+    });
+
+    it('rejects an adapter missing from the health mapping', () => {
+      const probe = fakeAdapter('probe');
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'other', configured: true }]);
+      assert.throws(
+        () => createOperationsEvidenceReadBridge({ sources: [probe.adapter], sourceHealth: health }),
+        /missing evidence source health: probe/,
+      );
+    });
+
+    it('rejects an instantiated adapter mapped as unconfigured', () => {
+      const probe = fakeAdapter('probe');
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'probe', configured: false }]);
+      assert.throws(
+        () => createOperationsEvidenceReadBridge({ sources: [probe.adapter], sourceHealth: health }),
+        /evidence source health is unconfigured: probe/,
+      );
+    });
+
+    it('rejects duplicate instantiated adapter names', () => {
+      const first = fakeAdapter('duplicate');
+      const second = fakeAdapter('duplicate');
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'duplicate', configured: true }]);
+      assert.throws(
+        () => createOperationsEvidenceReadBridge({ sources: [first.adapter, second.adapter], sourceHealth: health }),
+        /duplicate evidence source adapter: duplicate/,
+      );
+    });
+
+    it('rejects duplicate rows returned by a custom health provider', () => {
+      const probe = fakeAdapter('probe');
+      const row: OperationsEvidenceSourceStatus = {
+        source: 'probe', configured: true, state: 'STOPPED', lastSuccessfulPollAt: null,
+        lastFailureAt: null, failureCount: 0, lastError: null,
+      };
+      const health: OperationsEvidenceSourceHealthModel = {
+        callbacks: () => ({ onSuccess() {}, onError() {} }),
+        snapshot: () => [row, { ...row }],
+        stop() {},
+      };
+      assert.throws(
+        () => createOperationsEvidenceReadBridge({ sources: [probe.adapter], sourceHealth: health }),
+        /duplicate evidence source health: probe/,
+      );
+    });
+
+    it('rejects configured health rows without an instantiated adapter', () => {
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'not-instantiated', configured: true }]);
+      assert.throws(
+        () => createOperationsEvidenceReadBridge({ sourceHealth: health }),
+        /configured evidence source health has no adapter: not-instantiated/,
+      );
+    });
+
+    it('accepts a complete one-to-one mapping and stays STOPPED before first success', () => {
+      const probe = fakeAdapter('probe');
+      const health = createOperationsEvidenceSourceHealthModel([
+        { source: 'probe', configured: true },
+        { source: 'not-instantiated', configured: false },
+      ]);
+      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter], sourceHealth: health });
+      const probeStatus = bridge.read.status().sources.find((source) => source.source === 'probe');
+      assert.equal(probeStatus?.state, 'STOPPED');
+      assert.equal(probeStatus?.lastSuccessfulPollAt, null);
     });
   });
 
@@ -210,7 +314,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
         rawEvent({ source: 'process', action: 'runtime.observed', evidenceLevel: 'VERIFIED_OBSERVED' }),
         rawEvent({ source: 'git', action: 'git.snapshot', evidenceLevel: 'VERIFIED_OBSERVED' }),
       ]);
-      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter] });
+      const bridge = createTestBridge({ sources: [probe.adapter] });
       await bridge.start();
       const activity = bridge.read.activity();
       assert.equal(activity.length, 2);
@@ -220,7 +324,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     it('feeds normalized events into Project Control Center observation', async () => {
       const { pcc, observed } = fakePcc();
       const probe = fakeAdapter('events', [rawEvent({ source: 'tool', action: 'tool.observed' })]);
-      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
+      const bridge = createTestBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
       await bridge.start();
       assert.equal(observed().length, 1);
       await bridge.stop();
@@ -328,7 +432,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     it('keeps healthy buffered activity AVAILABLE/FRESH', async () => {
       const { pcc } = fakePcc();
       const probe = fakeAdapter('activity', [rawEvent({ source: 'process', action: 'runtime.observed' })]);
-      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
+      const bridge = createTestBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
       await bridge.start();
       const activity = workbenchFor(bridge).activity();
       assert.equal(activity.availability, 'AVAILABLE');
@@ -341,7 +445,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     it('keeps historical events readable but not AVAILABLE/FRESH after bridge stop', async () => {
       const { pcc } = fakePcc();
       const probe = fakeAdapter('activity', [rawEvent({ source: 'process', action: 'runtime.observed' })]);
-      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
+      const bridge = createTestBridge({ projectControlCenter: pcc, sources: [probe.adapter] });
       await bridge.start();
       await bridge.stop();
       const activity = workbenchFor(bridge).activity();
@@ -351,12 +455,12 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     });
 
     it('cannot report buffered activity AVAILABLE/FRESH while a configured source is failing', async () => {
-      const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'activity', configured: true }]);
       const probe = fakeAdapter('activity', [rawEvent({ source: 'git', action: 'git.snapshot' })]);
       const { pcc } = fakePcc();
       const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [probe.adapter], sourceHealth: health });
       await bridge.start();
-      health.callbacks('git-workspace').onError(new Error('GIT_FAILED'));
+      health.callbacks('activity').onError(new Error('GIT_FAILED'));
       const activity = workbenchFor(bridge).activity();
       assert.equal(activity.data?.events.length, 1);
       assert.equal(activity.availability, 'INCOMPLETE');
@@ -367,37 +471,53 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
 
   describe('published error redaction', () => {
     it('redacts and bounds source/PCC error messages before Workbench publication', async () => {
-      const rawError = [
-        'Authorization: Bearer BEARER_SECRET',
-        'token=TOKEN_SECRET',
-        'password=PASSWORD_SECRET',
-        'apiKey=APIKEY_SECRET',
-        'cookie=COOKIE_SECRET',
-        'privateKey=PRIVATE_KEY_SECRET',
-        'secret=PLAIN_SECRET',
-        'HERMES_BRIDGE_TOKEN=HERMES_SECRET',
-        'OPENAI_API_KEY=OPENAI_SECRET',
-        'ANTHROPIC_API_KEY=ANTHROPIC_SECRET',
-        'access_token=ACCESS_SECRET',
-        'GH_TOKEN=GH_SECRET',
-        'DB_PASSWORD=DB_SECRET',
-        'DATABASE_SECRET=DATABASE_SECRET_VALUE',
-        'x'.repeat(1_000),
-      ].join(' ');
-      const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
-      health.callbacks('git-workspace').onError(new Error(rawError));
-      const { pcc } = fakePcc({ refreshError: new Error(rawError) });
-      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sourceHealth: health });
-      await bridge.start();
-      const serialized = JSON.stringify(workbenchFor(bridge).operations());
-      for (const secret of [
-        'BEARER_SECRET', 'TOKEN_SECRET', 'PASSWORD_SECRET', 'APIKEY_SECRET', 'COOKIE_SECRET',
-        'PRIVATE_KEY_SECRET', 'PLAIN_SECRET', 'HERMES_SECRET', 'OPENAI_SECRET', 'ANTHROPIC_SECRET',
-        'ACCESS_SECRET', 'GH_SECRET', 'DB_SECRET', 'DATABASE_SECRET_VALUE',
-      ]) {
-        assert.ok(!serialized.includes(secret), `Workbench must not expose ${secret}`);
+      const cases: Array<{ message: string; secrets: string[] }> = [
+        { message: 'Authorization: Bearer BEARER_SECRET', secrets: ['BEARER_SECRET'] },
+        { message: 'token=TOKEN_SECRET', secrets: ['TOKEN_SECRET'] },
+        { message: 'password=PASSWORD_SECRET', secrets: ['PASSWORD_SECRET'] },
+        { message: 'apiKey=APIKEY_SECRET', secrets: ['APIKEY_SECRET'] },
+        { message: 'cookie=COOKIE_SECRET', secrets: ['COOKIE_SECRET'] },
+        { message: 'privateKey=PRIVATE_KEY_SECRET', secrets: ['PRIVATE_KEY_SECRET'] },
+        { message: 'secret=PLAIN_SECRET', secrets: ['PLAIN_SECRET'] },
+        { message: 'HERMES_BRIDGE_TOKEN=HERMES_SECRET', secrets: ['HERMES_SECRET'] },
+        { message: 'OPENAI_API_KEY=OPENAI_SECRET', secrets: ['OPENAI_SECRET'] },
+        { message: 'ANTHROPIC_API_KEY=ANTHROPIC_SECRET', secrets: ['ANTHROPIC_SECRET'] },
+        { message: 'access_token=ACCESS_SECRET', secrets: ['ACCESS_SECRET'] },
+        { message: 'GH_TOKEN=GH_SECRET', secrets: ['GH_SECRET'] },
+        { message: 'DB_PASSWORD=DB_SECRET', secrets: ['DB_SECRET'] },
+        { message: 'DATABASE_SECRET=DATABASE_SECRET_VALUE', secrets: ['DATABASE_SECRET_VALUE'] },
+        { message: 'credential=CREDENTIAL_SECRET', secrets: ['CREDENTIAL_SECRET'] },
+        { message: 'credentials=CREDENTIALS_SECRET', secrets: ['CREDENTIALS_SECRET'] },
+        { message: 'password="MULTI WORD SECRET"', secrets: ['MULTI WORD SECRET'] },
+        { message: "token='QUOTED TOKEN SECRET'", secrets: ['QUOTED TOKEN SECRET'] },
+        { message: 'DATABASE_URL=postgres://dbuser:DB_URL_SECRET@host/db', secrets: ['dbuser', 'DB_URL_SECRET'] },
+        { message: 'POSTGRES_URL=postgres://dbuser:POSTGRES_SECRET@host/db', secrets: ['dbuser', 'POSTGRES_SECRET'] },
+        { message: 'MONGO_URI=mongodb://mongo:MONGO_SECRET@host/db', secrets: ['MONGO_SECRET'] },
+        { message: 'REDIS_URL=redis://:REDIS_SECRET@host', secrets: ['REDIS_SECRET'] },
+      ];
+      for (const testCase of cases) {
+        const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
+        health.callbacks('git-workspace').onError(new Error(testCase.message));
+        const { pcc } = fakePcc({ refreshError: new Error(testCase.message) });
+        const source = fakeAdapter('git-workspace');
+        const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [source.adapter], sourceHealth: health });
+        await bridge.start();
+        const serialized = JSON.stringify(workbenchFor(bridge).operations());
+        for (const secret of testCase.secrets) {
+          assert.ok(!serialized.includes(secret), `source/PCC Workbench evidence must not expose ${secret}`);
+        }
+        if (testCase.message.startsWith('MONGO_URI=')) assert.doesNotMatch(serialized, /mongodb:\/\/mongo:/);
+        assert.match(serialized, /<REDACTED>/);
+        await bridge.stop();
       }
-      assert.match(serialized, /<REDACTED>/);
+
+      const longSecret = `token=${'x'.repeat(1_000)}`;
+      const health = createOperationsEvidenceSourceHealthModel([{ source: 'git-workspace', configured: true }]);
+      health.callbacks('git-workspace').onError(new Error(longSecret));
+      const { pcc } = fakePcc({ refreshError: new Error(longSecret) });
+      const source = fakeAdapter('git-workspace');
+      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [source.adapter], sourceHealth: health });
+      await bridge.start();
       const status = bridge.read.status();
       assert.ok((status.sources[0].lastError?.length ?? 0) <= 512);
       assert.ok((status.projectControlCenter.lastError?.length ?? 0) <= 512);
@@ -482,7 +602,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
         async refresh() { refreshes += 1; }, observe() {}, snapshot() { return snapshot; },
       };
       const poller = createPollingAdapter({ name: 'poll-probe', intervalMs: 100, poll: () => { polls += 1; } });
-      const bridge = createOperationsEvidenceReadBridge({ projectControlCenter: pcc, sources: [poller], projectControlCenterRefreshIntervalMs: 100 });
+      const bridge = createTestBridge({ projectControlCenter: pcc, sources: [poller], projectControlCenterRefreshIntervalMs: 100 });
       await bridge.start();
       await sleep(150);
       await bridge.stop();
@@ -740,7 +860,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     it('bounds the recent-event buffer', async () => {
       const events = Array.from({ length: 30 }, (_, i) => rawEvent({ source: 'process', action: `e${i}` }));
       const probe = fakeAdapter('burst', events);
-      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter], maxRecentEvents: 10 });
+      const bridge = createTestBridge({ sources: [probe.adapter], maxRecentEvents: 10 });
       await bridge.start();
       assert.equal(bridge.read.activity().length, 10);
     });
@@ -748,7 +868,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     it('deduplicates by eventId', async () => {
       const dup = rawEvent({ eventId: 'dup-1', source: 'process', action: 'x' });
       const probe = fakeAdapter('dup', [dup, dup, rawEvent({ eventId: 'dup-1', source: 'process', action: 'x' })]);
-      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter] });
+      const bridge = createTestBridge({ sources: [probe.adapter] });
       await bridge.start();
       assert.equal(bridge.read.activity().length, 1);
     });
@@ -760,14 +880,14 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
         rawEvent({ eventId: 'c', source: 'log', action: 'c' }),
       ];
       const probe = fakeAdapter('order', events);
-      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter] });
+      const bridge = createTestBridge({ sources: [probe.adapter] });
       await bridge.start();
       assert.deepEqual(bridge.read.activity().map((e) => e.eventId), ['a', 'b', 'c']);
     });
 
     it('returns defensive copies that callers cannot mutate', async () => {
       const probe = fakeAdapter('copy', [rawEvent({ source: 'process', action: 'x' })]);
-      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter] });
+      const bridge = createTestBridge({ sources: [probe.adapter] });
       await bridge.start();
       const first = bridge.read.activity();
       (first[0] as { action: string }).action = 'mutated';
@@ -777,25 +897,44 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     });
 
     it('redacts secret-bearing raw evidence before it reaches Workbench', async () => {
+      const eventSecrets = [
+        'CREDENTIAL_SECRET', 'CREDENTIALS_SECRET', 'MULTI WORD SECRET', 'QUOTED TOKEN SECRET',
+        'dbuser', 'DB_URL_SECRET', 'POSTGRES_SECRET', 'MONGO_SECRET', 'REDIS_SECRET',
+        'HERMES_SECRET', 'OPENAI_SECRET', 'ANTHROPIC_SECRET',
+      ];
       const probe = fakeAdapter('secret', [
         rawEvent({
           source: 'log',
           action: 'credential.observed',
           command: 'export HERMES_BRIDGE_TOKEN=real-bridge-token && ./hermes',
-          after: { apiKey: 'sk-REAL-SECRET', api_secret: 's3cr3t', Authorization: 'Bearer tok123', password: 'hunter2', privateKey: 'PRIVATE', cookie: 'session=abc' },
+          after: {
+            apiKey: 'sk-REAL-SECRET', api_secret: 's3cr3t', Authorization: 'Bearer tok123',
+            password: 'hunter2', privateKey: 'PRIVATE', cookie: 'session=abc',
+            message: [
+              'credential=CREDENTIAL_SECRET credentials=CREDENTIALS_SECRET',
+              'password="MULTI WORD SECRET"', "token='QUOTED TOKEN SECRET'",
+              'DATABASE_URL=postgres://dbuser:DB_URL_SECRET@host/db',
+              'POSTGRES_URL=postgres://dbuser:POSTGRES_SECRET@host/db',
+              'MONGO_URI=mongodb://mongo:MONGO_SECRET@host/db',
+              'REDIS_URL=redis://:REDIS_SECRET@host',
+              'HERMES_BRIDGE_TOKEN=HERMES_SECRET OPENAI_API_KEY=OPENAI_SECRET ANTHROPIC_API_KEY=ANTHROPIC_SECRET',
+            ].join(' '),
+          },
         }),
       ]);
-      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter] });
+      const bridge = createTestBridge({ sources: [probe.adapter] });
       await bridge.start();
-      const activity = bridge.read.activity();
-      assert.equal(activity.length, 1);
-      const event = activity[0];
-      const serialized = JSON.stringify(event);
+      const activity = workbenchFor(bridge).activity();
+      assert.equal(activity.data?.events.length, 1);
+      const event = activity.data!.events[0];
+      const serialized = JSON.stringify(activity);
       assert.ok(!serialized.includes('real-bridge-token'));
       assert.ok(!serialized.includes('sk-REAL-SECRET'));
       assert.ok(!serialized.includes('s3cr3t'));
       assert.ok(!serialized.includes('tok123'));
       assert.ok(!serialized.includes('hunter2'));
+      for (const secret of eventSecrets) assert.ok(!serialized.includes(secret), `Activity must not expose ${secret}`);
+      assert.doesNotMatch(serialized, /mongodb:\/\/mongo:/);
       assert.ok(event.commandDigest?.startsWith('sha256:'));
       const after = event.after as Record<string, unknown>;
       assert.equal(after.apiKey, '<REDACTED>');
@@ -809,7 +948,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       const probe = fakeAdapter('hermes-runtime', [
         rawEvent({ actor: 'runtime', source: 'process', action: 'runtime.degraded', evidenceLevel: 'VERIFIED_OBSERVED', after: { health: { ok: false } } }),
       ]);
-      const bridge = createOperationsEvidenceReadBridge({ sources: [probe.adapter] });
+      const bridge = createTestBridge({ sources: [probe.adapter] });
       await bridge.start();
       const activity = bridge.read.activity();
       assert.equal(activity.length, 1);
@@ -837,6 +976,73 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
   });
 
   describe('failure isolation and authority boundary', () => {
+    it('rolls back the real evidence lifecycle after a later gateway-start failure and preserves the original error', async () => {
+      const events: string[] = [];
+      let refreshes = 0;
+      let polls = 0;
+      let sourceStops = 0;
+      const { pcc } = fakePcc();
+      const trackedPcc: ProjectControlCenter = {
+        async refresh(signal) { refreshes += 1; await pcc.refresh(signal); },
+        observe: (event) => pcc.observe(event),
+        snapshot: () => pcc.snapshot(),
+      };
+      const polling = createPollingAdapter({
+        name: 'poll-probe', intervalMs: 100, poll: () => { polls += 1; },
+      });
+      const trackedPolling: ObservableEventSourceAdapter = {
+        name: polling.name,
+        start: (sink) => polling.start(sink),
+        async stop() {
+          sourceStops += 1;
+          events.push('operations-evidence');
+          await polling.stop();
+        },
+      };
+      const bridge = createTestBridge({
+        projectControlCenter: trackedPcc,
+        projectControlCenterRefreshIntervalMs: 100,
+        sources: [trackedPolling],
+      });
+      const coordinator = createHandshakeCoordinator({
+        healthCollector: () => 'healthy',
+        instructionSupplier: () => ({ op: 'test' }),
+        randomId: () => 'phase8b-test-id',
+      });
+      const original = new Error('later gateway service failed');
+      const bound = bindHandshakeToLifecycle({
+        async start() {
+          await bridge.start();
+          throw original;
+        },
+        async stop() {},
+      }, {
+        coordinator,
+        onStartFailure: () => rollbackFailedGatewayStart({
+          markLifecycleUnhealthy: () => { events.push('lifecycle-health'); },
+          stopProductionRuntime: async () => {
+            events.push('production-runtime');
+            throw new Error('runtime rollback failed');
+          },
+          stopOperationsEvidence: () => bridge.stop(),
+          stopHttpGateway: async () => { events.push('http-gateway'); },
+        }),
+      });
+
+      let caught: unknown;
+      try { await bound.start(); } catch (error) { caught = error; }
+      assert.equal(caught, original, 'rollback failures must not replace the startup error');
+      assert.deepEqual(events, ['lifecycle-health', 'production-runtime', 'operations-evidence', 'http-gateway']);
+      assert.equal(sourceStops, 1);
+      assert.equal(bridge.read.status().running, false);
+      assert.equal(bridge.read.status().sources[0].state, 'STOPPED');
+      assert.equal(coordinator.getSnapshot().state, 'stopped');
+
+      const stoppedCounts = { refreshes, polls };
+      await sleep(180);
+      assert.deepEqual({ refreshes, polls }, stoppedCounts, 'PCC and polling work must stay stopped after rollback');
+    });
+
     it('does not import or reference trading authority from the bridge', () => {
       const source = bridgeSource();
       for (const forbidden of ['OmsCore', 'TradingKernel', 'PreTradeRiskGateway', 'executeThroughGateway', 'submitRequest', 'submitOrder', 'retryOrder', 'activateLiveReadiness', 'reconcileRecoveredState', 'recoverAndStart']) {
@@ -846,10 +1052,10 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
 
     it('source failure degrades evidence without mutating trading state', async () => {
       const failing = fakeAdapter('git-fail', [], { startError: new Error('GIT_PROBE_FAILED') });
-      const bridge = createOperationsEvidenceReadBridge({ sources: [failing.adapter] });
+      const bridge = createTestBridge({ sources: [failing.adapter] });
       await bridge.start();
       assert.equal(bridge.read.status().running, false);
-      assert.equal(bridge.read.status().sourceFailures, 1);
+      assert.ok(bridge.read.status().sourceFailures >= 1);
       assert.deepEqual(bridge.read.activity(), []);
     });
 
@@ -866,7 +1072,7 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
     it('bridge has no polling timer leak after stop', async () => {
       let polls = 0;
       const poller = createPollingAdapter({ name: 'poll-probe', intervalMs: 100, poll: () => { polls += 1; } });
-      const bridge = createOperationsEvidenceReadBridge({ sources: [poller] });
+      const bridge = createTestBridge({ sources: [poller] });
       await bridge.start();
       await sleep(250);
       assert.ok(polls >= 1);
@@ -874,6 +1080,10 @@ describe('Phase 8B Operations Evidence Read Bridge implementation', () => {
       const afterStop = polls;
       await sleep(250);
       assert.equal(polls, afterStop, 'no orphan polling timer after stop');
+    });
+
+    it('unrefs the polling interval so evidence cannot keep the process alive', () => {
+      assert.match(pollingAdapterSource(), /timer\.unref\(\)/);
     });
   });
 

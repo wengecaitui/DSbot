@@ -85,6 +85,7 @@ import {
   createHttpFlushSink,
   createLifecycleHealthFlag,
 } from '../hermes';
+import { rollbackFailedGatewayStart } from './start-failure-rollback';
 import { createWorkbenchReadAdapter } from '../observability/workbench-read-adapter';
 import { createWorkbenchRouter } from './workbench-routes';
 import {
@@ -3063,16 +3064,15 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   const boundGateway = bindHandshakeToLifecycle(baseGateway, {
     coordinator: hermesCoordinator,
     onStartFailure: async () => {
-      // A failed start must leave the lifecycle-health flag false. Mark it
-      // unhealthy BEFORE rolling back so a partial start that (incorrectly)
-      // flipped it true cannot retain stale health through the rollback.
-      lifecycleHealth.markUnhealthy();
-      await productionRuntimeOwner.stop();
-      try {
-        await httpGateway.stop();
-      } catch (error) {
-        logger.warn({ error }, 'Failed to roll back HTTP gateway after partial start');
-      }
+      await rollbackFailedGatewayStart({
+        markLifecycleUnhealthy: () => lifecycleHealth.markUnhealthy(),
+        stopProductionRuntime: () => productionRuntimeOwner.stop(),
+        stopOperationsEvidence: () => operationsEvidenceBridge.stop(),
+        stopHttpGateway: () => httpGateway.stop(),
+        onFailure: (component, error) => {
+          logger.warn({ component, error }, 'Failed to roll back gateway component after partial start');
+        },
+      });
     },
   });
   return {

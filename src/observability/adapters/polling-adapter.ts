@@ -39,6 +39,7 @@ export function createPollingAdapter(options: PollingAdapterOptions): Observable
       running = true;
       await run(sink);
       timer = setInterval(() => { void run(sink); }, intervalMs);
+      timer.unref();
     },
     async stop() {
       if (!running) return;
