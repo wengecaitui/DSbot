@@ -18,8 +18,8 @@
 | 5 | Freqtrade 数据层整合 | P1 | 🔲待开始 | 0% |
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
 | 7 | Hermes 握手 + Quant Terminal（7A/7B/7C 已合并） | P1 | ✅完成 | 100% |
-| 8 | 权威生产运行时组合 + 功能模块接入 | P1 | ⏳8A已合并/8B实现中 | 70% |
-| 9 | 系统集成 | P2 | 🔲待开始 | 0% |
+| 8 | 权威生产运行时组合 + Operations Evidence Read Bridge | P1 | ✅完成 | 100% |
+| 9 | Research Data Foundation | P1 | ⏳9A Contract 当前 | 5% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
 
 ---
@@ -255,7 +255,7 @@
 
 ---
 
-## Phase 8 — 权威生产运行时组合 + 功能模块接入 ⏳ 60%
+## Phase 8 — 权威生产运行时组合 + Operations Evidence Read Bridge ✅ 完成
 
 ### Phase 8A — 权威生产运行时组合 ✅ 已合并 (COMPLETE / MERGED)
 
@@ -283,10 +283,10 @@
 - **合并状态**: Phase 8A 已通过 PR #123 合并。批准实现 head `b435d66c3ab1e66cedde4bfb456d630c4ce8828f`，
   合并提交 `ad3217b713bafe051610c7f2d3b5cd4cd48b2945`（`feature/orangeai-split`）。
   仍为 Paper-only；未启用 Testnet/Live，未授予 LIVE_READY，boot ORDER_SUBMISSIONS=0。
-- **Phase 8B**: Project Control Center / Hermes activity 跨进程只读桥接、通用 observability IPC
-  与事件聚合 → 见下方 Phase 8B（契约已合并，实现进行中）。
+- **Phase 8B**: Project Control Center / Hermes activity 只读桥接与有界事件聚合已由 PR #125 合并；
+  Phase 8 至此完成，但不代表 Paper/Testnet/Live 获得授权。
 
-### Phase 8B — Operations Evidence Read Bridge ✅ 契约已合并 / ⏳ 实现进行中
+### Phase 8B — Operations Evidence Read Bridge ✅ 已合并 (COMPLETE / MERGED)
 
 #### 8B Contract（✅ 已合并）
 
@@ -298,9 +298,12 @@
 - **契约测试**: `tests/observability/operations-evidence-read-bridge-contract.test.ts`（15 项）。
 - **定位**: EVIDENCE PLANE（证据面），非 CONTROL PLANE（控制面）；只读、单向、观测性。
 
-#### 8B Implementation（⏳ IN PROGRESS / Draft PR）
+#### 8B Implementation（✅ 已合并）
 
-- **状态**: Implementation 进行中，Draft PR，未合并。
+- **实现 PR**: #125（`feat(observability): Phase 8B Operations Evidence Read Bridge implementation`）。
+- **批准实现 head**: `0642dd21749cb341b2848c2d46ad8cae6e2c116e`。
+- **合并提交**: `788671ebfb54ce886bc3c8e1315873b4ef1c7025`（`feature/orangeai-split`）。
+- **状态**: Implementation 已合并，Phase 8 COMPLETE。
 - **实现模块**: `src/observability/OperationsEvidenceReadBridge.ts` — 应用生命周期拥有的唯一
   Operations Evidence Read Bridge，内部持有 ProjectControlCenter 快照 + 有界 recent-event buffer
   （normalized/redacted `ObservableAgentEvent`），通过 `read.projectControlCenter()` /
@@ -316,51 +319,33 @@
   降级为 UNKNOWN/UNAVAILABLE/INCOMPLETE，绝不伪造 healthy/zero；raw evidence 发布前必须
   normalization/redaction；ObservableAgentEvent 保持唯一 activity 事件信封；每 AppGateway 仅一个
   bridge，非第二 runtime；交易权威不变；boot ORDER_SUBMISSIONS=0、不授予 LIVE_READY。
-- **未授权**: 不 merge、不启用 Testnet/Live、不加控制端点、不建 command RPC。
-
-### 8.1 行情数据层（CCXT + Freqtrade 数据源双写）⏳
-- ✅ `src/data/collector.ts` — Bitget WS 采集器就位
-- ✅ `src/data/volume-engine.ts` — 量能引擎就位
-- ✅ `src/data/volume-api.ts` — MCP 工具接口就位
-- 🔲 CCXT 现货 + 期货对接
-- 🔲 Freqtrade 数据写入
-
-### 8.2 CEX 期货执行 ⏳
-- ⏳ `E:/Workplace/bitget-trader/` 已有签名逻辑可复用
-- 🔲 Bitget / Bybit 期货下单通道
-- 🔲 滑点保护 + 失败重试
-
-### 8.3 预测市场（Polymarket / Kalshi，可选）🔲
-- 🔲 Polymarket API 接入
-- 🔲 Kalshi API 接入（可选）
-
-### 8.4 Solana / EVM ⏳
-- ✅ Solana 模块已有（`src/agents/handlers/solana.ts`）
-- ⏳ 暂保持现状，不拆分
-
-### 8.5 风控引擎 ⏳
-- ⏳ VaR/CVaR 计算框架已部分就位
-- 🔲 熔断机制深化
-- 🔲 硬限制节点联动
+- **权限不变**: 未启用 Testnet/Live、未增加控制端点或 command RPC；只读 evidence 不授予交易权威。
 
 ---
 
-## Phase 9 — 系统集成 🔲
+## Phase 9 — Research Data Foundation ⏳ CURRENT
 
-### 9.1 Hermes cron 调度 CloddsBot 多 Agent skill 🔲
-- 🔲 Cron 配置绑定
-- 🔲 Skill 触发链
+> 当前路线以 Research Data Plane 为主线。旧“系统集成”条目不再作为 Phase 9 的进入门或完成证据。
 
-### 9.2 Spread-Scanner 信号 → CloddsBot 快路径 🔲
-- 🔲 Spread-Scanner 输出格式对接
-- 🔲 信号 → 快路径自动触发
+### Phase 9A — Provider Manifest + Adapter Contract Gate ⏳ CURRENT / CONTRACT ONLY
 
-### 9.3 TradingAgents 报告作为 CloddsBot 的 Analyst Team 输入 🔲
-- 🔲 TradingAgents 输出格式适配
+- **基线**: `feature/orangeai-split@788671ebfb54ce886bc3c8e1315873b4ef1c7025`。
+- **当前任务**: 冻结 `External Provider -> Provider Manifest -> bounded read-only
+  ResearchProviderAdapter -> RawResearchRecord` 入口契约。
+- **边界**: `src/research/data/` 与生产 `src/data/` 分离；Research Data 不成为 TradingKernel、OMS、
+  PreTradeRiskGateway、ProductionSpine、Position/Accounting、Recovery/Reconciliation 或 LIVE_READY 权威。
+- **PIT 规则**: `event_time`、`available_at`、`ingested_at` 保持不同；未来 9C 执行
+  `available_at <= decision_time`。`UNKNOWN` 仅可保留为 raw evidence，不证明 backtest eligibility。
+- **交付限制**: 仅契约、文档与测试；无真实 provider、网络实现、Data Dictionary、canonical normalization、
+  ResearchDataHub、ResearchBacktestKernel、Paper/Testnet/Live。
 
-### 9.4 Brale 退役，代码归档到 E:/Workplace/archive/ 🔲
-- 🔲 Brale 项目归档
-- 🔲 相关文档归档
+### Phase 9B–9F — 后续门禁（DEFERRED）
+
+- **9B**: Data Dictionary + Field Contract。
+- **9C**: Canonical Point-in-Time Dataset。
+- **9D**: Parquet / DuckDB / Polars storage path。
+- **9E**: ResearchDataHub + DatasetUsagePolicy。
+- **9F**: Data lineage / version / deprecation。
 
 ---
 
