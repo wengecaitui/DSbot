@@ -19,7 +19,7 @@
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
 | 7 | Hermes 握手 + Quant Terminal（7A/7B/7C 已合并） | P1 | ✅完成 | 100% |
 | 8 | 权威生产运行时组合 + Operations Evidence Read Bridge | P1 | ✅完成 | 100% |
-| 9 | Research Data Foundation | P1 | ⏳9A Contract 当前 | 5% |
+| 9 | Research Data Foundation | P1 | ⏳9A Ingress 实现 PR 当前 | 8% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
 
 ---
@@ -327,25 +327,35 @@
 
 > 当前路线以 Research Data Plane 为主线。旧“系统集成”条目不再作为 Phase 9 的进入门或完成证据。
 
-### Phase 9A — Provider Manifest + Adapter Contract Gate ⏳ CURRENT / CONTRACT ONLY
+### Phase 9A — Provider Manifest + Adapter Contract Gate ✅ MERGED / COMPLETE
 
-- **基线**: `feature/orangeai-split@788671ebfb54ce886bc3c8e1315873b4ef1c7025`。
-- **当前任务**: 冻结 `External Provider -> Provider Manifest -> bounded read-only
+- **契约 PR**: #126；合并提交 `4a4bfc54882c7ba90a1b81aceadd06b7aca01bf6`。
+- **已冻结**: `External Provider -> Provider Manifest -> bounded read-only
   ResearchProviderAdapter -> RawResearchRecord` 入口契约。
 - **边界**: `src/research/data/` 与生产 `src/data/` 分离；Research Data 不成为 TradingKernel、OMS、
   PreTradeRiskGateway、ProductionSpine、Position/Accounting、Recovery/Reconciliation 或 LIVE_READY 权威。
 - **PIT 规则**: `event_time`、`available_at`、`ingested_at` 保持不同；未来 9C 执行
   `available_at <= decision_time`。`UNKNOWN` 仅可保留为 raw evidence，不证明 backtest eligibility。
-- **交付限制**: 仅契约、文档与测试；无真实 provider、网络实现、Data Dictionary、canonical normalization、
-  ResearchDataHub、ResearchBacktestKernel、Paper/Testnet/Live。
+- **交付限制**: 无真实 provider、网络实现、Data Dictionary、canonical normalization、ResearchDataHub、
+  ResearchBacktestKernel、Paper/Testnet/Live。
 
-### Phase 9B–9F — 后续门禁（DEFERRED）
+### Phase 9A — Internal Research Provider Ingress ⏳ IMPLEMENTATION PR CURRENT
+
+- **实现基线**: `feature/orangeai-split@4a4bfc54882c7ba90a1b81aceadd06b7aca01bf6`。
+- **当前任务**: 实现内部 `Future Provider Adapter -> ResearchProviderIngress -> validated
+  RawResearchRecord page -> STOP`，不接入任何下游消费者。
+- **冻结边界**: 结构化 `{providerId, adapterId}` 注册表、完整 manifest defensive pin + drift 检查、
+  每页一次真实 `describe()` / `fetch()`、外部引用配置门禁、无自动翻页/重试/后台工作。
+- **完成状态**: 当前为实现 PR，合并前不得标记 COMPLETE。
+
+### Phase 9B–9G — 后续门禁（DEFERRED）
 
 - **9B**: Data Dictionary + Field Contract。
 - **9C**: Canonical Point-in-Time Dataset。
 - **9D**: Parquet / DuckDB / Polars storage path。
 - **9E**: ResearchDataHub + DatasetUsagePolicy。
 - **9F**: Data lineage / version / deprecation。
+- **9G**: Research ingestion + first provider qualification。
 
 ---
 

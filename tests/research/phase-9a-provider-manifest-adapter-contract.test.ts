@@ -397,7 +397,11 @@ describe('Phase 9A provider manifest and bounded adapter contract', () => {
   it('adds no real provider or network implementation', () => {
     const directory = join(process.cwd(), 'src', 'research', 'data');
     const sources = readdirSync(directory).filter((name) => name.endsWith('.ts'));
-    assert.deepEqual(sources.sort(), ['ProviderManifestContract.ts', 'ResearchProviderAdapterContract.ts']);
+    assert.deepEqual(sources.sort(), [
+      'ProviderManifestContract.ts',
+      'ResearchProviderAdapterContract.ts',
+      'ResearchProviderIngress.ts',
+    ]);
     for (const source of sources) {
       const text = readFileSync(join(directory, source), 'utf8');
       for (const forbidden of ['node:http', 'node:https', 'axios', 'undici', 'WebSocket', 'https://']) {
