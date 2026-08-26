@@ -256,6 +256,68 @@ describe('Phase 9A internal ResearchProviderIngress', () => {
     assert.throws(() => createResearchProviderIngress([registration(harness)]), /PROVIDER_ID/);
   });
 
+  it('rejects sparse manifest arrays during construction', () => {
+    const manifest = validManifest();
+    (manifest as { dataDomains: string[] }).dataDomains = new Array(1);
+    const harness = createAdapterHarness({ manifest });
+    assert.throws(
+      () => createResearchProviderIngress([registration(harness)]),
+      /SNAPSHOT:\$\.dataDomains_ARRAY_HOLE/,
+    );
+    assert.equal(harness.describeCalls, 1);
+    assert.equal(harness.configurationCalls, 0);
+  });
+
+  it('cannot publish a phantom credentialReferenceCount from sparse references', () => {
+    const manifest = validManifest();
+    (manifest.auth as { credentialReferences: unknown[] }).credentialReferences = new Array(1);
+    const harness = createAdapterHarness({ manifest });
+    assert.throws(
+      () => createResearchProviderIngress([registration(harness)]),
+      /SNAPSHOT:\$\.auth\.credentialReferences_ARRAY_HOLE/,
+    );
+  });
+
+  it('rejects accessor-backed array elements before structuredClone can erase the accessor', () => {
+    const manifest = validManifest();
+    const domains = ['market-bars'];
+    let accessorCalls = 0;
+    Object.defineProperty(domains, '0', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        accessorCalls += 1;
+        return 'market-bars';
+      },
+    });
+    (manifest as { dataDomains: string[] }).dataDomains = domains;
+    const harness = createAdapterHarness({ manifest });
+    assert.throws(
+      () => createResearchProviderIngress([registration(harness)]),
+      /SNAPSHOT:\$\.dataDomains_ARRAY_ACCESSOR/,
+    );
+    assert.equal(accessorCalls, 0, 'descriptor gate must not execute adapter-owned accessors');
+  });
+
+  it('rejects accessor-backed adapter-owned manifest state without a validation-to-pin read gap', () => {
+    const manifest = validManifest();
+    let accessorCalls = 0;
+    Object.defineProperty(manifest.pagination, 'maximumRecordsPerPage', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        accessorCalls += 1;
+        return accessorCalls === 1 ? 100 : 1;
+      },
+    });
+    const harness = createAdapterHarness({ manifest });
+    assert.throws(
+      () => createResearchProviderIngress([registration(harness)]),
+      /SNAPSHOT_ACCESSOR:\$\.pagination\.maximumRecordsPerPage/,
+    );
+    assert.equal(accessorCalls, 0, 'fail-closed inspection must not sample a mutable accessor');
+  });
+
   it('rejects inline-secret configuration before registration', () => {
     const harness = createAdapterHarness();
     assert.throws(
@@ -332,6 +394,19 @@ describe('Phase 9A internal ResearchProviderIngress', () => {
     assert.equal(Object.isFrozen(original), false);
     (original.pagination as { maximumRecordsPerPage: number }).maximumRecordsPerPage = 50;
     assert.equal(ingress.describe(key(original)).manifest.pagination.maximumRecordsPerPage, 100);
+  });
+
+  it('validates, freezes, and pins the same defensive manifest snapshot', () => {
+    const source = readFileSync(INGRESS_SOURCE, 'utf8');
+    const cloneAt = source.indexOf('const snapshot = structuredClone(rawManifest);');
+    const validateAt = source.indexOf('assertProviderManifest(snapshot);', cloneAt);
+    const returnAt = source.indexOf('return snapshot;', validateAt);
+    const pinAt = source.indexOf('const pinnedManifest = deepFreeze(describedManifest);', returnAt);
+    assert.ok(cloneAt >= 0, 'raw manifest is defensively snapshotted');
+    assert.ok(validateAt > cloneAt, 'semantic validation observes the defensive snapshot');
+    assert.ok(returnAt > validateAt, 'the validated snapshot is returned unchanged');
+    assert.ok(pinAt > returnAt, 'registration freezes the exact returned snapshot');
+    assert.equal(source.includes('deepFreeze(cloneManifest(describedManifest))'), false);
   });
 
   it('returns deeply frozen list and describe views that cannot mutate pinned truth', () => {

@@ -129,9 +129,35 @@ function text(value: unknown, name: string, pattern: RegExp = IDENTIFIER): strin
   return value;
 }
 
+function denseDataArray(value: unknown, name: string): readonly unknown[] {
+  if (!Array.isArray(value)) violation(`${name}_NOT_ARRAY`);
+  if (Object.getOwnPropertySymbols(value).length > 0) violation(`${name}_ARRAY_SYMBOL_PROPERTY`);
+
+  const propertyNames = Object.getOwnPropertyNames(value);
+  for (const propertyName of propertyNames) {
+    if (propertyName === 'length') continue;
+    if (!/^(0|[1-9]\d*)$/.test(propertyName) || Number(propertyName) >= value.length) {
+      violation(`${name}_ARRAY_CUSTOM_PROPERTY`);
+    }
+  }
+
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (descriptor === undefined) violation(`${name}_ARRAY_HOLE`);
+    if (descriptor.get !== undefined || descriptor.set !== undefined) {
+      violation(`${name}_ARRAY_ACCESSOR`);
+    }
+  }
+  return value;
+}
+
 function textList(value: unknown, name: string): readonly string[] {
-  if (!Array.isArray(value) || value.length === 0) violation(name);
-  const values = value.map((item, index) => text(item, `${name}_${index}`));
+  const array = denseDataArray(value, name);
+  if (array.length === 0) violation(name);
+  const values: string[] = [];
+  for (let index = 0; index < array.length; index += 1) {
+    values.push(text(array[index], `${name}_${index}`));
+  }
   if (new Set(values).size !== values.length) violation(`${name}_DUPLICATE`);
   return values;
 }
@@ -166,6 +192,43 @@ function assertCredentialReference(value: unknown): void {
   if (!reference.startsWith(expectedPrefix[candidate.source as CredentialReferenceSource])) {
     violation('AUTH_REFERENCE_SOURCE_MISMATCH');
   }
+}
+
+/**
+ * Descriptor-only gate used before cloning an adapter-owned manifest. It does
+ * not establish semantic validity; it prevents structuredClone from erasing
+ * accessor, sparse-array, symbol, or custom-array evidence before validation.
+ */
+export function assertProviderManifestSnapshotStructure(value: unknown): void {
+  const seen = new WeakSet<object>();
+
+  function inspect(current: unknown, path: string): void {
+    if (current === null || typeof current !== 'object') return;
+    if (seen.has(current)) return;
+    seen.add(current);
+
+    if (Object.getOwnPropertySymbols(current).length > 0) {
+      violation(`SNAPSHOT_SYMBOL_PROPERTY:${path}`);
+    }
+
+    if (Array.isArray(current)) {
+      const array = denseDataArray(current, `SNAPSHOT:${path}`);
+      for (let index = 0; index < array.length; index += 1) {
+        const descriptor = Object.getOwnPropertyDescriptor(array, String(index));
+        inspect(descriptor?.value, `${path}[${index}]`);
+      }
+      return;
+    }
+
+    for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(current))) {
+      if (descriptor.get !== undefined || descriptor.set !== undefined) {
+        violation(`SNAPSHOT_ACCESSOR:${path}.${key}`);
+      }
+      inspect(descriptor.value, `${path}.${key}`);
+    }
+  }
+
+  inspect(value, '$');
 }
 
 function inspectExternalReferenceOnlyConfiguration(
@@ -247,10 +310,16 @@ export function assertProviderManifest(value: unknown): asserts value is Provide
   const auth = record(manifest.auth, 'AUTH');
   exactKeys(auth, ['mode', 'credentialReferences'], 'AUTH');
   if (auth.mode !== 'NONE' && auth.mode !== 'EXTERNAL_REFERENCE') violation('AUTH_MODE');
-  if (!Array.isArray(auth.credentialReferences)) violation('AUTH_REFERENCES');
-  auth.credentialReferences.forEach(assertCredentialReference);
-  if (auth.mode === 'NONE' && auth.credentialReferences.length !== 0) violation('AUTH_NONE_WITH_REFERENCES');
-  if (auth.mode === 'EXTERNAL_REFERENCE' && auth.credentialReferences.length === 0) violation('AUTH_REFERENCE_REQUIRED');
+  const credentialReferences = denseDataArray(auth.credentialReferences, 'AUTH_REFERENCES');
+  let validatedCredentialReferenceCount = 0;
+  for (let index = 0; index < credentialReferences.length; index += 1) {
+    assertCredentialReference(credentialReferences[index]);
+    validatedCredentialReferenceCount += 1;
+  }
+  if (auth.mode === 'NONE' && validatedCredentialReferenceCount !== 0) violation('AUTH_NONE_WITH_REFERENCES');
+  if (auth.mode === 'EXTERNAL_REFERENCE' && validatedCredentialReferenceCount === 0) {
+    violation('AUTH_REFERENCE_REQUIRED');
+  }
 
   const pagination = record(manifest.pagination, 'PAGINATION');
   exactKeys(pagination, ['mode', 'boundedPage', 'maximumRecordsPerPage', 'cursorSupported'], 'PAGINATION');

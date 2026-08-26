@@ -23,12 +23,16 @@ The registry uses nested maps keyed structurally by `{providerId, adapterId}`. I
 Every registration is processed in this order:
 
 1. validate the exact adapter surface;
-2. validate its full manifest;
-3. validate configuration through the merged external-reference-only contract;
-4. reject duplicate structural identity;
-5. clone and deeply freeze the complete validated manifest;
-6. privately retain the raw adapter, pinned manifest and exact-surface guarded facade;
-7. discard the ingress reference to registration configuration.
+2. call the raw adapter `describe()` exactly once;
+3. reject descriptor structures that `structuredClone` would erase (including sparse/accessor arrays), then immediately clone the adapter-owned manifest;
+4. validate the full cloned manifest;
+5. validate configuration through the merged external-reference-only contract;
+6. reject duplicate structural identity;
+7. deeply freeze that same validated clone and retain it as the pinned manifest;
+8. privately retain the raw adapter, pinned manifest and exact-surface guarded facade;
+9. discard the ingress reference to registration configuration.
+
+The descriptor-only pre-clone gate is not manifest semantic validation. Semantic authority belongs exclusively to the defensive clone, and the exact clone that passes `assertProviderManifest` is the object later frozen, compared for drift, and supplied by the guarded facade.
 
 The ingress never reads environment variables, resolves secret-manager values, logs configuration, or exposes credential references. This proves only `REGISTRATION_CONFIGURATION_EXTERNAL_REFERENCE_ONLY=true`; it does not claim that a future adapter's own private secret state is safe.
 

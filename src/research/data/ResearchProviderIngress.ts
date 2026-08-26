@@ -1,8 +1,12 @@
 import { isDeepStrictEqual } from 'node:util';
-import type { ProviderManifest } from './ProviderManifestContract';
 import {
+  assertProviderManifest,
+  assertProviderManifestSnapshotStructure,
+  type ProviderManifest,
+} from './ProviderManifestContract';
+import {
+  assertResearchProviderAdapterSurface,
   fetchOneResearchPage,
-  validateAdapterDescription,
   validateResearchProviderConfiguration,
   type RawResearchRecord,
   type ResearchFetchPage,
@@ -67,6 +71,15 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
 
 function cloneManifest(manifest: ProviderManifest): ProviderManifest {
   return structuredClone(manifest);
+}
+
+function snapshotValidatedManifest(rawAdapter: ResearchProviderAdapter): ProviderManifest {
+  assertResearchProviderAdapterSurface(rawAdapter);
+  const rawManifest = rawAdapter.describe();
+  assertProviderManifestSnapshotStructure(rawManifest);
+  const snapshot = structuredClone(rawManifest);
+  assertProviderManifest(snapshot);
+  return snapshot;
 }
 
 function createPublicDescriptor(manifest: ProviderManifest): ResearchProviderDescriptor {
@@ -143,7 +156,7 @@ export function createResearchProviderIngress(
 
   for (const registration of registrations) {
     const rawAdapter = registration.adapter;
-    const describedManifest = validateAdapterDescription(rawAdapter);
+    const describedManifest = snapshotValidatedManifest(rawAdapter);
     validateResearchProviderConfiguration(rawAdapter, registration.configuration);
 
     let providerEntries = registry.get(describedManifest.providerId);
@@ -155,7 +168,7 @@ export function createResearchProviderIngress(
       registry.set(describedManifest.providerId, providerEntries);
     }
 
-    const pinnedManifest = deepFreeze(cloneManifest(describedManifest));
+    const pinnedManifest = deepFreeze(describedManifest);
     const guardedAdapter = createGuardedAdapter(rawAdapter, pinnedManifest);
     const descriptor = createPublicDescriptor(pinnedManifest);
     providerEntries.set(describedManifest.adapterId, Object.freeze({
@@ -194,7 +207,7 @@ export function createResearchProviderIngress(
       signal: AbortSignal,
     ): Promise<ResearchFetchPage> {
       const entry = entryFor(key);
-      const currentManifest = cloneManifest(validateAdapterDescription(entry.rawAdapter));
+      const currentManifest = snapshotValidatedManifest(entry.rawAdapter);
       if (!isDeepStrictEqual(currentManifest, entry.pinnedManifest)) {
         throw ingressError('RESEARCH_PROVIDER_MANIFEST_DRIFT');
       }
