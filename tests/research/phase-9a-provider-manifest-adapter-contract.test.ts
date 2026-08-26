@@ -114,6 +114,60 @@ describe('Phase 9A provider manifest and bounded adapter contract', () => {
     assert.throws(() => assertProviderManifest(invalid), /DATA_DOMAINS/);
   });
 
+  it('rejects sparse dataDomains', () => {
+    const manifest = clone(validManifest());
+    manifest.dataDomains = new Array(1);
+    assert.throws(() => assertProviderManifest(manifest), /DATA_DOMAINS_ARRAY_HOLE/);
+  });
+
+  it('rejects sparse marketScopes', () => {
+    const manifest = clone(validManifest());
+    manifest.marketScopes = new Array(1);
+    assert.throws(() => assertProviderManifest(manifest), /MARKET_SCOPES_ARRAY_HOLE/);
+  });
+
+  it('rejects sparse ordering keys', () => {
+    const manifest = clone(validManifest());
+    manifest.ordering.keys = new Array(1);
+    assert.throws(() => assertProviderManifest(manifest), /ORDERING_KEYS_ARRAY_HOLE/);
+  });
+
+  it('rejects sparse credentialReferences even when an actual reference is present', () => {
+    const manifest = clone(validManifest());
+    const references = new Array(2);
+    references[1] = { source: 'ENVIRONMENT', reference: 'env:RESEARCH_API_KEY' };
+    manifest.auth.credentialReferences = references;
+    assert.throws(() => assertProviderManifest(manifest), /AUTH_REFERENCES_ARRAY_HOLE/);
+  });
+
+  it('requires an actual validated EXTERNAL_REFERENCE rather than array length', () => {
+    const manifest = clone(validManifest());
+    manifest.auth.credentialReferences = new Array(1);
+    assert.throws(() => assertProviderManifest(manifest), /AUTH_REFERENCES_ARRAY_HOLE/);
+  });
+
+  it('rejects accessor-backed manifest array indices', () => {
+    const manifest = clone(validManifest());
+    const domains = ['market-bars'];
+    Object.defineProperty(domains, '0', {
+      configurable: true,
+      enumerable: true,
+      get: () => 'market-bars',
+    });
+    manifest.dataDomains = domains;
+    assert.throws(() => assertProviderManifest(manifest), /DATA_DOMAINS_ARRAY_ACCESSOR/);
+  });
+
+  it('rejects symbol and custom non-index properties on manifest arrays', () => {
+    const custom = clone(validManifest());
+    custom.dataDomains.extra = 'reference-data';
+    assert.throws(() => assertProviderManifest(custom), /DATA_DOMAINS_ARRAY_CUSTOM_PROPERTY/);
+
+    const symbolic = clone(validManifest());
+    symbolic.marketScopes[Symbol('scope')] = 'hidden-scope';
+    assert.throws(() => assertProviderManifest(symbolic), /MARKET_SCOPES_ARRAY_SYMBOL_PROPERTY/);
+  });
+
   it('requires productionAuthority to be the literal false', () => {
     for (const value of [true, 'false', null, undefined]) {
       const manifest = clone(validManifest());
@@ -397,7 +451,11 @@ describe('Phase 9A provider manifest and bounded adapter contract', () => {
   it('adds no real provider or network implementation', () => {
     const directory = join(process.cwd(), 'src', 'research', 'data');
     const sources = readdirSync(directory).filter((name) => name.endsWith('.ts'));
-    assert.deepEqual(sources.sort(), ['ProviderManifestContract.ts', 'ResearchProviderAdapterContract.ts']);
+    assert.deepEqual(sources.sort(), [
+      'ProviderManifestContract.ts',
+      'ResearchProviderAdapterContract.ts',
+      'ResearchProviderIngress.ts',
+    ]);
     for (const source of sources) {
       const text = readFileSync(join(directory, source), 'utf8');
       for (const forbidden of ['node:http', 'node:https', 'axios', 'undici', 'WebSocket', 'https://']) {
