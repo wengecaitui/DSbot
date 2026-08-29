@@ -1,2 +1,3 @@
 tests/fixtures/stage-5-evaluation/*.json text eol=lf
 tests/fixtures/stage-5-dataset/*.json text eol=lf
+docs/releases/stage-4b2-paper-readiness-receipt.json -text

@@ -6,6 +6,8 @@ on:
     branches: [feature/orangeai-split]
     paths:
       - '.github/workflows/stage-4b3-receipt.yml'
+      - '.gitattributes'
+      - 'docs/releases/stage-4b2-paper-readiness-receipt.json'
       - 'src/validation/RuntimeSafety.ts'
       - 'scripts/generate-stage-4b3-receipt.mts'
       - 'tests/validation/runtime-safety.test.ts'
@@ -14,14 +16,12 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   receipt:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       id-token: write
       attestations: write
     env:
@@ -50,14 +50,12 @@ jobs:
         run: npm ci
       - name: Re-run canonical validation
         run: npm run ci
-      - name: Download authoritative 4B2 receipt artifact
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify authoritative 4B2 receipt bytes
         run: |
-          mkdir -p artifacts
-          gh run download 30320628525 -n stage-4b2-receipt-81b0980f4fee168075a52c6ebcb12eb50f382217 -D artifacts/
+          test "$(wc -c < docs/releases/stage-4b2-paper-readiness-receipt.json)" -eq 952
+          echo "5fefa5c1ddb025c94300e8b7dcb3b6d9dd5ba2e36a6d70e2ec10554d1d6a2453  docs/releases/stage-4b2-paper-readiness-receipt.json" | sha256sum --check --strict
       - name: Generate Stage 4B3 receipt
-        run: npx tsx scripts/generate-stage-4b3-receipt.mts --source-commit "$SOURCE_COMMIT" --output "$RECEIPT_PATH" --4b2-receipt artifacts/stage-4b2-receipt.json
+        run: npx tsx scripts/generate-stage-4b3-receipt.mts --source-commit "$SOURCE_COMMIT" --output "$RECEIPT_PATH" --4b2-receipt docs/releases/stage-4b2-paper-readiness-receipt.json
       - name: Upload receipt artifact
         uses: actions/upload-artifact@v4
         with:
