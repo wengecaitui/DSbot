@@ -89,6 +89,10 @@ Non-price fields use exactly `{ kind: 'NOT_PRICE' }`. Price fields use
 `SPLIT_ADJUSTED`, `DIVIDEND_ADJUSTED`, `TOTAL_RETURN_ADJUSTED`,
 `PROVIDER_DEFINED`, or `UNKNOWN`.
 
+`PROVIDER_DEFINED` requires a non-null, non-empty bounded
+`documentedAdjustmentRule`; Phase 9B records that assertion but performs no
+adjustment. Other bases may retain a null rule.
+
 An `UNKNOWN` price basis denies every decision-input use. A price field that allows
 `RESEARCH_EXECUTION_MODEL_INPUT` or `RESEARCH_VALUATION` must use `RAW`. No corporate
 action adjustment is implemented.
@@ -96,10 +100,14 @@ action adjustment is implemented.
 ### 3.5 Observation and calendar attribution
 
 Observation semantics are `INSTANT` or a `PERIOD` with a finite period and
-`PERIOD_START`/`PERIOD_END` anchor. Calendar semantics are `NOT_APPLICABLE` or a
-named timezone/calendar pair. `PERIOD` observations and `DATE` logical types require
-a named calendar. Phase 9B validates attribution strings only; it loads no timezone
-or calendar database and calculates no event time.
+`PERIOD_START`/`PERIOD_END` anchor. Standard periods (`SESSION`, `DAY`, `WEEK`,
+`MONTH`, `QUARTER`, and `YEAR`) cannot carry a custom definition.
+`PROVIDER_DEFINED` is a distinct exact-key shape requiring a non-empty bounded
+`documentedPeriodDefinition`; DIRECT equality includes that definition. Calendar
+semantics are `NOT_APPLICABLE` or a named timezone/calendar pair. `PERIOD`
+observations and `DATE` logical types require a named calendar. Phase 9B validates
+attribution strings only; it loads no timezone or calendar database and calculates
+no event time.
 
 ### 3.6 Time and historical-decision requirements
 
@@ -177,7 +185,10 @@ timestamp computation occurs.
 For every claimed canonical field, source logical type, unit, price semantics, and
 observation semantics must be structurally equal to the canonical values.
 `OPTIONAL` presence or `sourceNullable: true` cannot satisfy a nonnullable canonical
-field. A field may be claimed at most once in a binding set.
+field. A field may be claimed at most once in a binding set. Complete dictionary
+coverage is not required, but bindings are dependency-closed: binding a canonical
+`CURRENCY` field also requires a binding for its referenced canonical currency
+field. The dependency binding remains subject to every ordinary DIRECT check.
 
 ## 5. Validators and evidence limits
 
@@ -187,9 +198,11 @@ field. A field may be claimed at most once in a binding set.
 - `assertBindingSetMatchesDictionary()` validates dictionary identity/version,
   known canonical fields, DIRECT semantic equality, null/presence, and time binding
   compatibility.
-- `assertBindingSetMatchesManifest()` first invokes the existing Phase 9A manifest
-  validator, then matches provider and adapter identity. Phase 9A manifests do not
-  enumerate `sourceDatasetRef`, so this validator makes no invented equality claim.
+- `assertBindingSetMatchesManifest()` validates the binding set, applies the existing
+  Phase 9A descriptor-only manifest snapshot gate, clones the caller-owned manifest,
+  semantically validates that defensive snapshot, and compares provider and adapter
+  identity against that same snapshot. Phase 9A manifests do not enumerate
+  `sourceDatasetRef`, so this validator makes no invented equality claim.
 
 These validators prove compatibility of the objects supplied now. They do not prove
 that either object was historically unchanged without a version bump. Historical

@@ -67,14 +67,24 @@ export const OBSERVATION_PERIODS = Object.freeze([
   'SESSION', 'DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR', 'PROVIDER_DEFINED',
 ] as const);
 export type ObservationPeriod = (typeof OBSERVATION_PERIODS)[number];
+export const STANDARD_OBSERVATION_PERIODS = Object.freeze([
+  'SESSION', 'DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR',
+] as const);
+export type StandardObservationPeriod = (typeof STANDARD_OBSERVATION_PERIODS)[number];
 export const EVENT_TIME_ANCHORS = Object.freeze(['PERIOD_START', 'PERIOD_END'] as const);
 export type EventTimeAnchor = (typeof EVENT_TIME_ANCHORS)[number];
 export type CanonicalObservationSemantics =
   | { readonly kind: 'INSTANT' }
   | {
     readonly kind: 'PERIOD';
-    readonly period: ObservationPeriod;
+    readonly period: StandardObservationPeriod;
     readonly eventTimeAnchor: EventTimeAnchor;
+  }
+  | {
+    readonly kind: 'PERIOD';
+    readonly period: 'PROVIDER_DEFINED';
+    readonly eventTimeAnchor: EventTimeAnchor;
+    readonly documentedPeriodDefinition: string;
   };
 
 export type CanonicalCalendarSemantics =
@@ -197,7 +207,10 @@ export function assertCanonicalPriceSemantics(value: unknown, name = 'PRICE_SEMA
   }
   if (semantics.kind !== 'PRICE') dictionaryViolation(`${name}_KIND`);
   exactKeys(semantics, ['kind', 'basis', 'documentedAdjustmentRule'], name);
-  enumValue(semantics.basis, PRICE_BASES, `${name}_BASIS`);
+  const basis = enumValue(semantics.basis, PRICE_BASES, `${name}_BASIS`);
+  if (basis === 'PROVIDER_DEFINED' && semantics.documentedAdjustmentRule === null) {
+    dictionaryViolation(`${name}_PROVIDER_DEFINED_RULE_REQUIRED`);
+  }
   if (semantics.documentedAdjustmentRule !== null) {
     boundedProse(semantics.documentedAdjustmentRule, `${name}_ADJUSTMENT_RULE`);
   }
@@ -211,8 +224,13 @@ export function assertCanonicalObservationSemantics(value: unknown, name = 'OBSE
     return;
   }
   if (semantics.kind !== 'PERIOD') dictionaryViolation(`${name}_KIND`);
-  exactKeys(semantics, ['kind', 'period', 'eventTimeAnchor'], name);
-  enumValue(semantics.period, OBSERVATION_PERIODS, `${name}_PERIOD`);
+  if (semantics.period === 'PROVIDER_DEFINED') {
+    exactKeys(semantics, ['kind', 'period', 'eventTimeAnchor', 'documentedPeriodDefinition'], name);
+    boundedProse(semantics.documentedPeriodDefinition, `${name}_PERIOD_DEFINITION`);
+  } else {
+    exactKeys(semantics, ['kind', 'period', 'eventTimeAnchor'], name);
+    enumValue(semantics.period, STANDARD_OBSERVATION_PERIODS, `${name}_PERIOD`);
+  }
   enumValue(semantics.eventTimeAnchor, EVENT_TIME_ANCHORS, `${name}_ANCHOR`);
 }
 

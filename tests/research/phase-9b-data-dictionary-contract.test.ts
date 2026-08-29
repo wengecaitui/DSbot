@@ -114,19 +114,34 @@ function validBindingSet(): ProviderSourceBindingSet {
     sourceDatasetRef: 'source:daily-bars',
     dictionaryId: 'research.market-fields',
     dictionaryVersion: '1.0.0',
-    bindings: [{
-      canonicalFieldId: 'close_price',
-      sourcePath: ['bars', 0, 'close'],
-      mappingKind: 'DIRECT',
-      sourceLogicalType: 'FLOAT64',
-      sourceUnit: { kind: 'CURRENCY', currencyFieldId: 'currency_code' },
-      sourcePriceSemantics: { kind: 'PRICE', basis: 'RAW', documentedAdjustmentRule: null },
-      sourceObservationSemantics: { kind: 'INSTANT' },
-      sourcePresence: 'REQUIRED',
-      sourceNullable: false,
-      eventTimeBinding: 'RECORD_ENVELOPE',
-      availableAtBinding: 'RECORD_ENVELOPE',
-    }],
+    bindings: [
+      {
+        canonicalFieldId: 'close_price',
+        sourcePath: ['bars', 0, 'close'],
+        mappingKind: 'DIRECT',
+        sourceLogicalType: 'FLOAT64',
+        sourceUnit: { kind: 'CURRENCY', currencyFieldId: 'currency_code' },
+        sourcePriceSemantics: { kind: 'PRICE', basis: 'RAW', documentedAdjustmentRule: null },
+        sourceObservationSemantics: { kind: 'INSTANT' },
+        sourcePresence: 'REQUIRED',
+        sourceNullable: false,
+        eventTimeBinding: 'RECORD_ENVELOPE',
+        availableAtBinding: 'RECORD_ENVELOPE',
+      },
+      {
+        canonicalFieldId: 'currency_code',
+        sourcePath: ['bars', 0, 'currency'],
+        mappingKind: 'DIRECT',
+        sourceLogicalType: 'STRING',
+        sourceUnit: 'UNITLESS',
+        sourcePriceSemantics: { kind: 'NOT_PRICE' },
+        sourceObservationSemantics: { kind: 'INSTANT' },
+        sourcePresence: 'REQUIRED',
+        sourceNullable: false,
+        eventTimeBinding: 'RECORD_ENVELOPE',
+        availableAtBinding: 'RECORD_ENVELOPE',
+      },
+    ],
     productionAuthority: false,
   };
 }
@@ -360,6 +375,56 @@ describe('Phase 9B canonical dictionary contract', () => {
     dictionary.fields[1].researchUsePolicy.RESEARCH_EXECUTION_MODEL_INPUT = 'DENY';
     assert.throws(() => assertCanonicalFieldDictionary(dictionary), /DECISION_PRICE_MUST_BE_RAW/);
   });
+
+  it('requires a definition for PROVIDER_DEFINED observation periods', () => {
+    const missing = mutableDictionary();
+    missing.fields[2].observationSemantics = {
+      kind: 'PERIOD', period: 'PROVIDER_DEFINED', eventTimeAnchor: 'PERIOD_END',
+    };
+    assert.throws(() => assertCanonicalFieldDictionary(missing), /OBSERVATION_SEMANTICS_FIELDS/);
+
+    const empty = mutableDictionary();
+    empty.fields[2].observationSemantics = {
+      kind: 'PERIOD',
+      period: 'PROVIDER_DEFINED',
+      eventTimeAnchor: 'PERIOD_END',
+      documentedPeriodDefinition: '   ',
+    };
+    assert.throws(() => assertCanonicalFieldDictionary(empty), /PERIOD_DEFINITION/);
+
+    const valid = mutableDictionary();
+    valid.fields[2].observationSemantics = {
+      kind: 'PERIOD',
+      period: 'PROVIDER_DEFINED',
+      eventTimeAnchor: 'PERIOD_END',
+      documentedPeriodDefinition: 'Provider business day ending at the published market cut-off.',
+    };
+    assert.doesNotThrow(() => assertCanonicalFieldDictionary(valid));
+  });
+
+  it('rejects a custom definition on standard observation periods', () => {
+    const dictionary = mutableDictionary();
+    dictionary.fields[2].observationSemantics.documentedPeriodDefinition = 'Not permitted for DAY.';
+    assert.throws(() => assertCanonicalFieldDictionary(dictionary), /OBSERVATION_SEMANTICS_FIELDS/);
+  });
+
+  it('requires a documented adjustment rule for PROVIDER_DEFINED price basis', () => {
+    const missing = mutableDictionary();
+    missing.fields[1].priceSemantics = {
+      kind: 'PRICE', basis: 'PROVIDER_DEFINED', documentedAdjustmentRule: null,
+    };
+    assert.throws(() => assertCanonicalFieldDictionary(missing), /PROVIDER_DEFINED_RULE_REQUIRED/);
+
+    const valid = mutableDictionary();
+    valid.fields[1].priceSemantics = {
+      kind: 'PRICE',
+      basis: 'PROVIDER_DEFINED',
+      documentedAdjustmentRule: 'Provider publishes a split-adjusted series under its documented methodology.',
+    };
+    valid.fields[1].researchUsePolicy.RESEARCH_EXECUTION_MODEL_INPUT = 'DENY';
+    valid.fields[1].researchUsePolicy.RESEARCH_VALUATION = 'DENY';
+    assert.doesNotThrow(() => assertCanonicalFieldDictionary(valid));
+  });
 });
 
 describe('Phase 9B provider source binding contract', () => {
@@ -515,6 +580,42 @@ describe('Phase 9B provider source binding contract', () => {
     assert.throws(() => assertBindingSetMatchesDictionary(validDictionary(), set), /OBSERVATION_MISMATCH/);
   });
 
+  it('compares provider-defined observation definitions for DIRECT equality', () => {
+    const dictionary = mutableDictionary();
+    dictionary.fields[1].observationSemantics = {
+      kind: 'PERIOD',
+      period: 'PROVIDER_DEFINED',
+      eventTimeAnchor: 'PERIOD_END',
+      documentedPeriodDefinition: 'Provider trading day ending at its published market cut-off.',
+    };
+    const set = mutableBindingSet();
+    set.bindings[0].sourceObservationSemantics = {
+      kind: 'PERIOD',
+      period: 'PROVIDER_DEFINED',
+      eventTimeAnchor: 'PERIOD_END',
+      documentedPeriodDefinition: 'Provider calendar day ending at midnight UTC.',
+    };
+    assert.throws(() => assertBindingSetMatchesDictionary(dictionary, set), /DIRECT_OBSERVATION_MISMATCH/);
+  });
+
+  it('compares provider-defined price rules for DIRECT equality', () => {
+    const dictionary = mutableDictionary();
+    dictionary.fields[1].priceSemantics = {
+      kind: 'PRICE',
+      basis: 'PROVIDER_DEFINED',
+      documentedAdjustmentRule: 'Provider methodology A.',
+    };
+    dictionary.fields[1].researchUsePolicy.RESEARCH_EXECUTION_MODEL_INPUT = 'DENY';
+    dictionary.fields[1].researchUsePolicy.RESEARCH_VALUATION = 'DENY';
+    const set = mutableBindingSet();
+    set.bindings[0].sourcePriceSemantics = {
+      kind: 'PRICE',
+      basis: 'PROVIDER_DEFINED',
+      documentedAdjustmentRule: 'Provider methodology B.',
+    };
+    assert.throws(() => assertBindingSetMatchesDictionary(dictionary, set), /DIRECT_PRICE_MISMATCH/);
+  });
+
   it('rejects OPTIONAL source presence for nonnullable canonical field', () => {
     const set = mutableBindingSet();
     set.bindings[0].sourcePresence = 'OPTIONAL';
@@ -566,6 +667,48 @@ describe('Phase 9B provider source binding contract', () => {
     assert.throws(() => assertProviderSourceBindingSet(set), /MAPPING_KIND/);
   });
 
+  it('requires the currency attribution binding when a CURRENCY field is bound', () => {
+    const set = mutableBindingSet();
+    set.bindings = [set.bindings[0]];
+    assert.throws(
+      () => assertBindingSetMatchesDictionary(validDictionary(), set),
+      /CURRENCY_BINDING_DEPENDENCY_MISSING:close_price/,
+    );
+  });
+
+  it('accepts a bound CURRENCY field with its referenced currency binding', () => {
+    assert.doesNotThrow(() => assertBindingSetMatchesDictionary(validDictionary(), validBindingSet()));
+  });
+
+  it('does not require unrelated dictionary fields to be bound', () => {
+    const set = validBindingSet();
+    assert.equal(set.bindings.some((binding) => binding.canonicalFieldId === 'period_measure'), false);
+    assert.doesNotThrow(() => assertBindingSetMatchesDictionary(validDictionary(), set));
+  });
+
+  it('allows multiple CURRENCY fields to share one bound currency field', () => {
+    const dictionary = mutableDictionary();
+    const secondPrice = clone(dictionary.fields[1]);
+    secondPrice.fieldId = 'open_price';
+    secondPrice.meaning = 'Unadjusted observed open price for the attributed observation.';
+    dictionary.fields.push(secondPrice);
+    const set = mutableBindingSet();
+    const secondBinding = clone(set.bindings[0]);
+    secondBinding.canonicalFieldId = 'open_price';
+    secondBinding.sourcePath = ['bars', 0, 'open'];
+    set.bindings.push(secondBinding);
+    assert.doesNotThrow(() => assertBindingSetMatchesDictionary(dictionary, set));
+  });
+
+  it('still validates ordinary DIRECT semantics on the currency dependency binding', () => {
+    const set = mutableBindingSet();
+    set.bindings[1].sourceLogicalType = 'FLOAT64';
+    assert.throws(
+      () => assertBindingSetMatchesDictionary(validDictionary(), set),
+      /DIRECT_LOGICAL_TYPE_MISMATCH:currency_code/,
+    );
+  });
+
   it('validates the Phase 9A manifest before matching identities', () => {
     const manifest: any = validManifest();
     manifest.productionAuthority = true;
@@ -573,6 +716,79 @@ describe('Phase 9B provider source binding contract', () => {
       () => assertBindingSetMatchesManifest(validBindingSet(), manifest),
       /PHASE_9A_PROVIDER_MANIFEST_INVALID/,
     );
+  });
+
+  it('rejects a root manifest accessor without executing its getter', () => {
+    const manifest: any = validManifest();
+    let executions = 0;
+    Object.defineProperty(manifest, 'providerId', {
+      enumerable: true,
+      get() {
+        executions += 1;
+        return 'example-research-source';
+      },
+    });
+    assert.throws(() => assertBindingSetMatchesManifest(validBindingSet(), manifest), /SNAPSHOT_ACCESSOR/);
+    assert.equal(executions, 0);
+  });
+
+  it('rejects a nested manifest accessor without executing its getter', () => {
+    const manifest: any = validManifest();
+    let executions = 0;
+    Object.defineProperty(manifest.auth, 'mode', {
+      enumerable: true,
+      get() {
+        executions += 1;
+        return 'EXTERNAL_REFERENCE';
+      },
+    });
+    assert.throws(() => assertBindingSetMatchesManifest(validBindingSet(), manifest), /SNAPSHOT_ACCESSOR/);
+    assert.equal(executions, 0);
+  });
+
+  it('rejects symbol properties on caller-owned manifests', () => {
+    const manifest: any = validManifest();
+    manifest[Symbol('hidden')] = 'not-cloned-away';
+    assert.throws(() => assertBindingSetMatchesManifest(validBindingSet(), manifest), /SNAPSHOT_SYMBOL_PROPERTY/);
+  });
+
+  it('rejects sparse and accessor-backed manifest arrays before cloning', () => {
+    const sparse: any = validManifest();
+    sparse.dataDomains = new Array(2);
+    sparse.dataDomains[1] = 'market-bars';
+    assert.throws(() => assertBindingSetMatchesManifest(validBindingSet(), sparse), /ARRAY_HOLE/);
+
+    const accessor: any = validManifest();
+    let executions = 0;
+    const domains = ['market-bars'];
+    Object.defineProperty(domains, '0', {
+      enumerable: true,
+      get() {
+        executions += 1;
+        return 'market-bars';
+      },
+    });
+    accessor.dataDomains = domains;
+    assert.throws(() => assertBindingSetMatchesManifest(validBindingSet(), accessor), /ARRAY_ACCESSOR/);
+    assert.equal(executions, 0);
+  });
+
+  it('compares identities against the validated defensive manifest snapshot', () => {
+    const manifest = validManifest();
+    const set = mutableBindingSet();
+    set.providerId = 'snapshot-provider';
+    const originalStructuredClone = globalThis.structuredClone;
+    globalThis.structuredClone = ((value: unknown) => {
+      const snapshot: any = originalStructuredClone(value);
+      snapshot.providerId = 'snapshot-provider';
+      return snapshot;
+    }) as typeof structuredClone;
+    try {
+      assert.doesNotThrow(() => assertBindingSetMatchesManifest(set, manifest));
+      assert.equal(manifest.providerId, 'example-research-source');
+    } finally {
+      globalThis.structuredClone = originalStructuredClone;
+    }
   });
 
   it('rejects provider identity mismatch against a valid manifest', () => {

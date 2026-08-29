@@ -1,5 +1,6 @@
 import {
   assertProviderManifest,
+  assertProviderManifestSnapshotStructure,
   type ProviderManifest,
 } from '../ProviderManifestContract';
 import {
@@ -223,6 +224,17 @@ export function assertBindingSetMatchesDictionary(
       dictionaryViolation(`FIELD_AVAILABLE_AT_BINDING_REQUIRED:${field.fieldId}`);
     }
   }
+  for (const binding of bindingSet.bindings) {
+    const field = fields.get(binding.canonicalFieldId);
+    if (
+      field !== undefined
+      && typeof field.unit === 'object'
+      && field.unit.kind === 'CURRENCY'
+      && !claimed.has(field.unit.currencyFieldId)
+    ) {
+      dictionaryViolation(`CURRENCY_BINDING_DEPENDENCY_MISSING:${field.fieldId}`);
+    }
+  }
 }
 
 /** Match only identities currently owned by the Phase 9A manifest authority. */
@@ -230,10 +242,12 @@ export function assertBindingSetMatchesManifest(
   bindingSet: unknown,
   manifest: unknown,
 ): asserts manifest is ProviderManifest {
-  assertProviderManifest(manifest);
   assertProviderSourceBindingSet(bindingSet);
-  if (bindingSet.providerId !== manifest.providerId) dictionaryViolation('MANIFEST_PROVIDER_ID_MISMATCH');
-  if (bindingSet.adapterId !== manifest.adapterId) dictionaryViolation('MANIFEST_ADAPTER_ID_MISMATCH');
+  assertProviderManifestSnapshotStructure(manifest);
+  const snapshot = structuredClone(manifest);
+  assertProviderManifest(snapshot);
+  if (bindingSet.providerId !== snapshot.providerId) dictionaryViolation('MANIFEST_PROVIDER_ID_MISMATCH');
+  if (bindingSet.adapterId !== snapshot.adapterId) dictionaryViolation('MANIFEST_ADAPTER_ID_MISMATCH');
 }
 
 export const PHASE_9B_PROVIDER_BINDING_BOUNDARY = Object.freeze({
