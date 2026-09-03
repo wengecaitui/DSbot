@@ -1,0 +1,297 @@
+{
+  "schemaVersion": "stage-4b-stage-5-durable-authority-bindings/v1",
+  "authorityPolicy": {
+    "artifactArchivesAreAuthority": false,
+    "authoritySubstitutionAllowed": false,
+    "missingSubjectBehavior": "FAIL_CLOSED",
+    "normalVerificationRequiresNetwork": false,
+    "rawSubjectBytesAreAuthority": true
+  },
+  "subjects": [
+    {
+      "id": "STAGE_4B1_ACTIVATION_ARTIFACT",
+      "canonicalPath": "docs/releases/stage-4b1-activation-contract.json",
+      "byteLength": 5358,
+      "rawSha256": "4d474f9d357fa6fb7d584576a891c5916f4f7ca4166d82027dba8fb29947d4aa",
+      "subjectName": "stage-4b1-activation-contract.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-4b1-activation-contract.yml",
+      "historicalProducerRun": 30245529110,
+      "historicalProducerCommit": "eee580cb7a25f67cb65aecd9a0a82f71b4921121",
+      "historicalSourceCommit": "eee580cb7a25f67cb65aecd9a0a82f71b4921121",
+      "semanticIdentityFields": {
+        "artifactId": "f320f0e51ef6c0900a189dd7455d0c3ee77726bb4c6d1820d422d725629bf52e",
+        "eligibilityProof.status": "BLOCKED_NO_PROMOTED_STRATEGY",
+        "paperApproved": false,
+        "testnetApproved": false,
+        "liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_4A12_CANDIDATE_MANIFEST",
+      "canonicalPath": "docs/releases/stage-4a12-candidate-manifest.json",
+      "byteLength": 19849,
+      "rawSha256": "3d110db1052b19ef76b4aabd571f2c610a5c68b2485d362a9dd50df61787e298",
+      "subjectName": "recomputed-candidate-manifest.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-4a12-candidate-proof.yml",
+      "historicalProducerRun": 30235971008,
+      "historicalProducerCommit": "4b34e6a58e0b7bf93774bc8f3055fea60e28117d",
+      "historicalSourceCommit": "80f12966081e3851424f820dd3428249d5537eb9",
+      "semanticIdentityFields": {
+        "manifestId": "7ba0079a9d0c12562562378d598372a46f4290adb527264a61558f9ed70201aa",
+        "sourceCommit": "80f12966081e3851424f820dd3428249d5537eb9"
+      }
+    },
+    {
+      "id": "STAGE_4B1_SUBJECT",
+      "canonicalPath": "tests/fixtures/stage-4b-closure/stage-4b1-subject.json",
+      "byteLength": 827,
+      "rawSha256": "0ecc172079eb5a78f1733ccf9a332a188ba5f55ecd13586970450a25cafd8fb5",
+      "subjectName": "stage-4b1-activation-contract-subject.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-4b1-activation-contract.yml",
+      "historicalProducerRun": 30245529110,
+      "historicalProducerCommit": "eee580cb7a25f67cb65aecd9a0a82f71b4921121",
+      "historicalSourceCommit": "eee580cb7a25f67cb65aecd9a0a82f71b4921121",
+      "semanticIdentityFields": {
+        "subjectId": "6f86823399b0d7076d50d9cb6b563e46646a8d928e4e58b537505282783e99e7",
+        "receiptCommit": "eee580cb7a25f67cb65aecd9a0a82f71b4921121",
+        "paperApproved": false,
+        "testnetApproved": false,
+        "liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_4B2_RECEIPT",
+      "canonicalPath": "tests/fixtures/stage-4b-closure/stage-4b2-receipt.json",
+      "byteLength": 952,
+      "rawSha256": "5fefa5c1ddb025c94300e8b7dcb3b6d9dd5ba2e36a6d70e2ec10554d1d6a2453",
+      "subjectName": "stage-4b2-receipt.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-4b2-receipt.yml",
+      "historicalProducerRun": 30320628525,
+      "historicalProducerCommit": "81b0980f4fee168075a52c6ebcb12eb50f382217",
+      "historicalSourceCommit": "81b0980f4fee168075a52c6ebcb12eb50f382217",
+      "semanticIdentityFields": {
+        "receiptId": "64b15a8acef9b1ba6f16ff87f81d27fcf28fbf6b94424d059521a20702165785",
+        "sourceCommit": "81b0980f4fee168075a52c6ebcb12eb50f382217",
+        "status": "BLOCKED_NO_ACTIVATION_REVIEW_READY_STRATEGY",
+        "paperApproved": false,
+        "testnetApproved": false,
+        "liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_4B3_RECEIPT",
+      "canonicalPath": "tests/fixtures/stage-4b-closure/stage-4b3-receipt.json",
+      "byteLength": 1322,
+      "rawSha256": "2e339f3fa9a8e02c7a0219248d54bcf5844591d20b35c8ffc24ed02777f9c55b",
+      "subjectName": "stage-4b3-receipt.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-4b3-receipt.yml",
+      "historicalProducerRun": 30365533078,
+      "historicalProducerCommit": "e6bc1852f55d71fd897a513bb533085596a1a480",
+      "historicalSourceCommit": "e6bc1852f55d71fd897a513bb533085596a1a480",
+      "semanticIdentityFields": {
+        "receiptId": "18a7e928015ded178e5b48beaefff8cc29945e8e1d8329c4c03c58148a07ffa2",
+        "sourceCommit": "e6bc1852f55d71fd897a513bb533085596a1a480",
+        "stage4B2ReceiptId": "64b15a8acef9b1ba6f16ff87f81d27fcf28fbf6b94424d059521a20702165785",
+        "stage4B2RawArtifactSha256": "5fefa5c1ddb025c94300e8b7dcb3b6d9dd5ba2e36a6d70e2ec10554d1d6a2453",
+        "runtimeStarted": false,
+        "paperApproved": false,
+        "testnetApproved": false,
+        "liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_4B4_PROOF",
+      "canonicalPath": "tests/fixtures/stage-4b-closure/stage-4b4-proof.json",
+      "byteLength": 1037,
+      "rawSha256": "aa9b5e4715d9a3e9ba16dbed8a3bf77d11016b5c53f4bc12cc51d117ce2693c0",
+      "subjectName": "stage-4b4-shadow-proof.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-4b4-shadow-proof.yml",
+      "historicalProducerRun": 30525863496,
+      "historicalProducerCommit": "9e0d9dafeead4ee22f38ae9e1f964cb15855da27",
+      "historicalSourceCommit": "9e0d9dafeead4ee22f38ae9e1f964cb15855da27",
+      "historicalPrHeadCommit": "9e0d9dafeead4ee22f38ae9e1f964cb15855da27",
+      "attestedMergeCommit": "1a487bf18b0018e87e2df31acb93f74d25d1c901",
+      "semanticIdentityFields": {
+        "proofId": "srp-3c1d24416252eefce4e7b6f43fdc5b79419a8a0970a8428f5c3f0877af8f46be",
+        "sourceCommit": "9e0d9dafeead4ee22f38ae9e1f964cb15855da27",
+        "runtimeState": "STOPPED",
+        "paperApproved": false,
+        "testnetApproved": false,
+        "liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_4B_CLOSURE_AUDIT",
+      "canonicalPath": "tests/fixtures/stage-5-entry/stage-4b-closure-audit.json",
+      "byteLength": 1931,
+      "rawSha256": "bae5d1d45d2d3d550efec9e18be813c054f98dc32d7b6ebab7d53e0ab094844a",
+      "subjectName": "stage-4b-closure-audit.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-4b-closure-audit.yml",
+      "historicalProducerRun": 30528115935,
+      "historicalProducerCommit": "c33d56d8e295dc064fa971cfa2128aaac41705da",
+      "historicalSourceCommit": "c33d56d8e295dc064fa971cfa2128aaac41705da",
+      "historicalPrHeadCommit": "c33d56d8e295dc064fa971cfa2128aaac41705da",
+      "attestedMergeCommit": "b2f11c0941b1e629e58c299169554de6051c902b",
+      "semanticIdentityFields": {
+        "closureId": "345432934555e1935388eb2193f6ef365e7f924fba5a668e399ca3f1db72705a",
+        "sourceCommit": "c33d56d8e295dc064fa971cfa2128aaac41705da",
+        "stage4B1.artifactSha256": "4d474f9d357fa6fb7d584576a891c5916f4f7ca4166d82027dba8fb29947d4aa",
+        "stage4B1.subjectSha256": "0ecc172079eb5a78f1733ccf9a332a188ba5f55ecd13586970450a25cafd8fb5",
+        "stage4B2.rawSha256": "5fefa5c1ddb025c94300e8b7dcb3b6d9dd5ba2e36a6d70e2ec10554d1d6a2453",
+        "stage4B3.rawSha256": "2e339f3fa9a8e02c7a0219248d54bcf5844591d20b35c8ffc24ed02777f9c55b",
+        "stage4B4.proofRawSha256": "aa9b5e4715d9a3e9ba16dbed8a3bf77d11016b5c53f4bc12cc51d117ce2693c0",
+        "status": "CLOSED_BLOCKED_NO_PROMOTED_STRATEGY",
+        "runtimeStarted": false,
+        "paperApproved": false,
+        "testnetApproved": false,
+        "liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_5_ENTRY_GATE",
+      "canonicalPath": "tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json",
+      "byteLength": 755,
+      "rawSha256": "b33502d272d7c4bd13c9863518600bb6a1c19cf6e52bf150161f4d494c296c28",
+      "subjectName": "stage-5-entry-gate.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-5-entry-gate.yml",
+      "historicalProducerRun": 30530350135,
+      "historicalProducerCommit": "818770767eab0a7173292b614b6e699a9ce310a1",
+      "historicalSourceCommit": "818770767eab0a7173292b614b6e699a9ce310a1",
+      "semanticIdentityFields": {
+        "gateId": "987f264ee5079dc623c52edef254e89dc2dab09b18084b238c2d31bd629553d5",
+        "sourceCommit": "818770767eab0a7173292b614b6e699a9ce310a1",
+        "stage4BClosure.rawSha256": "bae5d1d45d2d3d550efec9e18be813c054f98dc32d7b6ebab7d53e0ab094844a",
+        "status": "BLOCKED_NO_PROMOTED_STRATEGY",
+        "entryAuthorized": false,
+        "activationAuthorized": false,
+        "runtimeStarted": false,
+        "paperApproved": false,
+        "testnetApproved": false,
+        "liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_5_EVALUATION_SPEC",
+      "canonicalPath": "tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json",
+      "byteLength": 4750,
+      "rawSha256": "62bf8ccf9fc18b2818c1d24d05426128092e5dd464760daed89986a947adbc1b",
+      "subjectName": "stage-5-evaluation-spec.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-5-1-evaluation-constitution.yml",
+      "historicalProducerRun": 30534333283,
+      "historicalProducerCommit": "913646777a64aa801c7dc263701802249164bf97",
+      "historicalSourceCommit": "913646777a64aa801c7dc263701802249164bf97",
+      "semanticIdentityFields": {
+        "evaluationSpecId": "8248f250d85a78dca564dad07064748d261ed08465477156783c69ffc00a2cf3",
+        "sourceCommit": "913646777a64aa801c7dc263701802249164bf97",
+        "status": "FROZEN_BEFORE_DATA_ACCESS",
+        "safety.activationAuthorized": false,
+        "safety.runtimeStarted": false,
+        "safety.paperApproved": false,
+        "safety.testnetApproved": false,
+        "safety.liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_5_DATASET_MANIFEST",
+      "canonicalPath": "tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json",
+      "byteLength": 7254,
+      "rawSha256": "c46a5b5a6c6ed831c8de3248b5826f27afd1f1b93154fa7d52d652bff68b4cd4",
+      "subjectName": "stage-5-dataset-manifest.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-5-2-dataset-leakage.yml",
+      "historicalProducerRun": 30538357437,
+      "historicalProducerCommit": "8c87c86107bf32c7e9f2fd4d494a22d612dcf1b8",
+      "historicalSourceCommit": "db367b4109d8e3eef5e1f7b5116443e7cd2e0d3a",
+      "semanticIdentityFields": {
+        "datasetManifestId": "3f9e3a1270b9479bd01767adcc5a6596132cb6c3734aa600e23ad25bc4abe760",
+        "sourceCommit": "db367b4109d8e3eef5e1f7b5116443e7cd2e0d3a",
+        "evaluationSpec.evaluationSpecId": "8248f250d85a78dca564dad07064748d261ed08465477156783c69ffc00a2cf3",
+        "evaluationSpec.rawSha256": "62bf8ccf9fc18b2818c1d24d05426128092e5dd464760daed89986a947adbc1b",
+        "status": "TRAIN_VALIDATION_AUDITED_LOCKED_TEST_SEALED",
+        "safety.activationAuthorized": false,
+        "safety.runtimeStarted": false,
+        "safety.paperApproved": false,
+        "safety.testnetApproved": false,
+        "safety.liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_5_CANDIDATE_REGISTRY",
+      "canonicalPath": "tests/fixtures/stage-5-registry/stage-5-candidate-registry.json",
+      "byteLength": 17525,
+      "rawSha256": "8364dd6bcb68b318d2550d726c286c24ff4cfbef53e7f698ca3b38db20d1fa7e",
+      "subjectName": "stage-5-candidate-registry.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-5-3-4-registry-harness.yml",
+      "historicalProducerRun": 30541001265,
+      "historicalProducerCommit": "2115bfa277d2ca2eb582a010e248f369096cb6fa",
+      "historicalSourceCommit": "2115bfa277d2ca2eb582a010e248f369096cb6fa",
+      "semanticIdentityFields": {
+        "registryId": "0fe0249174a2405d2966282ff7dd91c92c89d105fa04ee0c140072535ccb7d31",
+        "sourceCommit": "2115bfa277d2ca2eb582a010e248f369096cb6fa",
+        "status": "CANDIDATES_REGISTERED_LOCKED_TEST_SEALED",
+        "safety.activationAuthorized": false,
+        "safety.runtimeStarted": false,
+        "safety.paperApproved": false,
+        "safety.testnetApproved": false,
+        "safety.liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_5_RESEARCH_RESULTS",
+      "canonicalPath": "tests/fixtures/stage-5-research/stage-5-research-results.json",
+      "byteLength": 432980,
+      "rawSha256": "9b0eda9677b63242632a8c3288e902007539fa113ea1362c4ec396e6dfc60186",
+      "subjectName": "stage-5-research-results.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-5-5-8-research-promotion.yml",
+      "historicalProducerRun": 30543669190,
+      "historicalProducerCommit": "3cbf9b88e7929b5649b84094d77f1492919b2453",
+      "historicalSourceCommit": "3cbf9b88e7929b5649b84094d77f1492919b2453",
+      "semanticIdentityFields": {
+        "resultsId": "621d253702921ec56bbfe0023bf0b1f86924a21b6c94a3578437f388d05bd6b7",
+        "lockedTestAccessCount": 0
+      }
+    },
+    {
+      "id": "STAGE_5_VALIDATION_DECISION",
+      "canonicalPath": "tests/fixtures/stage-5-research/stage-5-validation-decision.json",
+      "byteLength": 28035,
+      "rawSha256": "edcacb3e73d9ab4788ebaabd84db64f9eb5a29cc839e2d010adf83f1206f6a34",
+      "subjectName": "stage-5-validation-decision.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-5-5-8-research-promotion.yml",
+      "historicalProducerRun": 30543669190,
+      "historicalProducerCommit": "3cbf9b88e7929b5649b84094d77f1492919b2453",
+      "historicalSourceCommit": "27e2b2497f57c50471fa570cadf19c10551cc27b",
+      "semanticIdentityFields": {
+        "decisionId": "ab8d1acd8038c724245a8e7b4aff1639b632db8c486998b5ebd97848ae088699",
+        "sourceCommit": "27e2b2497f57c50471fa570cadf19c10551cc27b",
+        "status": "NO_CANDIDATE_PASSED_VALIDATION",
+        "safety.activationAuthorized": false,
+        "safety.runtimeStarted": false,
+        "safety.paperApproved": false,
+        "safety.testnetApproved": false,
+        "safety.liveApproved": false
+      }
+    },
+    {
+      "id": "STAGE_5_PROMOTION_DECISION",
+      "canonicalPath": "tests/fixtures/stage-5-research/stage-5-promotion-decision.json",
+      "byteLength": 8075,
+      "rawSha256": "bb7413ff053e368b1499e76e084429a4504faaee4741e39e1606bad9ac930cf9",
+      "subjectName": "stage-5-promotion-decision.json",
+      "historicalProducerWorkflow": ".github/workflows/stage-5-5-8-research-promotion.yml",
+      "historicalProducerRun": 30543669190,
+      "historicalProducerCommit": "3cbf9b88e7929b5649b84094d77f1492919b2453",
+      "historicalSourceCommit": "80fea2527532fad52ec9b69b8847b1ee6c842224",
+      "semanticIdentityFields": {
+        "promotionReceiptId": "44fddffd609f2dca6b009665ed5ec02bbfc4de8de4b5d21009a2460d6ba8c0f5",
+        "sourceCommit": "80fea2527532fad52ec9b69b8847b1ee6c842224",
+        "status": "REJECTED_VALIDATION_NO_LOCKED_TEST_RUN",
+        "promotion.approved": false,
+        "safety.activationAuthorized": false,
+        "safety.runtimeStarted": false,
+        "safety.paperApproved": false,
+        "safety.testnetApproved": false,
+        "safety.liveApproved": false
+      }
+    }
+  ]
+}

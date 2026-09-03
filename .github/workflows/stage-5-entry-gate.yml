@@ -5,9 +5,13 @@ on:
   pull_request:
     branches: [feature/orangeai-split]
     paths:
+      - '.gitattributes'
       - '.github/workflows/stage-5-entry-gate.yml'
+      - 'docs/releases/stage-4b-stage-5-durable-authority-bindings.json'
+      - 'scripts/verify-durable-authority.py'
       - 'src/validation/Stage5EntryGate.ts'
       - 'scripts/generate-stage-5-entry-gate.mts'
+      - 'tests/fixtures/stage-5-entry/stage-4b-closure-audit.json'
       - 'tests/validation/stage-5-entry-gate.test.ts'
       - 'tests/fixtures/stage-5-entry/**'
       - 'docs/releases/stage-5-entry-gate.md'
@@ -20,7 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       id-token: write
       attestations: write
     env:
@@ -48,17 +51,16 @@ jobs:
         run: npm ci
       - name: Re-run canonical validation
         run: npm run ci
-      - name: Download authoritative Stage 4B closure
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p artifacts/evidence
-          gh run download 30528115935 -n stage-4b-closure-audit-c33d56d8e295dc064fa971cfa2128aaac41705da -D artifacts/evidence
+      - name: Verify durable Stage 4B closure authority
+        run: >-
+          python scripts/verify-durable-authority.py
+          --bindings docs/releases/stage-4b-stage-5-durable-authority-bindings.json
+          --subject STAGE_4B_CLOSURE_AUDIT
       - name: Generate and independently verify Stage 5 entry gate
         run: >-
           npx tsx scripts/generate-stage-5-entry-gate.mts
           --source-commit "$SOURCE_COMMIT"
-          --stage-4b-closure artifacts/evidence/stage-4b-closure-audit.json
+          --stage-4b-closure tests/fixtures/stage-5-entry/stage-4b-closure-audit.json
           --output "$GATE_PATH"
       - name: Upload Stage 5 entry subject
         uses: actions/upload-artifact@v4

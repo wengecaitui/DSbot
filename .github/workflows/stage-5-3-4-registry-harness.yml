@@ -5,12 +5,18 @@ on:
   pull_request:
     branches: [feature/orangeai-split]
     paths:
+      - '.gitattributes'
       - '.github/workflows/stage-5-3-4-registry-harness.yml'
+      - 'docs/releases/stage-4a12-candidate-manifest.json'
+      - 'docs/releases/stage-4b-stage-5-durable-authority-bindings.json'
+      - 'scripts/verify-durable-authority.py'
       - 'quant_engine/proof/stage5_candidate.py'
       - 'quant_engine/proof/stage5_harness.py'
       - 'quant_engine/tests/test_stage5_candidate*.py'
       - 'quant_engine/tests/test_stage5_harness.py'
       - 'scripts/generate-stage-5-candidate-registry.py'
+      - 'tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json'
+      - 'tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json'
       - 'docs/releases/stage-5-3-4-registry-harness.md'
 
 permissions:
@@ -21,7 +27,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       id-token: write
       attestations: write
     env:
@@ -51,25 +56,25 @@ jobs:
         run: npm run ci
       - name: Run focused offline contract tests
         run: python -m unittest quant_engine.tests.test_stage5_candidate quant_engine.tests.test_stage5_candidate_cli quant_engine.tests.test_stage5_harness
-      - name: Download authoritative Stage 4A12 candidate and Stage 5.1 constitution
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p artifacts/evidence
-          gh run download 30235971008 -n stage-4a12-candidate-proof-4b34e6a58e0b7bf93774bc8f3055fea60e28117d -D artifacts/evidence/stage4a12
-          gh run download 30534333283 -n stage-5-evaluation-spec-913646777a64aa801c7dc263701802249164bf97 -D artifacts/evidence
+      - name: Verify durable candidate, evaluation, and dataset authorities
+        run: >-
+          python scripts/verify-durable-authority.py
+          --bindings docs/releases/stage-4b-stage-5-durable-authority-bindings.json
+          --subject STAGE_4A12_CANDIDATE_MANIFEST
+          --subject STAGE_5_EVALUATION_SPEC
+          --subject STAGE_5_DATASET_MANIFEST
       - name: Generate and independently verify registry
         run: |
           python scripts/generate-stage-5-candidate-registry.py \
             --source-commit "$SOURCE_COMMIT" \
-            --candidate-manifest artifacts/evidence/stage4a12/recomputed-candidate-manifest.json \
-            --evaluation-spec artifacts/evidence/stage-5-evaluation-spec.json \
+            --candidate-manifest docs/releases/stage-4a12-candidate-manifest.json \
+            --evaluation-spec tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json \
             --dataset-manifest tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json \
             --output "$REGISTRY_PATH"
           python scripts/generate-stage-5-candidate-registry.py \
             --source-commit "$SOURCE_COMMIT" \
-            --candidate-manifest artifacts/evidence/stage4a12/recomputed-candidate-manifest.json \
-            --evaluation-spec artifacts/evidence/stage-5-evaluation-spec.json \
+            --candidate-manifest docs/releases/stage-4a12-candidate-manifest.json \
+            --evaluation-spec tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json \
             --dataset-manifest tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json \
             --verify "$REGISTRY_PATH"
       - name: Upload candidate registry

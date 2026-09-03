@@ -5,10 +5,14 @@ on:
   pull_request:
     branches: [feature/orangeai-split]
     paths:
+      - '.gitattributes'
       - '.github/workflows/stage-5-1-evaluation-constitution.yml'
+      - 'docs/releases/stage-4b-stage-5-durable-authority-bindings.json'
+      - 'scripts/verify-durable-authority.py'
       - 'quant_engine/proof/stage5_evaluation.py'
       - 'quant_engine/tests/test_stage5_evaluation.py'
       - 'tests/fixtures/stage-5-evaluation/**'
+      - 'tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json'
       - 'scripts/generate-stage-5-evaluation-spec.py'
       - 'docs/releases/stage-5-1-evaluation-constitution.md'
 
@@ -20,7 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       id-token: write
       attestations: write
     env:
@@ -48,17 +51,16 @@ jobs:
         run: npm ci
       - name: Re-run canonical validation
         run: npm run ci
-      - name: Download authoritative Stage 5 entry gate
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p artifacts/evidence
-          gh run download 30530350135 -n stage-5-entry-gate-818770767eab0a7173292b614b6e699a9ce310a1 -D artifacts/evidence
+      - name: Verify durable Stage 5 entry authority
+        run: >-
+          python scripts/verify-durable-authority.py
+          --bindings docs/releases/stage-4b-stage-5-durable-authority-bindings.json
+          --subject STAGE_5_ENTRY_GATE
       - name: Generate and verify frozen evaluation constitution
         run: >-
           python scripts/generate-stage-5-evaluation-spec.py
           --source-commit "$SOURCE_COMMIT"
-          --entry-gate artifacts/evidence/stage-5-entry-gate.json
+          --entry-gate tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json
           --output "$SPEC_PATH"
       - name: Upload evaluation constitution
         uses: actions/upload-artifact@v4
