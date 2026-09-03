@@ -5,10 +5,20 @@ on:
   pull_request:
     branches: [feature/orangeai-split]
     paths:
+      - '.gitattributes'
       - '.github/workflows/stage-5-closure.yml'
+      - 'docs/releases/stage-4b-stage-5-durable-authority-bindings.json'
+      - 'scripts/verify-durable-authority.py'
       - 'quant_engine/proof/stage5_closure.py'
       - 'quant_engine/tests/test_stage5_closure.py'
       - 'scripts/generate-stage-5-closure.py'
+      - 'tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json'
+      - 'tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json'
+      - 'tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json'
+      - 'tests/fixtures/stage-5-registry/stage-5-candidate-registry.json'
+      - 'tests/fixtures/stage-5-research/stage-5-research-results.json'
+      - 'tests/fixtures/stage-5-research/stage-5-validation-decision.json'
+      - 'tests/fixtures/stage-5-research/stage-5-promotion-decision.json'
       - 'docs/releases/stage-5-closure.md'
 
 permissions:
@@ -19,12 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       id-token: write
       attestations: write
     env:
       SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-      EVIDENCE_DIR: artifacts/evidence
       CLOSURE_PATH: artifacts/stage-5-closure/stage-5-closure.json
     steps:
       - name: Checkout exact closure source
@@ -53,27 +61,27 @@ jobs:
         run: npm run ci
       - name: Run focused closure and tamper tests
         run: python -m unittest quant_engine.tests.test_stage5_closure
-      - name: Download authoritative Stage 5 artifacts
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p "$EVIDENCE_DIR/entry" "$EVIDENCE_DIR/evaluation" "$EVIDENCE_DIR/dataset" "$EVIDENCE_DIR/registry" "$EVIDENCE_DIR/research"
-          gh run download 30530350135 -n stage-5-entry-gate-818770767eab0a7173292b614b6e699a9ce310a1 -D "$EVIDENCE_DIR/entry"
-          gh run download 30534333283 -n stage-5-evaluation-spec-913646777a64aa801c7dc263701802249164bf97 -D "$EVIDENCE_DIR/evaluation"
-          gh run download 30538357437 -n stage-5-dataset-manifest-8c87c86107bf32c7e9f2fd4d494a22d612dcf1b8 -D "$EVIDENCE_DIR/dataset"
-          gh run download 30541001265 -n stage-5-candidate-registry-2115bfa277d2ca2eb582a010e248f369096cb6fa -D "$EVIDENCE_DIR/registry"
-          gh run download 30543669190 -n stage-5-research-promotion-3cbf9b88e7929b5649b84094d77f1492919b2453 -D "$EVIDENCE_DIR/research"
+      - name: Verify durable Stage 5 authorities
+        run: >-
+          python scripts/verify-durable-authority.py
+          --bindings docs/releases/stage-4b-stage-5-durable-authority-bindings.json
+          --subject STAGE_5_ENTRY_GATE
+          --subject STAGE_5_EVALUATION_SPEC
+          --subject STAGE_5_DATASET_MANIFEST
+          --subject STAGE_5_CANDIDATE_REGISTRY
+          --subject STAGE_5_RESEARCH_RESULTS
+          --subject STAGE_5_VALIDATION_DECISION
+          --subject STAGE_5_PROMOTION_DECISION
       - name: Verify authoritative raw bytes
         shell: bash
         run: |
-          cd "$EVIDENCE_DIR"
-          echo 'b33502d272d7c4bd13c9863518600bb6a1c19cf6e52bf150161f4d494c296c28  entry/stage-5-entry-gate.json' | sha256sum -c -
-          echo '62bf8ccf9fc18b2818c1d24d05426128092e5dd464760daed89986a947adbc1b  evaluation/stage-5-evaluation-spec.json' | sha256sum -c -
-          echo 'c46a5b5a6c6ed831c8de3248b5826f27afd1f1b93154fa7d52d652bff68b4cd4  dataset/stage-5-dataset-manifest.json' | sha256sum -c -
-          echo '8364dd6bcb68b318d2550d726c286c24ff4cfbef53e7f698ca3b38db20d1fa7e  registry/stage-5-candidate-registry.json' | sha256sum -c -
-          echo '9b0eda9677b63242632a8c3288e902007539fa113ea1362c4ec396e6dfc60186  research/stage-5-research-results.json' | sha256sum -c -
-          echo 'edcacb3e73d9ab4788ebaabd84db64f9eb5a29cc839e2d010adf83f1206f6a34  research/stage-5-validation-decision.json' | sha256sum -c -
-          echo 'bb7413ff053e368b1499e76e084429a4504faaee4741e39e1606bad9ac930cf9  research/stage-5-promotion-decision.json' | sha256sum -c -
+          echo 'b33502d272d7c4bd13c9863518600bb6a1c19cf6e52bf150161f4d494c296c28  tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json' | sha256sum -c -
+          echo '62bf8ccf9fc18b2818c1d24d05426128092e5dd464760daed89986a947adbc1b  tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json' | sha256sum -c -
+          echo 'c46a5b5a6c6ed831c8de3248b5826f27afd1f1b93154fa7d52d652bff68b4cd4  tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json' | sha256sum -c -
+          echo '8364dd6bcb68b318d2550d726c286c24ff4cfbef53e7f698ca3b38db20d1fa7e  tests/fixtures/stage-5-registry/stage-5-candidate-registry.json' | sha256sum -c -
+          echo '9b0eda9677b63242632a8c3288e902007539fa113ea1362c4ec396e6dfc60186  tests/fixtures/stage-5-research/stage-5-research-results.json' | sha256sum -c -
+          echo 'edcacb3e73d9ab4788ebaabd84db64f9eb5a29cc839e2d010adf83f1206f6a34  tests/fixtures/stage-5-research/stage-5-validation-decision.json' | sha256sum -c -
+          echo 'bb7413ff053e368b1499e76e084429a4504faaee4741e39e1606bad9ac930cf9  tests/fixtures/stage-5-research/stage-5-promotion-decision.json' | sha256sum -c -
       - name: Verify Stage 5 merge ancestry
         shell: bash
         run: |
@@ -93,24 +101,24 @@ jobs:
           python scripts/generate-stage-5-closure.py \
             --source-commit "$SOURCE_COMMIT" \
             --final-target-sha "$SOURCE_COMMIT" \
-            --entry-gate "$EVIDENCE_DIR/entry/stage-5-entry-gate.json" \
-            --evaluation-spec "$EVIDENCE_DIR/evaluation/stage-5-evaluation-spec.json" \
-            --dataset-manifest "$EVIDENCE_DIR/dataset/stage-5-dataset-manifest.json" \
-            --candidate-registry "$EVIDENCE_DIR/registry/stage-5-candidate-registry.json" \
-            --research-results "$EVIDENCE_DIR/research/stage-5-research-results.json" \
-            --validation-decision "$EVIDENCE_DIR/research/stage-5-validation-decision.json" \
-            --promotion-decision "$EVIDENCE_DIR/research/stage-5-promotion-decision.json" \
+            --entry-gate tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json \
+            --evaluation-spec tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json \
+            --dataset-manifest tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json \
+            --candidate-registry tests/fixtures/stage-5-registry/stage-5-candidate-registry.json \
+            --research-results tests/fixtures/stage-5-research/stage-5-research-results.json \
+            --validation-decision tests/fixtures/stage-5-research/stage-5-validation-decision.json \
+            --promotion-decision tests/fixtures/stage-5-research/stage-5-promotion-decision.json \
             --output "$CLOSURE_PATH"
           python scripts/generate-stage-5-closure.py \
             --source-commit "$SOURCE_COMMIT" \
             --final-target-sha "$SOURCE_COMMIT" \
-            --entry-gate "$EVIDENCE_DIR/entry/stage-5-entry-gate.json" \
-            --evaluation-spec "$EVIDENCE_DIR/evaluation/stage-5-evaluation-spec.json" \
-            --dataset-manifest "$EVIDENCE_DIR/dataset/stage-5-dataset-manifest.json" \
-            --candidate-registry "$EVIDENCE_DIR/registry/stage-5-candidate-registry.json" \
-            --research-results "$EVIDENCE_DIR/research/stage-5-research-results.json" \
-            --validation-decision "$EVIDENCE_DIR/research/stage-5-validation-decision.json" \
-            --promotion-decision "$EVIDENCE_DIR/research/stage-5-promotion-decision.json" \
+            --entry-gate tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json \
+            --evaluation-spec tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json \
+            --dataset-manifest tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json \
+            --candidate-registry tests/fixtures/stage-5-registry/stage-5-candidate-registry.json \
+            --research-results tests/fixtures/stage-5-research/stage-5-research-results.json \
+            --validation-decision tests/fixtures/stage-5-research/stage-5-validation-decision.json \
+            --promotion-decision tests/fixtures/stage-5-research/stage-5-promotion-decision.json \
             --verify "$CLOSURE_PATH"
       - name: Upload closure artifact
         uses: actions/upload-artifact@v4

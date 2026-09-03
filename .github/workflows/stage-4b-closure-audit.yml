@@ -5,9 +5,17 @@ on:
   pull_request:
     branches: [feature/orangeai-split]
     paths:
+      - '.gitattributes'
       - '.github/workflows/stage-4b-closure-audit.yml'
+      - 'docs/releases/stage-4b-stage-5-durable-authority-bindings.json'
+      - 'docs/releases/stage-4b1-activation-contract.json'
+      - 'scripts/verify-durable-authority.py'
       - 'src/validation/Stage4BClosureAudit.ts'
       - 'scripts/generate-stage-4b-closure-audit.mts'
+      - 'tests/fixtures/stage-4b-closure/stage-4b1-subject.json'
+      - 'tests/fixtures/stage-4b-closure/stage-4b2-receipt.json'
+      - 'tests/fixtures/stage-4b-closure/stage-4b3-receipt.json'
+      - 'tests/fixtures/stage-4b-closure/stage-4b4-proof.json'
       - 'tests/validation/stage-4b-closure-audit.test.ts'
       - 'tests/fixtures/stage-4b-closure/**'
       - 'docs/releases/stage-4b-closure.md'
@@ -20,7 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       id-token: write
       attestations: write
     env:
@@ -31,6 +38,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ env.SOURCE_COMMIT }}
+          fetch-depth: 0
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
@@ -48,25 +56,25 @@ jobs:
         run: npm ci
       - name: Re-run canonical validation
         run: npm run ci
-      - name: Download authoritative Stage 4B evidence
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p artifacts/evidence/4b1 artifacts/evidence/4b2 artifacts/evidence/4b3 artifacts/evidence/4b4
-          gh run download 30245529110 -n stage-4b1-activation-contract-eee580cb7a25f67cb65aecd9a0a82f71b4921121 -D artifacts/evidence/4b1
-          gh run download 30320628525 -n stage-4b2-receipt-81b0980f4fee168075a52c6ebcb12eb50f382217 -D artifacts/evidence/4b2
-          gh run download 30365533078 -n stage-4b3-receipt-e6bc1852f55d71fd897a513bb533085596a1a480 -D artifacts/evidence/4b3
-          gh run download 30525863496 -n stage-4b4-shadow-proof-9e0d9dafeead4ee22f38ae9e1f964cb15855da27 -D artifacts/evidence/4b4
+      - name: Verify durable Stage 4B authorities
+        run: >-
+          python scripts/verify-durable-authority.py
+          --bindings docs/releases/stage-4b-stage-5-durable-authority-bindings.json
+          --subject STAGE_4B1_SUBJECT
+          --subject STAGE_4B1_ACTIVATION_ARTIFACT
+          --subject STAGE_4B2_RECEIPT
+          --subject STAGE_4B3_RECEIPT
+          --subject STAGE_4B4_PROOF
       - name: Generate and independently verify closure audit
         run: >-
           npx tsx scripts/generate-stage-4b-closure-audit.mts
           --source-commit "$SOURCE_COMMIT"
           --output "$AUDIT_PATH"
-          --4b1-subject artifacts/evidence/4b1/stage-4b1-activation-contract-subject.json
-          --4b1-artifact artifacts/evidence/4b1/stage-4b1-activation-contract.json
-          --4b2-receipt artifacts/evidence/4b2/stage-4b2-receipt.json
-          --4b3-receipt artifacts/evidence/4b3/stage-4b3-receipt.json
-          --4b4-proof artifacts/evidence/4b4/stage-4b4-shadow-proof.json
+          --4b1-subject tests/fixtures/stage-4b-closure/stage-4b1-subject.json
+          --4b1-artifact docs/releases/stage-4b1-activation-contract.json
+          --4b2-receipt tests/fixtures/stage-4b-closure/stage-4b2-receipt.json
+          --4b3-receipt tests/fixtures/stage-4b-closure/stage-4b3-receipt.json
+          --4b4-proof tests/fixtures/stage-4b-closure/stage-4b4-proof.json
       - name: Upload closure subject
         uses: actions/upload-artifact@v4
         with:
