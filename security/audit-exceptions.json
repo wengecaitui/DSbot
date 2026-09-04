@@ -1,4 +1,175 @@
 {
   "$schema": "./audit-exceptions.schema.json",
-  "exceptions": []
+  "exceptions": [
+    {
+      "advisoryId": "GHSA-528h-pc64-c93x",
+      "package": "stream-json",
+      "severity": "moderate",
+      "reason": "Seven-day human-authorized risk acceptance because stream-json 3.5.0 is API-incompatible with jayson 4.3.0 and no compatible upstream jayson release exists.",
+      "owner": "DSbot security owner",
+      "createdAt": "2026-09-04",
+      "expiresAt": "2026-09-11",
+      "maximumLifetimeDays": 7,
+      "compensatingControls": [
+        "Only the exact GHSA is allowlisted; the moderate audit threshold remains enabled.",
+        "The package-lock fingerprint pins the complete jayson and stream-json consumer topology.",
+        "DSbot must not introduce jayson TCP/TLS transport or vulnerable stream-json filter usage during this exception."
+      ],
+      "removalCondition": "Remove immediately when jayson or @solana/web3.js provides a compatible safe stream-json path, if the dependency fingerprint or topology changes, if DSbot introduces jayson TCP/TLS or vulnerable stream-json filter usage, or no later than 2026-09-11.",
+      "dependencyFingerprint": {
+        "topology": [
+          {
+            "packageName": "stream-json",
+            "packagePath": "node_modules/stream-json",
+            "version": "1.9.1",
+            "consumers": [
+              {
+                "path": "node_modules/jayson",
+                "version": "4.3.0",
+                "dependencyType": "dependencies",
+                "dependencySpecifier": "^1.9.1"
+              }
+            ]
+          },
+          {
+            "packageName": "jayson",
+            "packagePath": "node_modules/jayson",
+            "version": "4.3.0",
+            "consumers": [
+              {
+                "path": "node_modules/@drift-labs/sdk/node_modules/@solana/web3.js",
+                "version": "1.98.0",
+                "dependencyType": "dependencies",
+                "dependencySpecifier": "^4.1.1"
+              },
+              {
+                "path": "node_modules/@kamino-finance/kliquidity-sdk/node_modules/@solana/web3.js",
+                "version": "1.95.8",
+                "dependencyType": "dependencies",
+                "dependencySpecifier": "^4.1.1"
+              },
+              {
+                "path": "node_modules/@solana/web3.js",
+                "version": "1.98.4",
+                "dependencyType": "dependencies",
+                "dependencySpecifier": "^4.1.1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "advisoryId": "GHSA-v5mp-jgw5-2x6j",
+      "package": "toml",
+      "severity": "high",
+      "reason": "Seven-day human-authorized risk acceptance while the installed Anchor and rustbin consumers require toml ^3.0.0 and a safe compatible upstream path is unavailable.",
+      "owner": "DSbot security owner",
+      "createdAt": "2026-09-04",
+      "expiresAt": "2026-09-11",
+      "maximumLifetimeDays": 7,
+      "compensatingControls": [
+        "Only the exact GHSA is allowlisted; the high audit threshold remains enabled.",
+        "The package-lock fingerprint pins toml 3.0.0 and every current direct Anchor or rustbin consumer.",
+        "DSbot must not use anchor.workspace or invoke rustbin runtime paths during this exception."
+      ],
+      "removalCondition": "Remove immediately when Anchor or rustbin adopts a safe toml >=4.2.0 path, if the dependency fingerprint or topology changes, if any new consumer reaches toml, if DSbot begins using anchor.workspace or invoking rustbin runtime paths, or no later than 2026-09-11.",
+      "dependencyFingerprint": {
+        "topology": [
+          {
+            "packageName": "toml",
+            "packagePath": "node_modules/toml",
+            "version": "3.0.0",
+            "consumers": [
+              { "path": "node_modules/@coral-xyz/anchor", "version": "0.32.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@coral-xyz/anchor-30", "version": "0.30.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@drift-labs/sdk/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@hubbleprotocol/farms-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@hubbleprotocol/kamino-sdk/node_modules/@orca-so/whirlpool-client-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@hubbleprotocol/kamino-sdk/node_modules/@project-serum/anchor", "version": "0.21.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@hubbleprotocol/scope-sdk/node_modules/@project-serum/anchor", "version": "0.21.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@jup-ag/dca-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@jup-ag/limit-order-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.1-beta.2", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@jup-ag/referral-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.1-beta.2", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@kamino-finance/klend-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@kamino-finance/kliquidity-sdk/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@kamino-finance/kliquidity-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@kamino-finance/scope-sdk/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@metaplex-foundation/rustbin", "version": "0.3.5", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@meteora-ag/dlmm/node_modules/@coral-xyz/anchor", "version": "0.31.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@meteora-ag/dynamic-bonding-curve-sdk/node_modules/@coral-xyz/anchor", "version": "0.31.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@openbook-dex/openbook-v2/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@orca-so/common-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@orca-so/whirlpool-client-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@orca-so/whirlpool-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@project-serum/anchor", "version": "0.26.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@project-serum/serum/node_modules/@project-serum/anchor", "version": "0.11.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@switchboard-xyz/sbv2-lite/node_modules/@project-serum/anchor", "version": "0.24.2", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana-cctp/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana-core/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana-tbtc/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana-tokenbridge/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "advisoryId": "GHSA-82x6-q7mm-w9cf",
+      "package": "toml",
+      "severity": "high",
+      "reason": "Seven-day human-authorized risk acceptance while the installed Anchor and rustbin consumers require toml ^3.0.0 and a safe compatible upstream path is unavailable.",
+      "owner": "DSbot security owner",
+      "createdAt": "2026-09-04",
+      "expiresAt": "2026-09-11",
+      "maximumLifetimeDays": 7,
+      "compensatingControls": [
+        "Only the exact GHSA is allowlisted; the high audit threshold remains enabled.",
+        "The package-lock fingerprint pins toml 3.0.0 and every current direct Anchor or rustbin consumer.",
+        "DSbot must not use anchor.workspace or invoke rustbin runtime paths during this exception."
+      ],
+      "removalCondition": "Remove immediately when Anchor or rustbin adopts a safe toml >=4.2.0 path, if the dependency fingerprint or topology changes, if any new consumer reaches toml, if DSbot begins using anchor.workspace or invoking rustbin runtime paths, or no later than 2026-09-11.",
+      "dependencyFingerprint": {
+        "topology": [
+          {
+            "packageName": "toml",
+            "packagePath": "node_modules/toml",
+            "version": "3.0.0",
+            "consumers": [
+              { "path": "node_modules/@coral-xyz/anchor", "version": "0.32.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@coral-xyz/anchor-30", "version": "0.30.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@drift-labs/sdk/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@hubbleprotocol/farms-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@hubbleprotocol/kamino-sdk/node_modules/@orca-so/whirlpool-client-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@hubbleprotocol/kamino-sdk/node_modules/@project-serum/anchor", "version": "0.21.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@hubbleprotocol/scope-sdk/node_modules/@project-serum/anchor", "version": "0.21.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@jup-ag/dca-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@jup-ag/limit-order-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.1-beta.2", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@jup-ag/referral-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.1-beta.2", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@kamino-finance/klend-sdk/node_modules/@coral-xyz/anchor", "version": "0.28.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@kamino-finance/kliquidity-sdk/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@kamino-finance/kliquidity-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@kamino-finance/scope-sdk/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@metaplex-foundation/rustbin", "version": "0.3.5", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@meteora-ag/dlmm/node_modules/@coral-xyz/anchor", "version": "0.31.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@meteora-ag/dynamic-bonding-curve-sdk/node_modules/@coral-xyz/anchor", "version": "0.31.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@openbook-dex/openbook-v2/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@orca-so/common-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@orca-so/whirlpool-client-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@orca-so/whirlpool-sdk/node_modules/@project-serum/anchor", "version": "0.20.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@project-serum/anchor", "version": "0.26.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@project-serum/serum/node_modules/@project-serum/anchor", "version": "0.11.1", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@switchboard-xyz/sbv2-lite/node_modules/@project-serum/anchor", "version": "0.24.2", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana-cctp/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana-core/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana-tbtc/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana-tokenbridge/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" },
+              { "path": "node_modules/@wormhole-foundation/sdk-solana/node_modules/@coral-xyz/anchor", "version": "0.29.0", "dependencyType": "dependencies", "dependencySpecifier": "^3.0.0" }
+            ]
+          }
+        ]
+      }
+    }
+  ]
 }

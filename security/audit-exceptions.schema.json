@@ -10,7 +10,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["advisoryId", "package", "reason", "owner", "createdAt", "expiresAt", "removalCondition"],
+        "required": ["advisoryId", "package", "severity", "reason", "owner", "createdAt", "expiresAt", "maximumLifetimeDays", "compensatingControls", "removalCondition", "dependencyFingerprint"],
         "properties": {
           "advisoryId": { "type": "string", "pattern": "^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$" },
           "package": { "type": "string", "minLength": 1 },
@@ -22,7 +22,42 @@
           "expiresAt": { "type": "string", "format": "date" },
           "maximumLifetimeDays": { "type": "integer", "minimum": 1, "maximum": 30 },
           "compensatingControls": { "type": "array", "items": { "type": "string" } },
-          "removalCondition": { "type": "string", "minLength": 1 }
+          "removalCondition": { "type": "string", "minLength": 1 },
+          "dependencyFingerprint": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["topology"],
+            "properties": {
+              "topology": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["packageName", "packagePath", "version", "consumers"],
+                  "properties": {
+                    "packageName": { "type": "string", "minLength": 1 },
+                    "packagePath": { "type": "string", "pattern": "^node_modules/" },
+                    "version": { "type": "string", "minLength": 1 },
+                    "consumers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["path", "version", "dependencyType", "dependencySpecifier"],
+                        "properties": {
+                          "path": { "type": "string", "pattern": "^node_modules/" },
+                          "version": { "type": "string", "minLength": 1 },
+                          "dependencyType": { "type": "string", "enum": ["dependencies", "optionalDependencies"] },
+                          "dependencySpecifier": { "type": "string", "minLength": 1 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
