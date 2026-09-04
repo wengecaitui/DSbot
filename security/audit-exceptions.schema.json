@@ -4,8 +4,53 @@
   "title": "Audit Exception Registry",
   "description": "Time-bounded security audit exception registry for audit-ci allowlist entries.",
   "type": "object",
-  "required": ["exceptions"],
+  "additionalProperties": false,
+  "required": ["sourceReachabilityGuard", "exceptions"],
   "properties": {
+    "$schema": { "type": "string" },
+    "sourceReachabilityGuard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtimeSourceRoots", "sourceExtensions", "excludedDirectoryNames", "rules"],
+      "properties": {
+        "runtimeSourceRoots": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["src", "web/src"] }
+        },
+        "sourceExtensions": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": [".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"] }
+        },
+        "excludedDirectoryNames": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["__fixtures__", "__generated__", "__tests__", "build", "dist", "docs", "fixtures", "generated", "node_modules", "test", "tests"] }
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "oneOf": [
+              { "const": { "id": "anchor-workspace-runtime-use", "kind": "memberAccess", "value": "anchor.workspace" } },
+              { "const": { "id": "toml-direct-runtime-import", "kind": "moduleImport", "value": "toml" } },
+              { "const": { "id": "rustbin-direct-runtime-import", "kind": "moduleImport", "value": "@metaplex-foundation/rustbin" } },
+              { "const": { "id": "jayson-direct-runtime-import-or-transport-use", "kind": "moduleImport", "value": "jayson" } },
+              { "const": { "id": "stream-json-direct-runtime-import-or-filter-use", "kind": "moduleImport", "value": "stream-json" } }
+            ]
+          }
+        }
+      }
+    },
     "exceptions": {
       "type": "array",
       "items": {
@@ -34,11 +79,12 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["packageName", "packagePath", "version", "consumers"],
+                  "required": ["packageName", "packagePath", "version", "integrity", "consumers"],
                   "properties": {
                     "packageName": { "type": "string", "minLength": 1 },
                     "packagePath": { "type": "string", "pattern": "^node_modules/" },
                     "version": { "type": "string", "minLength": 1 },
+                    "integrity": { "type": "string", "pattern": "^sha512-" },
                     "consumers": {
                       "type": "array",
                       "items": {

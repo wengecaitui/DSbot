@@ -1,5 +1,8 @@
 // PRE-4A4-R2: Deterministic security exception validation — pure function, injectable clock.
 
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { extname, join, relative, resolve } from 'node:path';
+
 export const ERROR_CODES = Object.freeze({
   SCHEMA_INVALID: 'SECURITY_EXCEPTION_SCHEMA_INVALID',
   DUPLICATE: 'SECURITY_EXCEPTION_DUPLICATE',
@@ -20,6 +23,8 @@ export const ERROR_CODES = Object.freeze({
   VERSION_MISMATCH: 'SECURITY_EXCEPTION_VERSION_MISMATCH',
   DEPENDENCY_EDGE_MISMATCH: 'SECURITY_EXCEPTION_DEPENDENCY_EDGE_MISMATCH',
   UNEXPECTED_CONSUMER: 'SECURITY_EXCEPTION_UNEXPECTED_CONSUMER',
+  INTEGRITY_MISMATCH: 'SECURITY_EXCEPTION_INTEGRITY_MISMATCH',
+  REACHABILITY_GUARD_FAILED: 'SECURITY_EXCEPTION_REACHABILITY_GUARD_FAILED',
 });
 
 const REQUIRED_FIELDS = ['advisoryId', 'package', 'severity', 'reason', 'owner', 'createdAt', 'expiresAt', 'maximumLifetimeDays', 'compensatingControls', 'removalCondition'];
@@ -27,6 +32,18 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const GHSA_RE = /^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/;
 const CVE_RE = /^CVE-\d{4}-\d+$/;
 const DEPENDENCY_TYPES = ['dependencies', 'optionalDependencies'];
+const REQUIRED_RUNTIME_SOURCE_ROOTS = ['src', 'web/src'];
+const REQUIRED_RUNTIME_SOURCE_EXTENSIONS = ['.cjs', '.cts', '.js', '.jsx', '.mjs', '.mts', '.ts', '.tsx'];
+const REQUIRED_EXCLUDED_DIRECTORY_NAMES = ['__fixtures__', '__generated__', '__tests__', 'build', 'dist', 'docs', 'fixtures', 'generated', 'node_modules', 'test', 'tests'];
+const SOURCE_RULE_KINDS = ['moduleImport', 'memberAccess'];
+const SOURCE_GAP = String.raw`(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*`;
+const REQUIRED_SOURCE_RULES = [
+  { id: 'anchor-workspace-runtime-use', kind: 'memberAccess', value: 'anchor.workspace' },
+  { id: 'toml-direct-runtime-import', kind: 'moduleImport', value: 'toml' },
+  { id: 'rustbin-direct-runtime-import', kind: 'moduleImport', value: '@metaplex-foundation/rustbin' },
+  { id: 'jayson-direct-runtime-import-or-transport-use', kind: 'moduleImport', value: 'jayson' },
+  { id: 'stream-json-direct-runtime-import-or-filter-use', kind: 'moduleImport', value: 'stream-json' },
+];
 
 function isValidDate(s) { if (!DATE_RE.test(s)) return false; const d = new Date(s + 'T00:00:00Z'); return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s; }
 
@@ -48,6 +65,7 @@ function fingerprintShapeIsValid(fingerprint) {
     && typeof target.packageName === 'string' && target.packageName.length > 0
     && typeof target.packagePath === 'string' && target.packagePath.startsWith('node_modules/')
     && typeof target.version === 'string' && target.version.length > 0
+    && typeof target.integrity === 'string' && target.integrity.startsWith('sha512-')
     && Array.isArray(target.consumers)
     && target.consumers.every((consumer) =>
       consumer
@@ -55,6 +73,118 @@ function fingerprintShapeIsValid(fingerprint) {
       && typeof consumer.version === 'string' && consumer.version.length > 0
       && DEPENDENCY_TYPES.includes(consumer.dependencyType)
       && typeof consumer.dependencySpecifier === 'string' && consumer.dependencySpecifier.length > 0));
+}
+
+function exactStringSet(actual, required) {
+  return Array.isArray(actual)
+    && actual.length === required.length
+    && new Set(actual).size === actual.length
+    && required.every((value) => actual.includes(value));
+}
+
+function sourceReachabilityGuardShapeIsValid(guard) {
+  return guard
+    && exactStringSet(guard.runtimeSourceRoots, REQUIRED_RUNTIME_SOURCE_ROOTS)
+    && exactStringSet(guard.sourceExtensions, REQUIRED_RUNTIME_SOURCE_EXTENSIONS)
+    && exactStringSet(guard.excludedDirectoryNames, REQUIRED_EXCLUDED_DIRECTORY_NAMES)
+    && Array.isArray(guard.rules)
+    && guard.rules.length === REQUIRED_SOURCE_RULES.length
+    && new Set(guard.rules.map((rule) => rule?.id)).size === guard.rules.length
+    && guard.rules.every((rule) =>
+      rule
+      && typeof rule.id === 'string' && rule.id.length > 0
+      && SOURCE_RULE_KINDS.includes(rule.kind)
+      && typeof rule.value === 'string' && rule.value.length > 0)
+    && REQUIRED_SOURCE_RULES.every((required) => guard.rules.some((rule) =>
+      rule.id === required.id && rule.kind === required.kind && rule.value === required.value));
+}
+
+function normalizeRepositoryPath(path) {
+  return path.replaceAll('\\', '/').replace(/^\.\//, '');
+}
+
+function isRuntimeSourcePath(path, guard) {
+  const normalized = normalizeRepositoryPath(path);
+  const root = guard.runtimeSourceRoots.find((candidate) => normalized === candidate || normalized.startsWith(`${candidate}/`));
+  if (!root || !guard.sourceExtensions.includes(extname(normalized).toLowerCase())) return false;
+  const relativeSegments = normalized.slice(root.length).split('/').filter(Boolean);
+  return !relativeSegments.some((segment) => guard.excludedDirectoryNames.includes(segment.toLowerCase()));
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function ruleMatchesSource(rule, source) {
+  if (rule.kind === 'memberAccess') {
+    const segments = rule.value.split('.').map(escapeRegExp);
+    const [first, ...rest] = segments;
+    const memberPattern = rest.map((segment) => `(?:${SOURCE_GAP}\\?\\.${SOURCE_GAP}${segment}\\b|${SOURCE_GAP}\\.${SOURCE_GAP}${segment}\\b|${SOURCE_GAP}\\[${SOURCE_GAP}['"\\x60]${segment}['"\\x60]${SOURCE_GAP}\\])`).join('');
+    return new RegExp(`\\b${first}${memberPattern}`, 'i').test(source);
+  }
+  const moduleName = escapeRegExp(rule.value);
+  const moduleSpecifier = `${moduleName}(?:/[^'"\\x60\\s)]+)?`;
+  return new RegExp(`(?:\\bfrom${SOURCE_GAP}|\\bimport${SOURCE_GAP}(?:\\(${SOURCE_GAP})?|\\brequire${SOURCE_GAP}(?:\\?\\.${SOURCE_GAP})?\\(${SOURCE_GAP})['"\\x60]${moduleSpecifier}['"\\x60]`, 'm').test(source);
+}
+
+export function validateSourceReachabilityGuard(registry, runtimeSources) {
+  const guard = registry?.sourceReachabilityGuard;
+  if (!sourceReachabilityGuardShapeIsValid(guard)) {
+    return [{ code: ERROR_CODES.REACHABILITY_GUARD_FAILED, detail: 'sourceReachabilityGuard is missing, malformed, or has a narrowed scan boundary' }];
+  }
+  if (!Array.isArray(runtimeSources) || runtimeSources.length === 0) {
+    return [{ code: ERROR_CODES.REACHABILITY_GUARD_FAILED, detail: 'runtime source inventory is missing or empty' }];
+  }
+  if (runtimeSources.some((source) => !source || typeof source.path !== 'string' || typeof source.content !== 'string')) {
+    return [{ code: ERROR_CODES.REACHABILITY_GUARD_FAILED, detail: 'runtime source inventory contains a malformed entry' }];
+  }
+  const normalizedPaths = runtimeSources.map((source) => normalizeRepositoryPath(source.path));
+  if (new Set(normalizedPaths).size !== normalizedPaths.length) {
+    return [{ code: ERROR_CODES.REACHABILITY_GUARD_FAILED, detail: 'runtime source inventory contains duplicate paths' }];
+  }
+
+  const errors = [];
+  const sources = runtimeSources
+    .filter((source) => isRuntimeSourcePath(source.path, guard))
+    .sort((a, b) => normalizeRepositoryPath(a.path).localeCompare(normalizeRepositoryPath(b.path)));
+  if (sources.length === 0) {
+    return [{ code: ERROR_CODES.REACHABILITY_GUARD_FAILED, detail: 'runtime source inventory contains no files inside the declared scan boundary' }];
+  }
+
+  for (const source of sources) {
+    for (const rule of guard.rules) {
+      if (ruleMatchesSource(rule, source.content)) {
+        errors.push({
+          code: ERROR_CODES.REACHABILITY_GUARD_FAILED,
+          detail: `${normalizeRepositoryPath(source.path)} violates source reachability rule ${rule.id}`,
+        });
+      }
+    }
+  }
+  return errors;
+}
+
+export function collectRuntimeSources(root, guard) {
+  if (!sourceReachabilityGuardShapeIsValid(guard)) throw new Error('sourceReachabilityGuard is missing, malformed, or has a narrowed scan boundary');
+  const sources = [];
+  const visit = (absoluteDirectory) => {
+    const entries = readdirSync(absoluteDirectory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (guard.excludedDirectoryNames.includes(entry.name.toLowerCase())) continue;
+      const absolutePath = join(absoluteDirectory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`symbolic link is forbidden in runtime source inventory: ${normalizeRepositoryPath(relative(root, absolutePath))}`);
+      if (entry.isDirectory()) visit(absolutePath);
+      else if (entry.isFile() && guard.sourceExtensions.includes(extname(entry.name).toLowerCase())) {
+        sources.push({ path: normalizeRepositoryPath(relative(root, absolutePath)), content: readFileSync(absolutePath, 'utf8') });
+      }
+    }
+  };
+  for (const sourceRoot of guard.runtimeSourceRoots) {
+    const absoluteRoot = resolve(root, sourceRoot);
+    if (!existsSync(absoluteRoot)) throw new Error(`runtime source root is missing: ${sourceRoot}`);
+    visit(absoluteRoot);
+  }
+  return sources;
 }
 
 export function validateDependencyFingerprint(exception, lockfile) {
@@ -87,6 +217,9 @@ export function validateDependencyFingerprint(exception, lockfile) {
     }
     if (targetEntry.version !== target.version) {
       errors.push({ code: ERROR_CODES.VERSION_MISMATCH, detail: `${exception.advisoryId}: ${target.packagePath} expected ${target.version}, found ${targetEntry.version || '<missing>'}` });
+    }
+    if (targetEntry.integrity !== target.integrity) {
+      errors.push({ code: ERROR_CODES.INTEGRITY_MISMATCH, detail: `${exception.advisoryId}: ${target.packagePath} integrity does not match the authorized fingerprint` });
     }
 
     const expectedConsumers = new Map();
@@ -134,11 +267,13 @@ export function validateDependencyFingerprint(exception, lockfile) {
 export function validateAuditExceptions(input) {
   const errors = [];
   const valid = [];
-  const { registry, allowlist, now, lockfile } = input;
+  const { registry, allowlist, now, lockfile, runtimeSources } = input;
   const enforceDependencyFingerprint = input.enforceDependencyFingerprint === true || Boolean(lockfile);
+  const enforceSourceReachabilityGuard = input.enforceSourceReachabilityGuard === true || Boolean(runtimeSources);
   if (!registry || !Array.isArray(registry.exceptions)) { errors.push({ code: ERROR_CODES.SCHEMA_INVALID, detail: 'missing or invalid exceptions array' }); return { errors, valid }; }
   if (typeof now !== 'string' || !isValidDate(now)) { errors.push({ code: ERROR_CODES.INVALID_DATE, detail: `invalid now date: ${now}` }); return { errors, valid }; }
   const nowDate = new Date(now + 'T00:00:00Z');
+  if (enforceSourceReachabilityGuard) errors.push(...validateSourceReachabilityGuard(registry, runtimeSources));
   const seenGHSA = new Set();
   const seenCVE = new Set();
   for (const ex of registry.exceptions) {
@@ -171,8 +306,40 @@ export function validateAuditExceptions(input) {
   return { errors, valid };
 }
 
-import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+export function runSecurityExceptionNegativeProbes(registry, lockfile) {
+  const guard = registry.sourceReachabilityGuard;
+  const clean = { path: 'src/security-probe.ts', content: 'export const safe = true;' };
+  const reachabilityCases = [
+    ['anchor.workspace', 'const program = anchor.workspace.Dsbot;'],
+    ['direct toml import', "import toml from 'toml';"],
+    ['direct rustbin import', "const rustbin = require('@metaplex-foundation/rustbin');"],
+    ['jayson TCP/TLS reachability', "import jayson from 'jayson'; jayson.Server.tcp({}); jayson.Server.tls({});"],
+    ['vulnerable stream-json filters', "import { pick } from 'stream-json/filters/Pick'; import { ignore } from 'stream-json/filters/Ignore'; import { filter } from 'stream-json/filters/Filter'; import { replace } from 'stream-json/filters/Replace';"],
+  ];
+  for (const [label, content] of reachabilityCases) {
+    const errors = validateSourceReachabilityGuard(registry, [{ ...clean, content }]);
+    if (!errors.some((error) => error.code === ERROR_CODES.REACHABILITY_GUARD_FAILED)) throw new Error(`negative probe unexpectedly passed: ${label}`);
+  }
+  const excludedErrors = validateSourceReachabilityGuard(registry, [
+    clean,
+    { path: 'docs/security.md', content: "import toml from 'toml'; anchor.workspace" },
+    { path: 'tests/security/reachability.test.ts', content: "import jayson from 'jayson';" },
+    { path: 'src/__tests__/fixture.ts', content: "import { pick } from 'stream-json/filters/Pick';" },
+  ]);
+  if (excludedErrors.length > 0) throw new Error('excluded docs/tests negative probe produced a false positive');
+
+  const integrityRegistry = clone(registry);
+  const integrityLockfile = clone(lockfile);
+  const target = integrityRegistry.exceptions[0].dependencyFingerprint.topology[0];
+  integrityLockfile.packages[target.packagePath].integrity = 'sha512-negative-probe-mismatch';
+  const integrityErrors = validateDependencyFingerprint(integrityRegistry.exceptions[0], integrityLockfile);
+  if (!integrityErrors.some((error) => error.code === ERROR_CODES.INTEGRITY_MISMATCH)) throw new Error('integrity mismatch negative probe unexpectedly passed');
+  return { passed: reachabilityCases.length + 2, total: reachabilityCases.length + 2, guard };
+}
 
 // CLI entry — only runs when executed directly
 const isCLI = process.argv[1] && (process.argv[1].endsWith('check-audit-exceptions.mjs') || process.argv[1].endsWith('check-audit-exceptions.js'));
@@ -188,8 +355,22 @@ if (isCLI) {
   const allowlist = JSON.parse(readFileSync(alPath, 'utf8'));
   const lockfile = JSON.parse(readFileSync(lockPath, 'utf8'));
   const now = new Date().toISOString().slice(0, 10);
-  const result = validateAuditExceptions({ registry, allowlist, lockfile, now, enforceDependencyFingerprint: true });
+  let runtimeSources;
+  try {
+    runtimeSources = collectRuntimeSources(ROOT, registry.sourceReachabilityGuard);
+  } catch (error) {
+    console.error(`[FAIL] ${ERROR_CODES.REACHABILITY_GUARD_FAILED}: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+  const result = validateAuditExceptions({ registry, allowlist, lockfile, runtimeSources, now, enforceDependencyFingerprint: true, enforceSourceReachabilityGuard: true });
   if (result.errors.length > 0) { for (const e of result.errors) console.error(`[FAIL] ${e.code}: ${e.detail}`); process.exit(1); }
+  try {
+    const probes = runSecurityExceptionNegativeProbes(registry, lockfile);
+    console.log(`[OK] negative security probes: ${probes.passed}/${probes.total}`);
+  } catch (error) {
+    console.error(`[FAIL] ${ERROR_CODES.REACHABILITY_GUARD_FAILED}: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
   for (const v of result.valid) console.log(`[OK] ${v}`);
   console.log('[OK] allowlist ↔ registry consistent');
 }
