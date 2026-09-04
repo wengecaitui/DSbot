@@ -7,11 +7,15 @@ on:
     paths:
       - '.gitattributes'
       - '.github/workflows/stage-5-2-dataset-leakage.yml'
+      - 'docs/releases/stage-4b-stage-5-durable-authority-bindings.json'
+      - 'scripts/verify-durable-authority.py'
       - 'quant_engine/proof/stage5_dataset.py'
       - 'quant_engine/tests/test_stage5_dataset*.py'
       - 'scripts/run-stage-5-dataset-audit.py'
       - 'tests/fixtures/stage-5-dataset/**'
       - 'tests/fixtures/stage-5-evaluation/**'
+      - 'tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json'
+      - 'tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json'
       - 'docs/releases/stage-5-2-dataset-leakage.md'
 
 permissions:
@@ -22,7 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       id-token: write
       attestations: write
     env:
@@ -33,6 +36,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ env.SOURCE_COMMIT }}
+          fetch-depth: 0
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
@@ -50,19 +54,19 @@ jobs:
         run: npm ci
       - name: Re-run canonical validation
         run: npm run ci
-      - name: Download authoritative Stage 5.1 constitution
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p artifacts/evidence
-          gh run download 30534333283 -n stage-5-evaluation-spec-913646777a64aa801c7dc263701802249164bf97 -D artifacts/evidence
+      - name: Verify durable Stage 5.1 and dataset authorities
+        run: >-
+          python scripts/verify-durable-authority.py
+          --bindings docs/releases/stage-4b-stage-5-durable-authority-bindings.json
+          --subject STAGE_5_EVALUATION_SPEC
+          --subject STAGE_5_DATASET_MANIFEST
       - name: Verify audited manifest without market-data access
         shell: bash
         run: |
           DATASET_SOURCE_COMMIT="$(python -c 'import json; print(json.load(open("tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json", encoding="utf-8"))["sourceCommit"])')"
           python scripts/run-stage-5-dataset-audit.py \
             --source-commit "$DATASET_SOURCE_COMMIT" \
-            --evaluation-spec artifacts/evidence/stage-5-evaluation-spec.json \
+            --evaluation-spec tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json \
             --verify-manifest "$MANIFEST_PATH"
       - name: Upload dataset receipt
         uses: actions/upload-artifact@v4

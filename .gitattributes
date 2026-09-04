@@ -1,2 +1,14 @@
-tests/fixtures/stage-5-evaluation/*.json text eol=lf
-tests/fixtures/stage-5-dataset/*.json text eol=lf
+docs/releases/stage-4b1-activation-contract.json -text
+docs/releases/stage-4a12-candidate-manifest.json -text
+tests/fixtures/stage-4b-closure/stage-4b1-subject.json -text
+tests/fixtures/stage-4b-closure/stage-4b2-receipt.json -text
+tests/fixtures/stage-4b-closure/stage-4b3-receipt.json -text
+tests/fixtures/stage-4b-closure/stage-4b4-proof.json -text
+tests/fixtures/stage-5-entry/stage-4b-closure-audit.json -text
+tests/fixtures/stage-5-evaluation/stage-5-entry-gate.json -text
+tests/fixtures/stage-5-evaluation/stage-5-evaluation-spec.json -text
+tests/fixtures/stage-5-dataset/stage-5-dataset-manifest.json -text
+tests/fixtures/stage-5-registry/stage-5-candidate-registry.json -text
+tests/fixtures/stage-5-research/stage-5-research-results.json -text
+tests/fixtures/stage-5-research/stage-5-validation-decision.json -text
+tests/fixtures/stage-5-research/stage-5-promotion-decision.json -text

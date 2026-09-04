@@ -5,23 +5,25 @@ on:
   pull_request:
     branches: [feature/orangeai-split]
     paths:
+      - '.gitattributes'
       - '.github/workflows/stage-4b3-receipt.yml'
+      - 'docs/releases/stage-4b-stage-5-durable-authority-bindings.json'
+      - 'scripts/verify-durable-authority.py'
       - 'src/validation/RuntimeSafety.ts'
       - 'scripts/generate-stage-4b3-receipt.mts'
+      - 'tests/fixtures/stage-4b-closure/stage-4b2-receipt.json'
       - 'tests/validation/runtime-safety.test.ts'
       - 'package.json'
       - 'package-lock.json'
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   receipt:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       id-token: write
       attestations: write
     env:
@@ -50,14 +52,13 @@ jobs:
         run: npm ci
       - name: Re-run canonical validation
         run: npm run ci
-      - name: Download authoritative 4B2 receipt artifact
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p artifacts
-          gh run download 30320628525 -n stage-4b2-receipt-81b0980f4fee168075a52c6ebcb12eb50f382217 -D artifacts/
+      - name: Verify durable Stage 4B2 authority
+        run: >-
+          python scripts/verify-durable-authority.py
+          --bindings docs/releases/stage-4b-stage-5-durable-authority-bindings.json
+          --subject STAGE_4B2_RECEIPT
       - name: Generate Stage 4B3 receipt
-        run: npx tsx scripts/generate-stage-4b3-receipt.mts --source-commit "$SOURCE_COMMIT" --output "$RECEIPT_PATH" --4b2-receipt artifacts/stage-4b2-receipt.json
+        run: npx tsx scripts/generate-stage-4b3-receipt.mts --source-commit "$SOURCE_COMMIT" --output "$RECEIPT_PATH" --4b2-receipt tests/fixtures/stage-4b-closure/stage-4b2-receipt.json
       - name: Upload receipt artifact
         uses: actions/upload-artifact@v4
         with:
