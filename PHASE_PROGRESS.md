@@ -348,17 +348,23 @@
 - **冻结边界**: 结构化 `{providerId, adapterId}` 注册表、完整 manifest defensive pin + drift 检查、
   每页一次真实 `describe()` / `fetch()`、外部引用配置门禁、无自动翻页/重试/后台工作。
 
-### Phase 9B — Data Dictionary + Source Binding Contract ⏳ CURRENT
+### Phase 9B — Data Dictionary + Source Binding Contract ✅ MERGED / COMPLETE
 
-- **基线**: `feature/orangeai-split@17b23fc17dbdceb5800fe587f734a7a6c3dc3fe0`。
-- **当前任务**: 冻结 provider-neutral Canonical Field Dictionary 与 provider-bound DIRECT Source Binding
-  的精确语义、纯数据校验和当前 dictionary/binding/manifest 相容性门禁。
-- **停止边界**: 不实现 normalization、canonical dataset、PIT 可见性计算、数据集资格、真实 provider、
-  storage、lineage 或 ResearchDataHub；不授予生产交易权威。
+- **实现 PR / 合并提交**: #128 / `46744b53f2f6b5439a049e86412463c278461e93`。
+- **已冻结**: provider-neutral Canonical Field Dictionary、provider-bound DIRECT Source Binding、
+  纯数据校验和当前 dictionary/binding/manifest 相容性门禁。
+- **树一致性**: 经审核的 PR tree 与 squash integration tree 相同。
 
-### Phase 9C–9G — 后续门禁（DEFERRED）
+### Phase 9C — Canonical Point-in-Time Dataset ⏳ CURRENT
 
-- **9C**: Canonical Point-in-Time Dataset。
+- **基线**: `feature/orangeai-split@46744b53f2f6b5439a049e86412463c278461e93`。
+- **当前任务**: 将已验证的 9A raw records 与 9B dictionary/bindings 提取为 immutable、research-only
+  canonical dataset，并按显式 `decisionTime` 计算 `available_at <= decision_time` 与逐字段决策输入资格。
+- **停止边界**: 不实现 storage、ResearchDataHub、lineage/version registry、真实 provider、backtest kernel、
+  Phase 9D 或生产交易权威；9C 合并前保持 CURRENT。
+
+### Phase 9D–9G — 后续门禁（DEFERRED）
+
 - **9D**: Parquet / DuckDB / Polars storage path。
 - **9E**: ResearchDataHub + DatasetUsagePolicy。
 - **9F**: Data lineage / version / deprecation。
