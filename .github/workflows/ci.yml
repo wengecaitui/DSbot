@@ -32,6 +32,8 @@ jobs:
           cache-dependency-path: quant_engine/requirements.txt
       - name: Install Python dependencies
         run: python -m pip install -r quant_engine/requirements.txt
+      - name: Audit Python dependencies
+        run: npm run security:audit:python
       - name: Install
         run: npm ci
       - name: Security audit

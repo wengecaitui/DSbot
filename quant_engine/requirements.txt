@@ -9,3 +9,11 @@
 pandas>=2.0.0
 numpy>=1.24.0
 jsonschema>=4.20.0
+
+# Phase 9D: immutable local Parquet storage and read-only derived views.
+# Exact stable versions were verified against CPython 3.12 wheels.
+duckdb==1.5.5
+polars==1.44.1
+
+# Maintained dependency audit gate used by CI; it grants no vulnerability exceptions.
+pip-audit==2.10.1
