@@ -4,13 +4,85 @@
   "title": "Audit Exception Registry",
   "description": "Time-bounded security audit exception registry for audit-ci allowlist entries.",
   "type": "object",
-  "required": ["exceptions"],
+  "additionalProperties": false,
+  "required": ["sourceReachabilityGuard", "anchorSourceFingerprint", "exceptions"],
   "properties": {
+    "$schema": { "type": "string" },
+    "sourceReachabilityGuard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtimeSourceRoots", "sourceExtensions", "excludedDirectoryNames", "rules"],
+      "properties": {
+        "runtimeSourceRoots": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["src", "web/src"] }
+        },
+        "sourceExtensions": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": [".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"] }
+        },
+        "excludedDirectoryNames": {
+          "type": "array",
+          "minItems": 11,
+          "maxItems": 11,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["__fixtures__", "__generated__", "__tests__", "build", "dist", "docs", "fixtures", "generated", "node_modules", "test", "tests"] }
+        },
+        "rules": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "oneOf": [
+              { "const": { "id": "toml-direct-runtime-import", "kind": "moduleImport", "value": "toml" } },
+              { "const": { "id": "rustbin-direct-runtime-import", "kind": "moduleImport", "value": "@metaplex-foundation/rustbin" } },
+              { "const": { "id": "jayson-direct-runtime-import-or-transport-use", "kind": "moduleImport", "value": "jayson" } },
+              { "const": { "id": "stream-json-direct-runtime-import-or-filter-use", "kind": "moduleImport", "value": "stream-json" } }
+            ]
+          }
+        }
+      }
+    },
+    "anchorSourceFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modules", "auditedImporters"],
+      "properties": {
+        "modules": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["@coral-xyz/anchor", "@project-serum/anchor"] }
+        },
+        "auditedImporters": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256"],
+            "properties": {
+              "path": { "type": "string", "pattern": "^(src|web/src)/" },
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
+          }
+        }
+      }
+    },
     "exceptions": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["advisoryId", "package", "reason", "owner", "createdAt", "expiresAt", "removalCondition"],
+        "required": ["advisoryId", "package", "severity", "reason", "owner", "createdAt", "expiresAt", "maximumLifetimeDays", "compensatingControls", "removalCondition", "dependencyFingerprint"],
         "properties": {
           "advisoryId": { "type": "string", "pattern": "^GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$" },
           "package": { "type": "string", "minLength": 1 },
@@ -22,7 +94,43 @@
           "expiresAt": { "type": "string", "format": "date" },
           "maximumLifetimeDays": { "type": "integer", "minimum": 1, "maximum": 30 },
           "compensatingControls": { "type": "array", "items": { "type": "string" } },
-          "removalCondition": { "type": "string", "minLength": 1 }
+          "removalCondition": { "type": "string", "minLength": 1 },
+          "dependencyFingerprint": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["topology"],
+            "properties": {
+              "topology": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["packageName", "packagePath", "version", "integrity", "consumers"],
+                  "properties": {
+                    "packageName": { "type": "string", "minLength": 1 },
+                    "packagePath": { "type": "string", "pattern": "^node_modules/" },
+                    "version": { "type": "string", "minLength": 1 },
+                    "integrity": { "type": "string", "pattern": "^sha512-" },
+                    "consumers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["path", "version", "dependencyType", "dependencySpecifier"],
+                        "properties": {
+                          "path": { "type": "string", "pattern": "^node_modules/" },
+                          "version": { "type": "string", "minLength": 1 },
+                          "dependencyType": { "type": "string", "enum": ["dependencies", "optionalDependencies"] },
+                          "dependencySpecifier": { "type": "string", "minLength": 1 }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
