@@ -355,17 +355,23 @@
   纯数据校验和当前 dictionary/binding/manifest 相容性门禁。
 - **树一致性**: 经审核的 PR tree 与 squash integration tree 相同。
 
-### Phase 9C — Canonical Point-in-Time Dataset ⏳ CURRENT
+### Phase 9C — Canonical Point-in-Time Dataset ✅ MERGED / COMPLETE
 
-- **基线**: `feature/orangeai-split@46744b53f2f6b5439a049e86412463c278461e93`。
-- **当前任务**: 将已验证的 9A raw records 与 9B dictionary/bindings 提取为 immutable、research-only
-  canonical dataset，并按显式 `decisionTime` 计算 `available_at <= decision_time` 与逐字段决策输入资格。
-- **停止边界**: 不实现 storage、ResearchDataHub、lineage/version registry、真实 provider、backtest kernel、
-  Phase 9D 或生产交易权威；9C 合并前保持 CURRENT。
+- **实现 PR / 合并提交**: #134 / `cebff72080856e5b4b6216e64cef41267e99eb96`。
+- **已冻结**: immutable、research-only canonical dataset；PIT visibility 与逐字段 decision-input
+  eligibility 继续只按显式 `decisionTime` 在运行时计算 `available_at <= decision_time`。
+- **保留边界**: `UNKNOWN` 与 `DOCUMENTED_RULE_UNMATERIALIZED` 不产生 PIT 资格；无静态 eligibility。
 
-### Phase 9D–9G — 后续门禁（DEFERRED）
+### Phase 9D — Raw + Analytical Research Storage ⏳ CURRENT
 
-- **9D**: Parquet / DuckDB / Polars storage path。
+- **基线**: `feature/orangeai-split@cebff72080856e5b4b6216e64cef41267e99eb96`。
+- **当前任务**: 以 immutable Parquet artifacts + canonical schema + integrity manifest + final commit receipt
+  建立唯一 durable research-storage truth；DuckDB / Polars 仅为验证 bundle 后的只读派生视图。
+- **停止边界**: 不实现 ResearchDataHub、lineage/version/deprecation、真实 provider、backtest kernel、
+  Paper/Testnet/Live 或生产交易权威；9D 合并前保持 CURRENT。
+
+### Phase 9E–9G — 后续门禁（DEFERRED）
+
 - **9E**: ResearchDataHub + DatasetUsagePolicy。
 - **9F**: Data lineage / version / deprecation。
 - **9G**: Research ingestion + first provider qualification。
