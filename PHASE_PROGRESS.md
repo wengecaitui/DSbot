@@ -339,18 +339,25 @@
 - **交付限制**: 无真实 provider、网络实现、Data Dictionary、canonical normalization、ResearchDataHub、
   ResearchBacktestKernel、Paper/Testnet/Live。
 
-### Phase 9A — Internal Research Provider Ingress ⏳ IMPLEMENTATION PR CURRENT
+### Phase 9A — Internal Research Provider Ingress ✅ MERGED / COMPLETE
 
 - **实现基线**: `feature/orangeai-split@4a4bfc54882c7ba90a1b81aceadd06b7aca01bf6`。
-- **当前任务**: 实现内部 `Future Provider Adapter -> ResearchProviderIngress -> validated
-  RawResearchRecord page -> STOP`，不接入任何下游消费者。
+- **实现 PR / 合并提交**: #127 / `17b23fc17dbdceb5800fe587f734a7a6c3dc3fe0`。
+- **已完成**: 内部 `Future Provider Adapter -> ResearchProviderIngress -> validated
+  RawResearchRecord page -> STOP`，未接入任何下游消费者。
 - **冻结边界**: 结构化 `{providerId, adapterId}` 注册表、完整 manifest defensive pin + drift 检查、
   每页一次真实 `describe()` / `fetch()`、外部引用配置门禁、无自动翻页/重试/后台工作。
-- **完成状态**: 当前为实现 PR，合并前不得标记 COMPLETE。
 
-### Phase 9B–9G — 后续门禁（DEFERRED）
+### Phase 9B — Data Dictionary + Source Binding Contract ⏳ CURRENT
 
-- **9B**: Data Dictionary + Field Contract。
+- **基线**: `feature/orangeai-split@17b23fc17dbdceb5800fe587f734a7a6c3dc3fe0`。
+- **当前任务**: 冻结 provider-neutral Canonical Field Dictionary 与 provider-bound DIRECT Source Binding
+  的精确语义、纯数据校验和当前 dictionary/binding/manifest 相容性门禁。
+- **停止边界**: 不实现 normalization、canonical dataset、PIT 可见性计算、数据集资格、真实 provider、
+  storage、lineage 或 ResearchDataHub；不授予生产交易权威。
+
+### Phase 9C–9G — 后续门禁（DEFERRED）
+
 - **9C**: Canonical Point-in-Time Dataset。
 - **9D**: Parquet / DuckDB / Polars storage path。
 - **9E**: ResearchDataHub + DatasetUsagePolicy。
