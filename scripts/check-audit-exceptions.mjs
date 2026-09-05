@@ -2,6 +2,8 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { extname, join, relative, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import ts from 'typescript';
 
 export const ERROR_CODES = Object.freeze({
   SCHEMA_INVALID: 'SECURITY_EXCEPTION_SCHEMA_INVALID',
@@ -25,6 +27,10 @@ export const ERROR_CODES = Object.freeze({
   UNEXPECTED_CONSUMER: 'SECURITY_EXCEPTION_UNEXPECTED_CONSUMER',
   INTEGRITY_MISMATCH: 'SECURITY_EXCEPTION_INTEGRITY_MISMATCH',
   REACHABILITY_GUARD_FAILED: 'SECURITY_EXCEPTION_REACHABILITY_GUARD_FAILED',
+  UNEXPECTED_ANCHOR_IMPORTER: 'SECURITY_EXCEPTION_UNEXPECTED_ANCHOR_IMPORTER',
+  ANCHOR_IMPORTER_MISSING: 'SECURITY_EXCEPTION_ANCHOR_IMPORTER_MISSING',
+  ANCHOR_SOURCE_DRIFT: 'SECURITY_EXCEPTION_ANCHOR_SOURCE_DRIFT',
+  ANCHOR_WORKSPACE_REACHABLE: 'SECURITY_EXCEPTION_ANCHOR_WORKSPACE_REACHABLE',
 });
 
 const REQUIRED_FIELDS = ['advisoryId', 'package', 'severity', 'reason', 'owner', 'createdAt', 'expiresAt', 'maximumLifetimeDays', 'compensatingControls', 'removalCondition'];
@@ -35,10 +41,10 @@ const DEPENDENCY_TYPES = ['dependencies', 'optionalDependencies'];
 const REQUIRED_RUNTIME_SOURCE_ROOTS = ['src', 'web/src'];
 const REQUIRED_RUNTIME_SOURCE_EXTENSIONS = ['.cjs', '.cts', '.js', '.jsx', '.mjs', '.mts', '.ts', '.tsx'];
 const REQUIRED_EXCLUDED_DIRECTORY_NAMES = ['__fixtures__', '__generated__', '__tests__', 'build', 'dist', 'docs', 'fixtures', 'generated', 'node_modules', 'test', 'tests'];
-const SOURCE_RULE_KINDS = ['moduleImport', 'memberAccess'];
+const SOURCE_RULE_KINDS = ['moduleImport'];
 const SOURCE_GAP = String.raw`(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*`;
+const REQUIRED_ANCHOR_MODULES = ['@coral-xyz/anchor', '@project-serum/anchor'];
 const REQUIRED_SOURCE_RULES = [
-  { id: 'anchor-workspace-runtime-use', kind: 'memberAccess', value: 'workspace' },
   { id: 'toml-direct-runtime-import', kind: 'moduleImport', value: 'toml' },
   { id: 'rustbin-direct-runtime-import', kind: 'moduleImport', value: '@metaplex-foundation/rustbin' },
   { id: 'jayson-direct-runtime-import-or-transport-use', kind: 'moduleImport', value: 'jayson' },
@@ -99,6 +105,22 @@ function sourceReachabilityGuardShapeIsValid(guard) {
       rule.id === required.id && rule.kind === required.kind && rule.value === required.value));
 }
 
+function anchorSourceFingerprintShapeIsValid(fingerprint, guard) {
+  if (!fingerprint
+    || !exactStringSet(fingerprint.modules, REQUIRED_ANCHOR_MODULES)
+    || !Array.isArray(fingerprint.auditedImporters)
+    || fingerprint.auditedImporters.length === 0) return false;
+  const paths = fingerprint.auditedImporters.map((entry) => entry?.path);
+  return new Set(paths).size === paths.length
+    && fingerprint.auditedImporters.every((entry) =>
+      entry
+      && typeof entry.path === 'string'
+      && entry.path === normalizeRepositoryPath(entry.path)
+      && isRuntimeSourcePath(entry.path, guard)
+      && typeof entry.sha256 === 'string'
+      && /^[a-f0-9]{64}$/.test(entry.sha256));
+}
+
 function normalizeRepositoryPath(path) {
   return path.replaceAll('\\', '/').replace(/^\.\//, '');
 }
@@ -115,21 +137,76 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function sha256Source(source) {
+  // Git stores these text sources with LF; canonicalize Windows checkout endings
+  // so the same audited source has one fingerprint on local and GitHub runners.
+  return createHash('sha256').update(source.replaceAll('\r\n', '\n'), 'utf8').digest('hex');
+}
+
+function anchorModuleForSpecifier(specifier) {
+  return REQUIRED_ANCHOR_MODULES.find((moduleName) =>
+    specifier === moduleName || specifier.startsWith(`${moduleName}/`)) ?? null;
+}
+
+function literalModuleSpecifier(node) {
+  return ts.isStringLiteralLike(node) ? node.text : null;
+}
+
+function inspectAnchorImports(source) {
+  const sourceFile = ts.createSourceFile('runtime-source.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const imports = [];
+  let workspaceReachable = false;
+
+  const record = (specifier, namedBindings) => {
+    const moduleName = anchorModuleForSpecifier(specifier);
+    if (!moduleName) return;
+    imports.push({ moduleName, specifier });
+    const suffix = specifier.slice(moduleName.length);
+    if (/(?:^|\/)workspace(?:\/|\.|$)/i.test(suffix)) workspaceReachable = true;
+    if (
+      namedBindings &&
+      (ts.isNamedImports(namedBindings) || ts.isNamedExports(namedBindings))
+    ) {
+      for (const element of namedBindings.elements) {
+        if ((element.propertyName?.text ?? element.name.text) === 'workspace') workspaceReachable = true;
+      }
+    }
+  };
+
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node)) {
+      const specifier = literalModuleSpecifier(node.moduleSpecifier);
+      if (specifier) record(specifier, node.importClause?.namedBindings);
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      const specifier = literalModuleSpecifier(node.moduleSpecifier);
+      if (specifier) {
+        record(specifier, node.exportClause);
+        // Re-exporting the full Anchor namespace/object invalidates the audited boundary.
+        if (
+          anchorModuleForSpecifier(specifier) &&
+          (!node.exportClause || ts.isNamespaceExport(node.exportClause))
+        ) workspaceReachable = true;
+      }
+    } else if (ts.isImportEqualsDeclaration(node)
+      && ts.isExternalModuleReference(node.moduleReference)
+      && node.moduleReference.expression) {
+      const specifier = literalModuleSpecifier(node.moduleReference.expression);
+      if (specifier) record(specifier);
+    } else if (ts.isCallExpression(node) && node.arguments.length === 1) {
+      const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = ts.isIdentifier(node.expression) && node.expression.text === 'require';
+      if (isDynamicImport || isRequire) {
+        const specifier = literalModuleSpecifier(node.arguments[0]);
+        if (specifier) record(specifier);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return { imports, workspaceReachable };
+}
+
 function ruleMatchesSource(rule, source) {
-  if (rule.kind === 'memberAccess') {
-    // Temporary, deliberately conservative property guard: the receiver's name
-    // and module provenance must not affect admission. Also covers optional
-    // chaining, computed literal keys, destructuring and named imports/exports.
-    // Unrelated workspace properties (including object literals) may be rejected.
-    const member = escapeRegExp(rule.value);
-    const literal = `(?:'${member}'|"${member}"|\\x60${member}\\x60)`;
-    const memberPattern = `\\.${SOURCE_GAP}${member}\\b|\\[${SOURCE_GAP}${literal}${SOURCE_GAP}\\]`;
-    const bindingPattern = `[{,]${SOURCE_GAP}(?:${member}\\b|${literal})`;
-    if (new RegExp(`(?:${memberPattern}|${bindingPattern})`, 'i').test(source)) return true;
-    // A direct workspace submodule import reaches the same sink without any
-    // property access. Keep ordinary Anchor imports (Wallet/Provider/BN) allowed.
-    return /['"`]@(?:coral-xyz|project-serum)\/anchor(?:\/[^'"`\s]*)?\/workspace(?:[./'"`])/.test(source);
-  }
   const moduleName = escapeRegExp(rule.value);
   const moduleSpecifier = `${moduleName}(?:/[^'"\\x60\\s)]+)?`;
   return new RegExp(`(?:\\bfrom${SOURCE_GAP}|\\bimport${SOURCE_GAP}(?:\\(${SOURCE_GAP})?|\\brequire${SOURCE_GAP}(?:\\?\\.${SOURCE_GAP})?\\(${SOURCE_GAP})['"\\x60]${moduleSpecifier}['"\\x60]`, 'm').test(source);
@@ -139,6 +216,10 @@ export function validateSourceReachabilityGuard(registry, runtimeSources) {
   const guard = registry?.sourceReachabilityGuard;
   if (!sourceReachabilityGuardShapeIsValid(guard)) {
     return [{ code: ERROR_CODES.REACHABILITY_GUARD_FAILED, detail: 'sourceReachabilityGuard is missing, malformed, or has a narrowed scan boundary' }];
+  }
+  const anchorFingerprint = registry?.anchorSourceFingerprint;
+  if (!anchorSourceFingerprintShapeIsValid(anchorFingerprint, guard)) {
+    return [{ code: ERROR_CODES.ANCHOR_SOURCE_DRIFT, detail: 'anchorSourceFingerprint is missing, malformed, narrowed, or outside the audited runtime boundary' }];
   }
   if (!Array.isArray(runtimeSources) || runtimeSources.length === 0) {
     return [{ code: ERROR_CODES.REACHABILITY_GUARD_FAILED, detail: 'runtime source inventory is missing or empty' }];
@@ -167,6 +248,29 @@ export function validateSourceReachabilityGuard(registry, runtimeSources) {
           detail: `${normalizeRepositoryPath(source.path)} violates source reachability rule ${rule.id}`,
         });
       }
+    }
+  }
+
+  const expectedImporters = new Map(anchorFingerprint.auditedImporters.map((entry) => [entry.path, entry.sha256]));
+  const currentImporters = new Map();
+  for (const source of sources) {
+    const path = normalizeRepositoryPath(source.path);
+    const inspection = inspectAnchorImports(source.content);
+    if (inspection.imports.length === 0) continue;
+    currentImporters.set(path, source);
+    if (inspection.workspaceReachable) {
+      errors.push({ code: ERROR_CODES.ANCHOR_WORKSPACE_REACHABLE, detail: `${path} directly reaches or re-exports Anchor workspace` });
+    }
+    if (!expectedImporters.has(path)) {
+      errors.push({ code: ERROR_CODES.UNEXPECTED_ANCHOR_IMPORTER, detail: `${path} is not an audited Anchor importer` });
+    }
+  }
+  for (const [path, expectedSha256] of expectedImporters) {
+    const source = currentImporters.get(path);
+    if (!source) {
+      errors.push({ code: ERROR_CODES.ANCHOR_IMPORTER_MISSING, detail: `${path} is missing from the current Anchor importer set` });
+    } else if (sha256Source(source.content) !== expectedSha256) {
+      errors.push({ code: ERROR_CODES.ANCHOR_SOURCE_DRIFT, detail: `${path} source SHA-256 differs from the audited fingerprint` });
     }
   }
   return errors;
@@ -318,77 +422,123 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-export function runSecurityExceptionNegativeProbes(registry, lockfile) {
+export function runSecurityExceptionNegativeProbes(registry, lockfile, runtimeSources) {
   const guard = registry.sourceReachabilityGuard;
-  const clean = { path: 'src/security-probe.ts', content: 'export const safe = true;' };
-  const reachabilityCases = [
-    ['anchor.workspace', 'const program = anchor.workspace.Dsbot;'],
-    ['aliased dynamic import', "const a = await import('@coral-xyz/anchor'); a.workspace.Program;"],
-    ['optional member', 'a?.workspace.Program;'],
-    ['single-quoted bracket', "a['workspace'].Program;"],
-    ['double-quoted bracket', 'a["workspace"].Program;'],
-    ['template-literal bracket', 'a[`workspace`].Program;'],
-    ['optional bracket', "a?.['workspace'].Program;"],
-    ['destructuring', 'const { workspace } = anchor;'],
-    ['renamed destructuring', 'const { workspace: ws } = anchor;'],
-    ['later destructuring member', 'const { BN, workspace: ws } = a;'],
-    ['comment-separated member', 'a /* receiver */ ?. /* member */ workspace.Program;'],
-    ['comment-separated destructuring', 'const { /* key */ workspace: ws } = a;'],
-    ['computed destructuring', 'const { ["workspace"]: ws } = a;'],
-    ['quoted destructuring', 'const { "workspace": ws } = a;'],
-    ['unrelated receiver', 'unrelated.workspace;'],
+  if (!Array.isArray(runtimeSources) || runtimeSources.length === 0) throw new Error('negative probes require the complete runtime source inventory');
+  let passed = 0;
+  const expectCode = (label, errors, code) => {
+    if (!errors.some((error) => error.code === code)) throw new Error(`negative probe unexpectedly passed: ${label}`);
+    passed += 1;
+  };
+  const expectPass = (label, probeRegistry, sources) => {
+    const errors = validateSourceReachabilityGuard(probeRegistry, sources);
+    if (errors.length > 0) throw new Error(`positive probe unexpectedly failed: ${label}: ${JSON.stringify(errors)}`);
+    passed += 1;
+  };
+
+  expectPass('current audited Anchor importer set', registry, runtimeSources);
+  expectPass('LF checkout Anchor importer fingerprints', registry, runtimeSources.map((source) => ({
+    ...source,
+    content: source.content.replaceAll('\r\n', '\n'),
+  })));
+  for (const [label, content] of [
+    ['generic config.workspace', 'export const value = config.workspace;'],
+    ['generic CSS .workspace', 'export const css = `.workspace { display: grid; }`;'],
+    ['generic workspace type field', 'export interface Config { workspace: string }'],
+  ]) {
+    expectPass(label, registry, [...runtimeSources, { path: `src/security-${label.replaceAll(' ', '-')}.ts`, content }]);
+  }
+
+  for (const moduleName of REQUIRED_ANCHOR_MODULES) {
+    const moduleLabel = moduleName.includes('coral') ? 'coral' : 'serum';
+    for (const [form, content] of [
+      ['side-effect', `import '${moduleName}';`],
+      ['namespace', `import * as a from '${moduleName}'; a.Wallet;`],
+      ['default', `import a from '${moduleName}'; a.Wallet;`],
+      ['named', `import { BN } from '${moduleName}';`],
+      ['require', `const a = require('${moduleName}'); a.Wallet;`],
+      ['dynamic', `const a = await import('${moduleName}'); a.Wallet;`],
+    ]) {
+      const sources = [...runtimeSources, { path: `src/unexpected-${moduleLabel}-${form}.ts`, content }];
+      expectCode(`new ${moduleName} ${form} importer`, validateSourceReachabilityGuard(registry, sources), ERROR_CODES.UNEXPECTED_ANCHOR_IMPORTER);
+    }
+  }
+
+  const auditedPath = registry.anchorSourceFingerprint.auditedImporters[0].path;
+  const mutateAudited = (suffix) => runtimeSources.map((source) =>
+    normalizeRepositoryPath(source.path) === auditedPath ? { ...source, content: `${source.content}\n${suffix}\n` } : source);
+  expectCode('audited importer workspace member drift', validateSourceReachabilityGuard(registry, mutateAudited('a.workspace.Program;')), ERROR_CODES.ANCHOR_SOURCE_DRIFT);
+  expectCode('audited importer workspace destructuring drift', validateSourceReachabilityGuard(registry, mutateAudited('const { workspace: ws } = a;')), ERROR_CODES.ANCHOR_SOURCE_DRIFT);
+  expectCode('audited importer unrelated source drift', validateSourceReachabilityGuard(registry, mutateAudited('// requires renewed source audit')), ERROR_CODES.ANCHOR_SOURCE_DRIFT);
+  expectCode('missing audited importer', validateSourceReachabilityGuard(registry, runtimeSources.filter((source) => normalizeRepositoryPath(source.path) !== auditedPath)), ERROR_CODES.ANCHOR_IMPORTER_MISSING);
+
+  for (const moduleName of REQUIRED_ANCHOR_MODULES) {
+    const sources = [...runtimeSources, { path: `src/workspace-${moduleName.includes('coral') ? 'coral' : 'serum'}.ts`, content: `import ws from '${moduleName}/dist/cjs/workspace.js';` }];
+    expectCode(`${moduleName} workspace submodule`, validateSourceReachabilityGuard(registry, sources), ERROR_CODES.ANCHOR_WORKSPACE_REACHABLE);
+    const namedSources = [...runtimeSources, { path: `src/named-${moduleName.includes('coral') ? 'coral' : 'serum'}.ts`, content: `import { workspace as ws } from '${moduleName}';` }];
+    expectCode(`${moduleName} named workspace import`, validateSourceReachabilityGuard(registry, namedSources), ERROR_CODES.ANCHOR_WORKSPACE_REACHABLE);
+    const namespaceExportSources = [...runtimeSources, { path: `src/export-${moduleName.includes('coral') ? 'coral' : 'serum'}.ts`, content: `export * as anchor from '${moduleName}';` }];
+    expectCode(`${moduleName} namespace re-export`, validateSourceReachabilityGuard(registry, namespaceExportSources), ERROR_CODES.ANCHOR_WORKSPACE_REACHABLE);
+  }
+
+  for (const [label, content] of [
     ['direct toml import', "import toml from 'toml';"],
     ['direct rustbin import', "const rustbin = require('@metaplex-foundation/rustbin');"],
-    ['jayson TCP/TLS reachability', "import jayson from 'jayson'; jayson.Server.tcp({}); jayson.Server.tls({});"],
-    ['vulnerable stream-json filters', "import { pick } from 'stream-json/filters/Pick'; import { ignore } from 'stream-json/filters/Ignore'; import { filter } from 'stream-json/filters/Filter'; import { replace } from 'stream-json/filters/Replace';"],
-  ];
-  for (const moduleName of ['@coral-xyz/anchor', '@project-serum/anchor']) {
-    reachabilityCases.push(
-      [`${moduleName} namespace alias`, `import * as a from '${moduleName}'; a.workspace.Program;`],
-      [`${moduleName} named import`, `import { workspace } from '${moduleName}';`],
-      [`${moduleName} renamed import`, `import { BN, workspace as ws } from '${moduleName}';`],
-      [`${moduleName} direct require`, `const { workspace } = require('${moduleName}');`],
-      [`${moduleName} renamed require`, `const { workspace: ws } = require('${moduleName}');`],
-      [`${moduleName} direct dynamic import`, `const { workspace } = await import('${moduleName}');`],
-      [`${moduleName} workspace submodule`, `import ws from '${moduleName}/dist/cjs/workspace.js';`],
-    );
+    ['direct jayson import', "import jayson from 'jayson';"],
+    ['direct stream-json import', "import { pick } from 'stream-json/filters/Pick';"],
+  ]) {
+    expectCode(label, validateSourceReachabilityGuard(registry, [...runtimeSources, { path: `src/${label.replaceAll(' ', '-')}.ts`, content }]), ERROR_CODES.REACHABILITY_GUARD_FAILED);
   }
-  let passed = 0;
-  for (const [label, content] of reachabilityCases) {
-    for (const root of REQUIRED_RUNTIME_SOURCE_ROOTS) {
-      const errors = validateSourceReachabilityGuard(registry, [{ path: `${root}/security-probe.ts`, content }]);
-      if (!errors.some((error) => error.code === ERROR_CODES.REACHABILITY_GUARD_FAILED)) throw new Error(`negative probe unexpectedly passed: ${root}: ${label}`);
-      passed += 1;
-    }
-  }
-  for (const moduleName of ['@coral-xyz/anchor', '@project-serum/anchor']) {
-    for (const member of ['Wallet', 'AnchorProvider', 'BN']) {
-      for (const root of REQUIRED_RUNTIME_SOURCE_ROOTS) {
-        const content = `const anchor = await import('${moduleName}'); anchor.${member};`;
-        const errors = validateSourceReachabilityGuard(registry, [{ path: `${root}/security-probe.ts`, content }]);
-        if (errors.length > 0) throw new Error(`safe Anchor probe rejected: ${root}: ${moduleName}.${member}`);
-        passed += 1;
-      }
-    }
-  }
+
+  const narrowed = clone(registry);
+  narrowed.anchorSourceFingerprint.auditedImporters.pop();
+  expectCode('narrowed Anchor fingerprint', validateSourceReachabilityGuard(narrowed, runtimeSources), ERROR_CODES.UNEXPECTED_ANCHOR_IMPORTER);
+  const removed = clone(registry);
+  delete removed.anchorSourceFingerprint;
+  expectCode('removed Anchor fingerprint', validateSourceReachabilityGuard(removed, runtimeSources), ERROR_CODES.ANCHOR_SOURCE_DRIFT);
+
   const excludedErrors = validateSourceReachabilityGuard(registry, [
-    clean,
-    { path: 'docs/security.md', content: "import toml from 'toml'; anchor.workspace" },
+    ...runtimeSources,
+    { path: 'docs/security.md', content: "import toml from 'toml'; import { workspace } from '@coral-xyz/anchor';" },
     { path: 'tests/security/reachability.test.ts', content: "import jayson from 'jayson';" },
     { path: 'src/__tests__/fixture.ts', content: "import { pick } from 'stream-json/filters/Pick';" },
-    ...REQUIRED_RUNTIME_SOURCE_ROOTS.flatMap((root) => REQUIRED_EXCLUDED_DIRECTORY_NAMES.map((directory) => ({
-      path: `${root}/${directory}/security-probe.ts`, content: 'const { workspace: ws } = a; a.workspace;',
-    }))),
   ]);
   if (excludedErrors.length > 0) throw new Error('excluded docs/tests negative probe produced a false positive');
+  passed += 1;
 
-  const integrityRegistry = clone(registry);
-  const integrityLockfile = clone(lockfile);
-  const target = integrityRegistry.exceptions[0].dependencyFingerprint.topology[0];
-  integrityLockfile.packages[target.packagePath].integrity = 'sha512-negative-probe-mismatch';
-  const integrityErrors = validateDependencyFingerprint(integrityRegistry.exceptions[0], integrityLockfile);
-  if (!integrityErrors.some((error) => error.code === ERROR_CODES.INTEGRITY_MISMATCH)) throw new Error('integrity mismatch negative probe unexpectedly passed');
-  return { passed: passed + 2, total: passed + 2, guard };
+  const fingerprintMutations = [
+    ['integrity mismatch', ERROR_CODES.INTEGRITY_MISMATCH, (registryCopy, lockfileCopy) => {
+      const target = registryCopy.exceptions[0].dependencyFingerprint.topology[0];
+      lockfileCopy.packages[target.packagePath].integrity = 'sha512-negative-probe-mismatch';
+    }],
+    ['version mismatch', ERROR_CODES.VERSION_MISMATCH, (registryCopy, lockfileCopy) => {
+      const target = registryCopy.exceptions[0].dependencyFingerprint.topology[0];
+      lockfileCopy.packages[target.packagePath].version = '0.0.0-negative-probe';
+    }],
+    ['unexpected dependency consumer', ERROR_CODES.UNEXPECTED_CONSUMER, (_registryCopy, lockfileCopy) => {
+      lockfileCopy.packages['node_modules/security-negative-probe'] = { version: '1.0.0', dependencies: { 'stream-json': '^1.9.1' } };
+    }],
+  ];
+  for (const [label, code, mutate] of fingerprintMutations) {
+    const registryCopy = clone(registry);
+    const lockfileCopy = clone(lockfile);
+    mutate(registryCopy, lockfileCopy);
+    expectCode(label, validateDependencyFingerprint(registryCopy.exceptions[0], lockfileCopy), code);
+  }
+
+  for (const [label, mutate, code] of [
+    ['expiry', (registryCopy) => { registryCopy.exceptions[0].expiresAt = '2026-09-05'; }, ERROR_CODES.EXPIRED],
+    ['wildcard', (registryCopy) => { registryCopy.exceptions[0].advisoryId = '*'; }, ERROR_CODES.WILDCARD],
+  ]) {
+    const registryCopy = clone(registry);
+    mutate(registryCopy);
+    const result = validateAuditExceptions({ registry: registryCopy, allowlist: { allowlist: registry.exceptions.map((entry) => entry.advisoryId) }, now: '2026-09-05' });
+    expectCode(label, result.errors, code);
+  }
+  const unauthorized = validateAuditExceptions({ registry, allowlist: { allowlist: [...registry.exceptions.map((entry) => entry.advisoryId), 'GHSA-aaaa-bbbb-cccc'] }, now: '2026-09-05' });
+  expectCode('unauthorized GHSA allowlist entry', unauthorized.errors, ERROR_CODES.ALLOWLIST_MISMATCH);
+
+  return { passed, total: passed, guard, anchorSourceFingerprint: registry.anchorSourceFingerprint };
 }
 
 // CLI entry — only runs when executed directly
@@ -415,7 +565,7 @@ if (isCLI) {
   const result = validateAuditExceptions({ registry, allowlist, lockfile, runtimeSources, now, enforceDependencyFingerprint: true, enforceSourceReachabilityGuard: true });
   if (result.errors.length > 0) { for (const e of result.errors) console.error(`[FAIL] ${e.code}: ${e.detail}`); process.exit(1); }
   try {
-    const probes = runSecurityExceptionNegativeProbes(registry, lockfile);
+    const probes = runSecurityExceptionNegativeProbes(registry, lockfile, runtimeSources);
     console.log(`[OK] negative security probes: ${probes.passed}/${probes.total}`);
   } catch (error) {
     console.error(`[FAIL] ${ERROR_CODES.REACHABILITY_GUARD_FAILED}: ${error instanceof Error ? error.message : String(error)}`);

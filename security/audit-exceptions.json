@@ -5,11 +5,24 @@
     "sourceExtensions": [".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"],
     "excludedDirectoryNames": ["__fixtures__", "__generated__", "__tests__", "build", "dist", "docs", "fixtures", "generated", "node_modules", "test", "tests"],
     "rules": [
-      { "id": "anchor-workspace-runtime-use", "kind": "memberAccess", "value": "workspace" },
       { "id": "toml-direct-runtime-import", "kind": "moduleImport", "value": "toml" },
       { "id": "rustbin-direct-runtime-import", "kind": "moduleImport", "value": "@metaplex-foundation/rustbin" },
       { "id": "jayson-direct-runtime-import-or-transport-use", "kind": "moduleImport", "value": "jayson" },
       { "id": "stream-json-direct-runtime-import-or-filter-use", "kind": "moduleImport", "value": "stream-json" }
+    ]
+  },
+  "anchorSourceFingerprint": {
+    "modules": ["@coral-xyz/anchor", "@project-serum/anchor"],
+    "auditedImporters": [
+      { "path": "src/agents/handlers/solana.ts", "sha256": "d70bc44d2a6f1366c097deb83b73d1ae1f291ca10d23f632ce690c5f36c3b908" },
+      { "path": "src/feeds/drift/trading.ts", "sha256": "62087b8dfe808b14dcfe3195956a8f89195c4ef10e789d0a148859425597e09a" },
+      { "path": "src/skills/bundled/bags/index.ts", "sha256": "aee2e885073a3c0ba26f4813e934760511ccd2683e57e1fb2b080dc47f18148b" },
+      { "path": "src/solana/drift.ts", "sha256": "7d52d96c30a48c9bf0e5b4f880a4b6486b83114b30ac51c02713710e8cd6a045" },
+      { "path": "src/solana/jupiter.ts", "sha256": "42a77789e013fdabe80f8446afadcfa07869b98586a5dcf6cbffc473dd734a04" },
+      { "path": "src/solana/meteora-dbc.ts", "sha256": "ddeb0e7a54a35d115625b0cfca52345ec1f8a5fb442952b353ec04a51aa1a4db" },
+      { "path": "src/solana/meteora.ts", "sha256": "a13dbd8ab7d87da1061cedf2c4c5c4bae489367a0a78175138a3b3c0d00a2371" },
+      { "path": "src/solana/orca.ts", "sha256": "516fb3f72252060b31d2d344f6e246111b5bbf401323d189ed9126d5520f5394" },
+      { "path": "src/solana/swarm-builders.ts", "sha256": "ebc4be60faa14ae37e0dd9d9c5044e7fbd80aee98e6df5169bc749757c11d48d" }
     ]
   },
   "exceptions": [
@@ -85,9 +98,10 @@
       "compensatingControls": [
         "Only the exact GHSA is allowlisted; the high audit threshold remains enabled.",
         "The package-lock fingerprint pins toml 3.0.0 and every current direct Anchor or rustbin consumer.",
-        "DSbot runtime source must not access or destructure the workspace member through any receiver or import alias, import Anchor workspace directly, or invoke rustbin runtime paths during this exception. The temporary guard conservatively rejects unrelated workspace member/binding use too."
+        "The exact current runtime Anchor importer set and full source SHA-256 values are pinned; any new, missing, or changed importer requires re-audit and fails closed.",
+        "DSbot must not import or re-export Anchor workspace, or invoke rustbin runtime paths during this exception."
       ],
-      "removalCondition": "Remove immediately when Anchor or rustbin adopts a safe toml >=4.2.0 path, if the dependency fingerprint or topology changes, if any new consumer reaches toml, if DSbot begins accessing or destructuring workspace through any receiver/import alias or invoking rustbin runtime paths, or no later than 2026-09-11.",
+      "removalCondition": "Remove immediately when Anchor or rustbin adopts a safe toml >=4.2.0 path, if the dependency or Anchor source fingerprint changes, if any new consumer reaches toml, if DSbot reaches Anchor workspace or invokes rustbin runtime paths, or no later than 2026-09-11.",
       "dependencyFingerprint": {
         "topology": [
           {
@@ -142,9 +156,10 @@
       "compensatingControls": [
         "Only the exact GHSA is allowlisted; the high audit threshold remains enabled.",
         "The package-lock fingerprint pins toml 3.0.0 and every current direct Anchor or rustbin consumer.",
-        "DSbot must not use anchor.workspace or invoke rustbin runtime paths during this exception."
+        "The exact current runtime Anchor importer set and full source SHA-256 values are pinned; any new, missing, or changed importer requires re-audit and fails closed.",
+        "DSbot must not import or re-export Anchor workspace, or invoke rustbin runtime paths during this exception."
       ],
-      "removalCondition": "Remove immediately when Anchor or rustbin adopts a safe toml >=4.2.0 path, if the dependency fingerprint or topology changes, if any new consumer reaches toml, if DSbot begins using anchor.workspace or invoking rustbin runtime paths, or no later than 2026-09-11.",
+      "removalCondition": "Remove immediately when Anchor or rustbin adopts a safe toml >=4.2.0 path, if the dependency or Anchor source fingerprint changes, if any new consumer reaches toml, if DSbot reaches Anchor workspace or invokes rustbin runtime paths, or no later than 2026-09-11.",
       "dependencyFingerprint": {
         "topology": [
           {

@@ -5,7 +5,7 @@
   "description": "Time-bounded security audit exception registry for audit-ci allowlist entries.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sourceReachabilityGuard", "exceptions"],
+  "required": ["sourceReachabilityGuard", "anchorSourceFingerprint", "exceptions"],
   "properties": {
     "$schema": { "type": "string" },
     "sourceReachabilityGuard": {
@@ -36,17 +36,44 @@
         },
         "rules": {
           "type": "array",
-          "minItems": 5,
-          "maxItems": 5,
+          "minItems": 4,
+          "maxItems": 4,
           "uniqueItems": true,
           "items": {
             "oneOf": [
-              { "const": { "id": "anchor-workspace-runtime-use", "kind": "memberAccess", "value": "workspace" } },
               { "const": { "id": "toml-direct-runtime-import", "kind": "moduleImport", "value": "toml" } },
               { "const": { "id": "rustbin-direct-runtime-import", "kind": "moduleImport", "value": "@metaplex-foundation/rustbin" } },
               { "const": { "id": "jayson-direct-runtime-import-or-transport-use", "kind": "moduleImport", "value": "jayson" } },
               { "const": { "id": "stream-json-direct-runtime-import-or-filter-use", "kind": "moduleImport", "value": "stream-json" } }
             ]
+          }
+        }
+      }
+    },
+    "anchorSourceFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modules", "auditedImporters"],
+      "properties": {
+        "modules": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["@coral-xyz/anchor", "@project-serum/anchor"] }
+        },
+        "auditedImporters": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256"],
+            "properties": {
+              "path": { "type": "string", "pattern": "^(src|web/src)/" },
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            }
           }
         }
       }
