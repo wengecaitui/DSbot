@@ -41,7 +41,7 @@
           "uniqueItems": true,
           "items": {
             "oneOf": [
-              { "const": { "id": "anchor-workspace-runtime-use", "kind": "memberAccess", "value": "anchor.workspace" } },
+              { "const": { "id": "anchor-workspace-runtime-use", "kind": "memberAccess", "value": "workspace" } },
               { "const": { "id": "toml-direct-runtime-import", "kind": "moduleImport", "value": "toml" } },
               { "const": { "id": "rustbin-direct-runtime-import", "kind": "moduleImport", "value": "@metaplex-foundation/rustbin" } },
               { "const": { "id": "jayson-direct-runtime-import-or-transport-use", "kind": "moduleImport", "value": "jayson" } },

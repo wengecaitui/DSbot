@@ -38,7 +38,7 @@ const REQUIRED_EXCLUDED_DIRECTORY_NAMES = ['__fixtures__', '__generated__', '__t
 const SOURCE_RULE_KINDS = ['moduleImport', 'memberAccess'];
 const SOURCE_GAP = String.raw`(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*`;
 const REQUIRED_SOURCE_RULES = [
-  { id: 'anchor-workspace-runtime-use', kind: 'memberAccess', value: 'anchor.workspace' },
+  { id: 'anchor-workspace-runtime-use', kind: 'memberAccess', value: 'workspace' },
   { id: 'toml-direct-runtime-import', kind: 'moduleImport', value: 'toml' },
   { id: 'rustbin-direct-runtime-import', kind: 'moduleImport', value: '@metaplex-foundation/rustbin' },
   { id: 'jayson-direct-runtime-import-or-transport-use', kind: 'moduleImport', value: 'jayson' },
@@ -117,10 +117,18 @@ function escapeRegExp(value) {
 
 function ruleMatchesSource(rule, source) {
   if (rule.kind === 'memberAccess') {
-    const segments = rule.value.split('.').map(escapeRegExp);
-    const [first, ...rest] = segments;
-    const memberPattern = rest.map((segment) => `(?:${SOURCE_GAP}\\?\\.${SOURCE_GAP}${segment}\\b|${SOURCE_GAP}\\.${SOURCE_GAP}${segment}\\b|${SOURCE_GAP}\\[${SOURCE_GAP}['"\\x60]${segment}['"\\x60]${SOURCE_GAP}\\])`).join('');
-    return new RegExp(`\\b${first}${memberPattern}`, 'i').test(source);
+    // Temporary, deliberately conservative property guard: the receiver's name
+    // and module provenance must not affect admission. Also covers optional
+    // chaining, computed literal keys, destructuring and named imports/exports.
+    // Unrelated workspace properties (including object literals) may be rejected.
+    const member = escapeRegExp(rule.value);
+    const literal = `(?:'${member}'|"${member}"|\\x60${member}\\x60)`;
+    const memberPattern = `\\.${SOURCE_GAP}${member}\\b|\\[${SOURCE_GAP}${literal}${SOURCE_GAP}\\]`;
+    const bindingPattern = `[{,]${SOURCE_GAP}(?:${member}\\b|${literal})`;
+    if (new RegExp(`(?:${memberPattern}|${bindingPattern})`, 'i').test(source)) return true;
+    // A direct workspace submodule import reaches the same sink without any
+    // property access. Keep ordinary Anchor imports (Wallet/Provider/BN) allowed.
+    return /['"`]@(?:coral-xyz|project-serum)\/anchor(?:\/[^'"`\s]*)?\/workspace(?:[./'"`])/.test(source);
   }
   const moduleName = escapeRegExp(rule.value);
   const moduleSpecifier = `${moduleName}(?:/[^'"\\x60\\s)]+)?`;
@@ -315,20 +323,62 @@ export function runSecurityExceptionNegativeProbes(registry, lockfile) {
   const clean = { path: 'src/security-probe.ts', content: 'export const safe = true;' };
   const reachabilityCases = [
     ['anchor.workspace', 'const program = anchor.workspace.Dsbot;'],
+    ['aliased dynamic import', "const a = await import('@coral-xyz/anchor'); a.workspace.Program;"],
+    ['optional member', 'a?.workspace.Program;'],
+    ['single-quoted bracket', "a['workspace'].Program;"],
+    ['double-quoted bracket', 'a["workspace"].Program;'],
+    ['template-literal bracket', 'a[`workspace`].Program;'],
+    ['optional bracket', "a?.['workspace'].Program;"],
+    ['destructuring', 'const { workspace } = anchor;'],
+    ['renamed destructuring', 'const { workspace: ws } = anchor;'],
+    ['later destructuring member', 'const { BN, workspace: ws } = a;'],
+    ['comment-separated member', 'a /* receiver */ ?. /* member */ workspace.Program;'],
+    ['comment-separated destructuring', 'const { /* key */ workspace: ws } = a;'],
+    ['computed destructuring', 'const { ["workspace"]: ws } = a;'],
+    ['quoted destructuring', 'const { "workspace": ws } = a;'],
+    ['unrelated receiver', 'unrelated.workspace;'],
     ['direct toml import', "import toml from 'toml';"],
     ['direct rustbin import', "const rustbin = require('@metaplex-foundation/rustbin');"],
     ['jayson TCP/TLS reachability', "import jayson from 'jayson'; jayson.Server.tcp({}); jayson.Server.tls({});"],
     ['vulnerable stream-json filters', "import { pick } from 'stream-json/filters/Pick'; import { ignore } from 'stream-json/filters/Ignore'; import { filter } from 'stream-json/filters/Filter'; import { replace } from 'stream-json/filters/Replace';"],
   ];
+  for (const moduleName of ['@coral-xyz/anchor', '@project-serum/anchor']) {
+    reachabilityCases.push(
+      [`${moduleName} namespace alias`, `import * as a from '${moduleName}'; a.workspace.Program;`],
+      [`${moduleName} named import`, `import { workspace } from '${moduleName}';`],
+      [`${moduleName} renamed import`, `import { BN, workspace as ws } from '${moduleName}';`],
+      [`${moduleName} direct require`, `const { workspace } = require('${moduleName}');`],
+      [`${moduleName} renamed require`, `const { workspace: ws } = require('${moduleName}');`],
+      [`${moduleName} direct dynamic import`, `const { workspace } = await import('${moduleName}');`],
+      [`${moduleName} workspace submodule`, `import ws from '${moduleName}/dist/cjs/workspace.js';`],
+    );
+  }
+  let passed = 0;
   for (const [label, content] of reachabilityCases) {
-    const errors = validateSourceReachabilityGuard(registry, [{ ...clean, content }]);
-    if (!errors.some((error) => error.code === ERROR_CODES.REACHABILITY_GUARD_FAILED)) throw new Error(`negative probe unexpectedly passed: ${label}`);
+    for (const root of REQUIRED_RUNTIME_SOURCE_ROOTS) {
+      const errors = validateSourceReachabilityGuard(registry, [{ path: `${root}/security-probe.ts`, content }]);
+      if (!errors.some((error) => error.code === ERROR_CODES.REACHABILITY_GUARD_FAILED)) throw new Error(`negative probe unexpectedly passed: ${root}: ${label}`);
+      passed += 1;
+    }
+  }
+  for (const moduleName of ['@coral-xyz/anchor', '@project-serum/anchor']) {
+    for (const member of ['Wallet', 'AnchorProvider', 'BN']) {
+      for (const root of REQUIRED_RUNTIME_SOURCE_ROOTS) {
+        const content = `const anchor = await import('${moduleName}'); anchor.${member};`;
+        const errors = validateSourceReachabilityGuard(registry, [{ path: `${root}/security-probe.ts`, content }]);
+        if (errors.length > 0) throw new Error(`safe Anchor probe rejected: ${root}: ${moduleName}.${member}`);
+        passed += 1;
+      }
+    }
   }
   const excludedErrors = validateSourceReachabilityGuard(registry, [
     clean,
     { path: 'docs/security.md', content: "import toml from 'toml'; anchor.workspace" },
     { path: 'tests/security/reachability.test.ts', content: "import jayson from 'jayson';" },
     { path: 'src/__tests__/fixture.ts', content: "import { pick } from 'stream-json/filters/Pick';" },
+    ...REQUIRED_RUNTIME_SOURCE_ROOTS.flatMap((root) => REQUIRED_EXCLUDED_DIRECTORY_NAMES.map((directory) => ({
+      path: `${root}/${directory}/security-probe.ts`, content: 'const { workspace: ws } = a; a.workspace;',
+    }))),
   ]);
   if (excludedErrors.length > 0) throw new Error('excluded docs/tests negative probe produced a false positive');
 
@@ -338,7 +388,7 @@ export function runSecurityExceptionNegativeProbes(registry, lockfile) {
   integrityLockfile.packages[target.packagePath].integrity = 'sha512-negative-probe-mismatch';
   const integrityErrors = validateDependencyFingerprint(integrityRegistry.exceptions[0], integrityLockfile);
   if (!integrityErrors.some((error) => error.code === ERROR_CODES.INTEGRITY_MISMATCH)) throw new Error('integrity mismatch negative probe unexpectedly passed');
-  return { passed: reachabilityCases.length + 2, total: reachabilityCases.length + 2, guard };
+  return { passed: passed + 2, total: passed + 2, guard };
 }
 
 // CLI entry — only runs when executed directly

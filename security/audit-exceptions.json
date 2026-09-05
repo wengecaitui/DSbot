@@ -5,7 +5,7 @@
     "sourceExtensions": [".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"],
     "excludedDirectoryNames": ["__fixtures__", "__generated__", "__tests__", "build", "dist", "docs", "fixtures", "generated", "node_modules", "test", "tests"],
     "rules": [
-      { "id": "anchor-workspace-runtime-use", "kind": "memberAccess", "value": "anchor.workspace" },
+      { "id": "anchor-workspace-runtime-use", "kind": "memberAccess", "value": "workspace" },
       { "id": "toml-direct-runtime-import", "kind": "moduleImport", "value": "toml" },
       { "id": "rustbin-direct-runtime-import", "kind": "moduleImport", "value": "@metaplex-foundation/rustbin" },
       { "id": "jayson-direct-runtime-import-or-transport-use", "kind": "moduleImport", "value": "jayson" },
@@ -85,9 +85,9 @@
       "compensatingControls": [
         "Only the exact GHSA is allowlisted; the high audit threshold remains enabled.",
         "The package-lock fingerprint pins toml 3.0.0 and every current direct Anchor or rustbin consumer.",
-        "DSbot must not use anchor.workspace or invoke rustbin runtime paths during this exception."
+        "DSbot runtime source must not access or destructure the workspace member through any receiver or import alias, import Anchor workspace directly, or invoke rustbin runtime paths during this exception. The temporary guard conservatively rejects unrelated workspace member/binding use too."
       ],
-      "removalCondition": "Remove immediately when Anchor or rustbin adopts a safe toml >=4.2.0 path, if the dependency fingerprint or topology changes, if any new consumer reaches toml, if DSbot begins using anchor.workspace or invoking rustbin runtime paths, or no later than 2026-09-11.",
+      "removalCondition": "Remove immediately when Anchor or rustbin adopts a safe toml >=4.2.0 path, if the dependency fingerprint or topology changes, if any new consumer reaches toml, if DSbot begins accessing or destructuring workspace through any receiver/import alias or invoking rustbin runtime paths, or no later than 2026-09-11.",
       "dependencyFingerprint": {
         "topology": [
           {
