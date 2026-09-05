@@ -136,7 +136,7 @@ function representativeTruth() {
     eventTime: '2026-01-01T00:00:00.000Z', availableAt: '2026-01-02T00:00:00.000Z',
     availableAtAuthority: 'PROVIDER_FIELD', ingestedAt: '2026-09-01T00:00:00.000Z',
     payload: {
-      currency: 'USD', price: 10.5, nullable: null, zero: 0, bool: false, empty: '',
+      currency: 'USD', price: 10, nullable: null, zero: 0, bool: false, empty: '',
       decimal: '1234.50', documented: 3.25,
       codecEdges: [undefined, -0, Number.NaN, Infinity, -Infinity, 9007199254740993n, { '0': 'object-key' }],
     },
@@ -188,9 +188,14 @@ describe('Phase 9D inert payload codec', () => {
 describe('Phase 9D durable round trip', () => {
   it('preserves 9A raw, 9B-bound 9C truth and runtime PIT decisions through real Parquet storage', () => {
     const { raw, dataset } = representativeTruth();
+    const decisionTimes = [
+      '2026-01-01T23:59:59.999Z',
+      '2026-01-02T00:00:00.000Z',
+      '2026-01-02T00:00:00.001Z',
+    ];
     const before = {
-      priceVisibility: evaluatePointInTimeVisibility(dataset.records[0].fields[1], '2026-01-02T00:00:00.000Z'),
-      priceEligibility: evaluateDecisionInputEligibility(dataset.records[0], 'price', 'FACTOR_INPUT', '2026-01-02T00:00:00.000Z'),
+      priceVisibility: decisionTimes.map((decisionTime) => evaluatePointInTimeVisibility(dataset.records[0].fields[1], decisionTime)),
+      priceEligibility: decisionTimes.map((decisionTime) => evaluateDecisionInputEligibility(dataset.records[0], 'price', 'FACTOR_INPUT', decisionTime)),
       documentedEligibility: evaluateDecisionInputEligibility(dataset.records[0], 'documented', 'FACTOR_INPUT', '2026-01-03T00:00:00.000Z'),
     };
     const interchange = createResearchStorageInterchange([raw], dataset);
@@ -215,11 +220,13 @@ describe('Phase 9D durable round trip', () => {
       const restored = restoreCanonicalPointInTimeDataset(stored.interchange);
       const restoredRaw = restoreRawResearchRecords(stored.interchange);
       const after = {
-        priceVisibility: evaluatePointInTimeVisibility(restored.records[0].fields[1], '2026-01-02T00:00:00.000Z'),
-        priceEligibility: evaluateDecisionInputEligibility(restored.records[0], 'price', 'FACTOR_INPUT', '2026-01-02T00:00:00.000Z'),
+        priceVisibility: decisionTimes.map((decisionTime) => evaluatePointInTimeVisibility(restored.records[0].fields[1], decisionTime)),
+        priceEligibility: decisionTimes.map((decisionTime) => evaluateDecisionInputEligibility(restored.records[0], 'price', 'FACTOR_INPUT', decisionTime)),
         documentedEligibility: evaluateDecisionInputEligibility(restored.records[0], 'documented', 'FACTOR_INPUT', '2026-01-03T00:00:00.000Z'),
       };
       assert.deepEqual(after, before);
+      assert.equal(restored.records[0].fields[1].logicalType, 'FLOAT64');
+      assert.deepEqual(restored.records[0].fields[1].presence, { state: 'VALUE', value: 10 });
       assert.deepEqual(restored.records[0].fields.map((item) => item.presence), dataset.records[0].fields.map((item) => item.presence));
       assert.ok(Object.is((restoredRaw[0].payload as { codecEdges: unknown[] }).codecEdges[1], -0));
       assert.ok(Number.isNaN((restoredRaw[0].payload as { codecEdges: number[] }).codecEdges[2]));

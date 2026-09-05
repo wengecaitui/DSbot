@@ -25,6 +25,7 @@ from .schema import (
     canonical_json_bytes,
     fail,
     field_semantics,
+    normalize_research_storage_identity,
     validate_interchange,
 )
 
@@ -322,8 +323,8 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
         raise ResearchStorageError(f"PHASE_9D_RESEARCH_STORAGE_INVALID:PARQUET_READ:{path.name}") from exc
 
 
-def _load_validated(bundle: Path) -> dict[str, Any]:
-    manifest = _validate_directory(bundle)
+def _load_validated(bundle: Path, expected_bundle_id: str | None = None) -> dict[str, Any]:
+    manifest = _validate_directory(bundle, expected_bundle_id=expected_bundle_id)
     schema = _read_json(bundle / "canonical_schema.json")
     raw_rows = _read_rows(bundle / "raw_records.parquet")
     record_rows = _read_rows(bundle / "canonical_records.parquet")
@@ -398,12 +399,12 @@ def _load_validated(bundle: Path) -> dict[str, Any]:
         "storageInterchangeVersion": INTERCHANGE_VERSION, "productionAuthority": False,
         "rawRecords": raw_records, "canonicalDataset": dataset,
     }
-    validate_interchange(interchange)
+    normalized_identity = normalize_research_storage_identity(interchange)
     if field_semantics(dataset) != schema["orderedFieldSemantics"]:
         fail("SCHEMA_FIELD_SEMANTICS")
-    if _sha256_bytes(canonical_json_bytes(interchange)) != manifest["bundleId"]:
+    if _sha256_bytes(canonical_json_bytes(normalized_identity)) != manifest["bundleId"]:
         fail("BUNDLE_CONTENT_IDENTITY")
-    return interchange
+    return normalized_identity
 
 
 def load_research_storage_bundle(storage_root: str | os.PathLike[str], bundle_id: str) -> dict[str, Any]:
@@ -411,41 +412,55 @@ def load_research_storage_bundle(storage_root: str | os.PathLike[str], bundle_id
     return _load_validated(_bundle_path(root, bundle_id))
 
 
+def _harden_staged_artifacts(stage: Path) -> None:
+    for artifact in stage.iterdir():
+        artifact.chmod(stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
+
+
+def _cleanup_stage(stage: Path) -> None:
+    if not stage.exists():
+        return
+    for artifact in stage.iterdir():
+        try:
+            artifact.chmod(stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+    shutil.rmtree(stage, ignore_errors=True)
+
+
 def commit_research_storage_bundle(storage_root: str | os.PathLike[str], interchange: dict[str, Any]) -> dict[str, Any]:
     root = _validated_root(storage_root)
-    validate_interchange(interchange)
-    bundle_id = _sha256_bytes(canonical_json_bytes(interchange))
+    normalized_identity = normalize_research_storage_identity(interchange)
+    bundle_id = _sha256_bytes(canonical_json_bytes(normalized_identity))
     final = _bundle_path(root, bundle_id)
     if final.exists():
         restored = _load_validated(final)
-        if canonical_json_bytes(restored) != canonical_json_bytes(interchange):
+        if canonical_json_bytes(restored) != canonical_json_bytes(normalized_identity):
             fail("BUNDLE_IDENTITY_COLLISION")
         return {"bundleId": bundle_id, "bundlePath": str(final), "idempotent": True, "productionAuthority": False}
     stage = root / f".stage-{uuid.uuid4().hex}"
     _contained(root, stage)
     stage.mkdir(mode=0o700)
     try:
-        _write_parquet(stage / "raw_records.parquet", _raw_rows(interchange), _RAW_SCHEMA)
-        _write_parquet(stage / "canonical_records.parquet", _canonical_record_rows(interchange), _RECORD_SCHEMA)
-        _write_parquet(stage / "canonical_fields.parquet", _canonical_field_rows(interchange), _FIELD_SCHEMA)
-        _write_bytes(stage / "canonical_schema.json", canonical_json_bytes(_schema_artifact(interchange)))
-        manifest = _manifest(interchange, bundle_id, stage)
+        _write_parquet(stage / "raw_records.parquet", _raw_rows(normalized_identity), _RAW_SCHEMA)
+        _write_parquet(stage / "canonical_records.parquet", _canonical_record_rows(normalized_identity), _RECORD_SCHEMA)
+        _write_parquet(stage / "canonical_fields.parquet", _canonical_field_rows(normalized_identity), _FIELD_SCHEMA)
+        _write_bytes(stage / "canonical_schema.json", canonical_json_bytes(_schema_artifact(normalized_identity)))
+        manifest = _manifest(normalized_identity, bundle_id, stage)
         _write_bytes(stage / MANIFEST_NAME, canonical_json_bytes(manifest))
         _validate_directory(stage, require_committed=False, expected_bundle_id=bundle_id)
         receipt = {"bundleId": bundle_id, "manifestSha256": _sha256_file(stage / MANIFEST_NAME), "storageSchemaVersion": STORAGE_SCHEMA_VERSION}
         _write_bytes(stage / COMMIT_MARKER_NAME, canonical_json_bytes(receipt))
-        _validate_directory(stage, expected_bundle_id=bundle_id)
+        _load_validated(stage, expected_bundle_id=bundle_id)
+        _harden_staged_artifacts(stage)
+        _load_validated(stage, expected_bundle_id=bundle_id)
         try:
             os.replace(stage, final)
         except OSError as exc:
             raise ResearchStorageError("PHASE_9D_RESEARCH_STORAGE_INVALID:ATOMIC_PUBLISH_FAILED") from exc
-        for artifact in final.iterdir():
-            artifact.chmod(stat.S_IREAD | stat.S_IRGRP | stat.S_IROTH)
-        _load_validated(final)
         return {"bundleId": bundle_id, "bundlePath": str(final), "idempotent": False, "productionAuthority": False}
     except Exception:
-        if stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)
+        _cleanup_stage(stage)
         raise
 
 

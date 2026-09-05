@@ -14,7 +14,10 @@ The only durable Phase 9D truth is one immutable research storage bundle:
   COMMITTED
 ```
 
-The bundle ID is the SHA-256 digest of the canonical inert interchange document. Provider IDs, adapter IDs,
+The bundle ID is the SHA-256 digest of a canonical inert, logical-type-aware identity projection. Canonical
+`FLOAT64 VALUE` numbers are normalized to one deterministic floating-point representation, so whole-number inputs
+such as `10` and `10.0` have the same semantic storage identity without changing INT64, raw tagged numbers, counts,
+orders, decimal strings, or other integer metadata. Provider IDs, adapter IDs,
 dataset references, record IDs, and revision IDs never become path fragments. DuckDB uses an in-memory
 connection and Polars uses a lazy local Parquet scan only after bundle validation. Neither is durable authority.
 
@@ -27,8 +30,10 @@ that do not match the directory bundle ID.
 
 The writer validates the complete interchange before touching storage, creates an internal staging directory under
 the approved root, writes and flushes the three Parquet artifacts and canonical schema, hashes those artifacts,
-writes the manifest, validates the staged artifacts, and writes `COMMITTED` last. It then publishes with one
-same-filesystem atomic directory rename. There is no copy fallback, append, overwrite, delete, compaction, retention,
+writes the manifest, validates the staged artifacts, and writes `COMMITTED` last. It performs a full semantic reload
+and content-identity validation in staging, hardens artifact permissions there, validates the staged bundle again,
+and then publishes with one same-filesystem atomic directory rename. No fallible semantic validation or permission
+mutation occurs after publication. There is no copy fallback, append, overwrite, delete, compaction, retention,
 revision-winner selection, or mutable catalog. An existing identical bundle is returned only after complete
 validation and semantic equality; a collision or corruption fails closed.
 

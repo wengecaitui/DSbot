@@ -10,6 +10,7 @@ import shutil
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 from quant_engine.research_storage import (
@@ -160,6 +161,14 @@ class ResearchStorageTests(unittest.TestCase):
         with self.assertRaisesRegex(ResearchStorageError, pattern):
             callback()
 
+    @staticmethod
+    def set_price(value, price: int | float):
+        for record in value["canonicalDataset"]["records"]:
+            record["fields"][1]["presence"]["value"] = price
+
+    def assert_no_publish_or_stage(self):
+        self.assertEqual(list(self.root.iterdir()), [])
+
     def test_full_interchange_round_trip_is_exact(self):
         result = self.commit()
         self.assertEqual(load_research_storage_bundle(self.root, result["bundleId"]), self.value)
@@ -216,6 +225,76 @@ class ResearchStorageTests(unittest.TestCase):
         second = self.commit()
         self.assertEqual(first["bundleId"], second["bundleId"])
         self.assertTrue(second["idempotent"])
+
+    def test_float64_whole_numbers_have_one_semantic_identity_and_retry_is_idempotent(self):
+        for integer_value in (10, 0, -2):
+            with self.subTest(value=integer_value):
+                first_value = fixture()
+                second_value = fixture()
+                self.set_price(first_value, integer_value)
+                self.set_price(second_value, float(integer_value))
+                first = commit_research_storage_bundle(self.root, first_value)
+                for record in first_value["canonicalDataset"]["records"]:
+                    self.assertIs(type(record["fields"][1]["presence"]["value"]), int)
+                second = commit_research_storage_bundle(self.root, second_value)
+                restored = load_research_storage_bundle(self.root, first["bundleId"])
+                self.assertEqual(first["bundleId"], second["bundleId"])
+                self.assertTrue(second["idempotent"])
+                for record in restored["canonicalDataset"]["records"]:
+                    self.assertIs(type(record["fields"][1]["presence"]["value"]), float)
+                    self.assertEqual(record["fields"][1]["presence"]["value"], float(integer_value))
+
+    def test_float64_fraction_int64_and_decimal_semantics_do_not_drift(self):
+        self.set_price(self.value, 10.5)
+        for record in self.value["canonicalDataset"]["records"]:
+            record["fields"][4]["presence"]["value"] = 10
+            record["fields"][7]["presence"]["value"] = "10.00"
+        result = self.commit()
+        records = load_research_storage_bundle(self.root, result["bundleId"])["canonicalDataset"]["records"]
+        for record in records:
+            self.assertIs(type(record["fields"][1]["presence"]["value"]), float)
+            self.assertEqual(record["fields"][1]["presence"]["value"], 10.5)
+            self.assertIs(type(record["fields"][4]["presence"]["value"]), int)
+            self.assertEqual(record["fields"][4]["presence"]["value"], 10)
+            self.assertIs(type(record["fields"][7]["presence"]["value"]), str)
+            self.assertEqual(record["fields"][7]["presence"]["value"], "10.00")
+
+    def test_full_semantic_validation_failure_cannot_publish_final(self):
+        error = ResearchStorageError("PHASE_9D_RESEARCH_STORAGE_INVALID:FORCED_STAGE_SEMANTIC_FAILURE")
+        with mock.patch.object(store_module.os, "replace", wraps=os.replace) as replace_mock:
+            with mock.patch.object(store_module, "_load_validated", side_effect=error):
+                with self.assertRaisesRegex(ResearchStorageError, "FORCED_STAGE_SEMANTIC_FAILURE"):
+                    self.commit()
+        replace_mock.assert_not_called()
+        self.assert_no_publish_or_stage()
+
+    def test_permission_failure_happens_before_publish_and_cleans_stage(self):
+        real_chmod = Path.chmod
+        calls = 0
+
+        def fail_after_partial_hardening(path, mode, *, follow_symlinks=True):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise PermissionError("forced permission failure")
+            return real_chmod(path, mode, follow_symlinks=follow_symlinks)
+
+        with mock.patch.object(Path, "chmod", autospec=True, side_effect=fail_after_partial_hardening):
+            with self.assertRaisesRegex(PermissionError, "forced permission failure"):
+                self.commit()
+        self.assertGreaterEqual(calls, 2)
+        self.assert_no_publish_or_stage()
+
+    def test_atomic_rename_failure_has_no_orphan_stage_or_copy_fallback(self):
+        with mock.patch.object(store_module.os, "replace", side_effect=OSError("forced rename failure")):
+            self.assert_invalid(self.commit, "ATOMIC_PUBLISH_FAILED")
+        self.assert_no_publish_or_stage()
+
+    def test_no_fallible_semantic_or_permission_operation_after_publish(self):
+        source = inspect.getsource(store_module.commit_research_storage_bundle)
+        post_publish = source.split("os.replace(stage, final)", maxsplit=1)[1]
+        self.assertNotIn("_load_validated", post_publish)
+        self.assertNotIn("chmod", post_publish)
 
     def test_collision_with_corrupt_existing_content_fails_closed(self):
         result = self.commit()

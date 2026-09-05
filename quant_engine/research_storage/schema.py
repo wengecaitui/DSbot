@@ -338,6 +338,18 @@ def validate_interchange(value: Any) -> dict[str, Any]:
     return value
 
 
+def normalize_research_storage_identity(value: Any) -> dict[str, Any]:
+    """Return the inert, logical-type-aware preimage used for bundle identity."""
+    validate_interchange(value)
+    normalized = json.loads(canonical_json_bytes(value))
+    for record in normalized["canonicalDataset"]["records"]:
+        for field in record["fields"]:
+            presence = field["presence"]
+            if field["logicalType"] == "FLOAT64" and presence["state"] == "VALUE":
+                presence["value"] = float(presence["value"])
+    return normalized
+
+
 def field_semantics(dataset: dict[str, Any]) -> list[dict[str, Any]]:
     records = dataset["records"]
     if not records:
