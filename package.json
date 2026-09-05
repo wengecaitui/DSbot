@@ -34,6 +34,7 @@
     "test:phase-9a-contract": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9a-provider-manifest-adapter-contract.test.ts",
     "test:phase-9a-implementation": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9a-research-provider-ingress.test.ts",
     "test:phase-9b-contract": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9b-data-dictionary-contract.test.ts",
+    "test:phase-9c-pit-dataset": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9c-canonical-pit-dataset.test.ts",
     "test:quant-engine": "python -m unittest discover -s quant_engine/tests -p \"test_*.py\"",
     "ci": "npm run typecheck && npm run test && npm run test:quant-engine && npm run build",
     "security:exceptions": "node scripts/check-audit-exceptions.mjs",
