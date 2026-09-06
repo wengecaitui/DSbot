@@ -2,15 +2,20 @@
 
 ## Scope and identity
 
+The current implementation base is
+`feature/orangeai-split@58076b6b813ec84cf7757cd72016727ee9f2c585`: Phase 9E and the TOML dependency
+remediation are merged and complete, Phase 9F is current, and Phase 9G remains deferred.
+
 Phase 9F is an immutable, in-memory metadata catalog for research dataset lineage, exact artifact versions,
 supersession, and deprecation. An exact version reference contains only a bounded `datasetId` and the lowercase
 64-character Phase 9D `storageBundleId`. The catalog has no mutable alias, current-version pointer, or automatic
 version selection; consumers must pin an exact reference.
 
 Phase 9D remains the sole authority for durable bundle integrity and content identity. Phase 9F validates bundle-ID
-syntax and requires every embedded `ResearchStorageInterchange` to pass the Phase 9D boundary, but it does not open a
-bundle or claim to verify its bytes. The catalog and its outputs declare `storageIntegrityAuthority=false` and
-`productionAuthority=false`.
+syntax, requires every embedded `ResearchStorageInterchange` to pass the Phase 9D boundary, and calls Phase 9D's
+shared exact-identity capability to bind the claimed ID to that interchange. It does not open a bundle or claim to
+verify its bytes. The catalog and its outputs declare `storageIntegrityAuthority=false` and
+`productionAuthority=false`; Python durable commit remains the storage-integrity authority.
 
 ## Derived canonical lineage
 
@@ -31,8 +36,9 @@ binding, adapter, and manifest versions may evolve.
 
 An optional `supersedes` reference forms an explicit linear predecessor chain within one dataset series. The
 predecessor must exist, must be a different exact version in the same dataset, and must have an earlier publication
-time. Cycles and multiple successors for one predecessor fail closed. The audit capability can return the deterministic
-oldest-to-requested trace.
+time. Every non-empty dataset series has exactly one root, and every later version must connect to it through explicit
+predecessors. Cycles, disconnected roots, and multiple successors for one predecessor fail closed. The audit capability
+can return the deterministic oldest-to-requested trace.
 
 One immutable deprecation declaration may target an exact version. Its declaration cannot predate publication; its
 effective time cannot predate its declaration; and its reason is non-empty and bounded. An optional replacement must
@@ -51,6 +57,9 @@ Published-version listing excludes versions published after the requested time, 
 time and bundle ID, and assigns dense indices only to visible versions. Listing an unknown `datasetId` returns an empty
 list. Before `declaredAt`, a governance result omits the entire future deprecation declaration, including its reason,
 replacement, and timestamps.
+
+After a deprecation is declared, its replacement reference remains omitted until the replacement's own `publishedAt`
+is at or before `governanceTime`. The audit capability may retain the complete declaration for governance review.
 
 ## Capability boundary
 

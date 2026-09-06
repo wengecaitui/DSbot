@@ -26,6 +26,7 @@ import {
   createResearchStorageInterchange,
   type ResearchStorageInterchange,
 } from '../../src/research/data/storage/ResearchStorageContract';
+import { deriveResearchStorageBundleId } from '../../src/research/data/storage/ResearchStorageIdentity';
 
 const V1_TIME = '2026-01-01T00:00:00.000Z';
 const V2_TIME = '2026-01-02T00:00:00.000Z';
@@ -167,14 +168,36 @@ function ref(storageBundleId: string, datasetId = 'dataset.lineage'): ResearchDa
   return { datasetId, storageBundleId };
 }
 
+function withIdentityDiscriminator(
+  interchange: ResearchStorageInterchange,
+  discriminator: string,
+): ResearchStorageInterchange {
+  const value: any = structuredClone(interchange);
+  if (value.rawRecords.length > 0) {
+    const requestId = `request-lineage:${discriminator}`;
+    value.rawRecords[0].requestId = requestId;
+    value.canonicalDataset.records[0].requestId = requestId;
+  }
+  assertResearchStorageInterchange(value);
+  return value;
+}
+
 function version(
-  storageBundleId: string,
+  identityDiscriminator: string,
   publishedAt: string,
   patch: Partial<ResearchDatasetVersionInput> = {},
 ): ResearchDatasetVersionInput {
+  const {
+    interchange: suppliedInterchange,
+    storageBundleId: claimedStorageBundleId,
+    ...metadataPatch
+  } = patch;
+  const interchange = suppliedInterchange
+    ?? withIdentityDiscriminator(makeInterchange(), identityDiscriminator);
   return {
-    datasetId: 'dataset.lineage', storageBundleId, publishedAt,
-    interchange: makeInterchange(), ...patch,
+    datasetId: 'dataset.lineage', publishedAt, ...metadataPatch,
+    storageBundleId: claimedStorageBundleId ?? deriveResearchStorageBundleId(interchange),
+    interchange,
   };
 }
 
@@ -225,18 +248,35 @@ describe('Phase 9F exact version metadata', () => {
     emptyInterchange.rawRecords = [];
     emptyInterchange.canonicalDataset.records = [];
     assertResearchStorageInterchange(emptyInterchange);
-    const emptyAudit = catalog([version(bundle('b'), V1_TIME, {
+    const emptyVersion = version(bundle('b'), V1_TIME, {
       interchange: emptyInterchange,
-    })]).auditPort.getVersion(ref(bundle('b')));
+    });
+    const emptyAudit = catalog([emptyVersion]).auditPort.getVersion(ref(emptyVersion.storageBundleId));
     assert.deepEqual(emptyAudit.version.canonicalLineage.adapterVersions, []);
     assert.deepEqual(emptyAudit.version.canonicalLineage.manifestVersions, []);
   });
 
   it('accepts only lowercase 64-character exact bundle references', () => {
     for (const invalid of ['a'.repeat(63), 'A'.repeat(64), 'bundle-name', 'C:/bundle', 'https://bundle']) {
-      assert.throws(() => catalog([version(invalid, V1_TIME)]), /STORAGE_BUNDLE_ID/);
+      assert.throws(() => catalog([version('invalid-syntax', V1_TIME, {
+        storageBundleId: invalid,
+      })]), /STORAGE_BUNDLE_ID/);
     }
     assert.doesNotThrow(() => catalog([version(bundle('a'), V1_TIME)]));
+  });
+
+  it('binds each claimed exact bundle identity to its validated interchange', () => {
+    const v1 = version(bundle('a'), V1_TIME);
+    const v2 = version(bundle('b'), V2_TIME, { supersedes: ref(v1.storageBundleId) });
+    assert.doesNotThrow(() => catalog([v1, v2]));
+    assert.throws(() => catalog([{
+      ...v1,
+      storageBundleId: 'f'.repeat(64),
+    }]), /BUNDLE_INTERCHANGE_IDENTITY_MISMATCH/);
+    assert.throws(() => catalog([{
+      ...v1,
+      storageBundleId: v2.storageBundleId,
+    }]), /BUNDLE_INTERCHANGE_IDENTITY_MISMATCH/);
   });
 
   it('rejects duplicate refs and one bundle assigned to two dataset identities', () => {
@@ -244,7 +284,7 @@ describe('Phase 9F exact version metadata', () => {
     assert.throws(() => catalog([v1, structuredClone(v1)]), /DUPLICATE_VERSION_REF/);
     assert.throws(() => catalog([
       v1,
-      version(v1.storageBundleId, V2_TIME, { datasetId: 'dataset.other' }),
+      { ...structuredClone(v1), datasetId: 'dataset.other', publishedAt: V2_TIME },
     ]), /BUNDLE_ALIAS/);
   });
 
@@ -268,9 +308,10 @@ describe('Phase 9F exact version metadata', () => {
   it('accepts lineage only from a valid interchange and rejects caller lineage copies', () => {
     const invalidInterchange: any = structuredClone(makeInterchange());
     invalidInterchange.canonicalDataset.providerId = 'inconsistent-provider';
-    assert.throws(() => catalog([version(bundle('a'), V1_TIME, {
+    assert.throws(() => catalog([{
+      ...version(bundle('a'), V1_TIME),
       interchange: invalidInterchange,
-    })]), /PHASE_9D_RESEARCH_STORAGE_INVALID/);
+    }]), /PHASE_9D_RESEARCH_STORAGE_INVALID/);
 
     assert.throws(() => catalog([{
       ...version(bundle('b'), V1_TIME),
@@ -305,8 +346,8 @@ describe('Phase 9F supersession invariants', () => {
   });
 
   it('rejects self, missing, cross-dataset, and non-monotonic predecessors', () => {
-    const selfBundleId = bundle('a');
-    const self = version(selfBundleId, V1_TIME, { supersedes: ref(selfBundleId) });
+    const root = version(bundle('a'), V1_TIME);
+    const self = { ...root, supersedes: ref(root.storageBundleId) };
     assert.throws(() => catalog([self]), /SELF_SUPERSESSION/);
 
     assert.throws(() => catalog([version(bundle('b'), V2_TIME, {
@@ -325,14 +366,32 @@ describe('Phase 9F supersession invariants', () => {
   });
 
   it('rejects cycles and multiple successors for one predecessor', () => {
-    const v1 = version(bundle('a'), V1_TIME, { supersedes: ref(bundle('b')) });
-    const v2 = version(bundle('b'), V2_TIME, { supersedes: ref(bundle('a')) });
+    const rootA = version(bundle('a'), V1_TIME);
+    const rootB = version(bundle('b'), V2_TIME);
+    const v1 = { ...rootA, supersedes: ref(rootB.storageBundleId) };
+    const v2 = { ...rootB, supersedes: ref(rootA.storageBundleId) };
     assert.throws(() => catalog([v1, v2]), /SUPERSESSION_CYCLE/);
 
     const root = version(bundle('c'), V1_TIME);
     const left = version(bundle('d'), V2_TIME, { supersedes: ref(root.storageBundleId) });
     const right = version(bundle('e'), V3_TIME, { supersedes: ref(root.storageBundleId) });
     assert.throws(() => catalog([root, left, right]), /SUPERSESSION_BRANCH/);
+  });
+
+  it('requires exactly one connected root for every non-empty dataset series', () => {
+    const v1 = version(bundle('a'), V1_TIME);
+    const v2 = version(bundle('b'), V2_TIME);
+    for (const input of [[v1, v2], [v2, v1]]) {
+      assert.throws(() => catalog(input), /MULTIPLE_ROOTS_PER_DATASET/);
+    }
+
+    const connected = version(bundle('c'), V2_TIME, { supersedes: ref(v1.storageBundleId) });
+    const separate = version(bundle('d'), V3_TIME);
+    for (const input of [[v1, connected, separate], [separate, connected, v1]]) {
+      assert.throws(() => catalog(input), /MULTIPLE_ROOTS_PER_DATASET/);
+    }
+
+    assert.doesNotThrow(() => catalog([connected, v1]));
   });
 });
 
@@ -462,6 +521,43 @@ describe('Phase 9F temporal visibility', () => {
     assert.equal(encoded.includes(v2.storageBundleId), false);
     assert.equal(encoded.includes(V3_TIME), false);
     assert.equal(encoded.includes(EFFECTIVE_TIME), false);
+  });
+
+  it('reveals a declared replacement only after that replacement is published', () => {
+    const v1 = version(bundle('a'), V1_TIME);
+    const replacementPublishedAt = V3_TIME;
+    const v2 = version(bundle('b'), replacementPublishedAt, {
+      supersedes: ref(v1.storageBundleId),
+    });
+    const declaredAt = V2_TIME;
+    const effectiveAt = EFFECTIVE_TIME;
+    const withoutReplacement = catalog([v1], [deprecation(ref(v1.storageBundleId), {
+      declaredAt, effectiveAt,
+    })]);
+    const withFutureReplacement = catalog([v1, v2], [deprecation(ref(v1.storageBundleId), {
+      declaredAt, effectiveAt, replacement: ref(v2.storageBundleId),
+    })]);
+    const beforePublication = {
+      ref: ref(v1.storageBundleId),
+      governanceTime: '2026-01-02T12:00:00.000Z',
+    };
+    assert.deepEqual(
+      withFutureReplacement.governancePort.getLifecycle(beforePublication),
+      withoutReplacement.governancePort.getLifecycle(beforePublication),
+    );
+    assert.equal(
+      JSON.stringify(withFutureReplacement.governancePort.getLifecycle(beforePublication))
+        .includes(v2.storageBundleId),
+      false,
+    );
+
+    const atPublication = withFutureReplacement.governancePort.getLifecycle({
+      ref: ref(v1.storageBundleId), governanceTime: replacementPublishedAt,
+    });
+    assert.deepEqual(
+      'deprecation' in atPublication ? atPublication.deprecation?.replacement : undefined,
+      ref(v2.storageBundleId),
+    );
   });
 });
 
@@ -604,8 +700,9 @@ describe('Phase 9F inert construction and capability boundaries', () => {
     ]) {
       assert.equal(source.includes(forbiddenImport), false, forbiddenImport);
     }
-    const created = catalog([version(bundle('a'), V1_TIME)]);
-    const serialized = JSON.stringify(created.auditPort.getVersion(ref(bundle('a'))));
+    const v1 = version(bundle('a'), V1_TIME);
+    const created = catalog([v1]);
+    const serialized = JSON.stringify(created.auditPort.getVersion(ref(v1.storageBundleId)));
     for (const forbiddenField of [
       'rawRecords', 'canonicalDataset', 'payloadHash', 'sourceRecordId',
       'eventTime', 'availableAt', 'ingestedAt', 'requestId', 'sourceProvenanceRef',

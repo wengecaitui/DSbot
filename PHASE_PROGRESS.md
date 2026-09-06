@@ -378,9 +378,14 @@
 - **停止边界**: 无缓存、mutable registry、lineage/version resolution、provider ingestion、backtest kernel、
   filesystem/network/process、生产交易或 Paper/Testnet/Live 权威。
 
+### TOML dependency remediation ✅ MERGED / COMPLETE
+
+- **实现 PR / 合并提交**: #138 / `58076b6b813ec84cf7757cd72016727ee9f2c585`。
+- **当前状态**: `toml@4.2.0` 已成为集成基线；Phase 9F 不改变剩余的临时 `stream-json` 例外范围。
+
 ### Phase 9F — Research Data Lineage / Version / Deprecation ⏳ CURRENT
 
-- **基线**: `feature/orangeai-split@d183dcbb648cb153c4a00eb7ec6f733372c824b6`。
+- **基线**: `feature/orangeai-split@58076b6b813ec84cf7757cd72016727ee9f2c585`。
 - **当前任务**: 以 Phase 9D `storageBundleId` 作为精确版本身份，建立 immutable lineage、显式
   supersession、deprecation 与按 `governanceTime` 限界的 metadata catalog。
 - **停止边界**: 不自动选择版本，不读取 bundle 或数据，不改变 9C PIT / 9E Hub 权威，不增加

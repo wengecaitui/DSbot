@@ -2,6 +2,7 @@ import {
   assertResearchStorageInterchange,
   type ResearchStorageInterchange,
 } from '../storage/ResearchStorageContract';
+import { deriveResearchStorageBundleId } from '../storage/ResearchStorageIdentity';
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$/;
 const STORAGE_BUNDLE_ID = /^[0-9a-f]{64}$/;
@@ -337,15 +338,28 @@ function lifecycleAt(
 function governanceVersion(
   version: InternalVersion,
   deprecation: ResearchDatasetDeprecationMetadata | undefined,
+  versions: ReadonlyMap<string, InternalVersion>,
   governanceTime: string,
   governanceTimeMs: number,
   versionIndex?: number,
 ): ResearchDatasetGovernanceVersion {
   const lifecycle = lifecycleAt(version, deprecation, governanceTimeMs);
   if (lifecycle === 'NOT_YET_PUBLISHED') lineageViolation('INTERNAL_UNPUBLISHED_GOVERNANCE_VIEW');
-  const visibleDeprecation = deprecation !== undefined && governanceTimeMs >= Date.parse(deprecation.declaredAt)
-    ? deprecation
-    : undefined;
+  let visibleDeprecation: ResearchDatasetDeprecationMetadata | undefined;
+  if (deprecation !== undefined && governanceTimeMs >= Date.parse(deprecation.declaredAt)) {
+    const replacementVersion = deprecation.replacement === undefined
+      ? undefined
+      : versions.get(refKey(deprecation.replacement));
+    const replacementVisible = replacementVersion !== undefined
+      && replacementVersion.publishedAtMs <= governanceTimeMs;
+    visibleDeprecation = deepFreeze({
+      target: snapshotRef(deprecation.target),
+      declaredAt: deprecation.declaredAt,
+      effectiveAt: deprecation.effectiveAt,
+      reason: deprecation.reason,
+      ...(replacementVisible ? { replacement: snapshotRef(deprecation.replacement!) } : {}),
+    });
+  }
   return deepFreeze({
     usageMode: 'RESEARCH_GOVERNANCE',
     ...version.metadata,
@@ -388,6 +402,9 @@ export function createResearchDatasetVersionCatalog(
       ? undefined
       : validateRef(candidate.supersedes, 'SUPERSEDES_REF');
     assertResearchStorageInterchange(candidate.interchange);
+    if (deriveResearchStorageBundleId(candidate.interchange) !== ref.storageBundleId) {
+      lineageViolation('BUNDLE_INTERCHANGE_IDENTITY_MISMATCH');
+    }
     const canonicalLineage = deriveCanonicalLineage(candidate.interchange);
     const key = refKey(ref);
     if (versions.has(key)) lineageViolation('DUPLICATE_VERSION_REF');
@@ -437,7 +454,6 @@ export function createResearchDatasetVersionCatalog(
     if (successors.has(version.predecessorKey)) lineageViolation('SUPERSESSION_BRANCH');
     successors.set(version.predecessorKey, version.key);
   }
-
   const deprecations = new Map<string, ResearchDatasetDeprecationMetadata>();
   for (const candidate of input.deprecations) {
     const record = plainRecord(candidate, 'DEPRECATION_INPUT');
@@ -491,6 +507,18 @@ export function createResearchDatasetVersionCatalog(
     }));
   }
 
+  const rootsByDataset = new Map<string, number>();
+  for (const version of versions.values()) {
+    if (version.predecessorKey !== undefined) continue;
+    rootsByDataset.set(
+      version.metadata.datasetId,
+      (rootsByDataset.get(version.metadata.datasetId) ?? 0) + 1,
+    );
+  }
+  for (const count of rootsByDataset.values()) {
+    if (count !== 1) lineageViolation('MULTIPLE_ROOTS_PER_DATASET');
+  }
+
   const governancePort: ResearchDatasetGovernancePort = Object.freeze({
     getLifecycle(callerRequest: ResearchDatasetLifecycleRequest): ResearchDatasetLifecycleView {
       assertInertData(callerRequest, 'LIFECYCLE_REQUEST');
@@ -513,6 +541,7 @@ export function createResearchDatasetVersionCatalog(
       return governanceVersion(
         version,
         deprecations.get(version.key),
+        versions,
         governance.value,
         governance.milliseconds,
       );
@@ -541,6 +570,7 @@ export function createResearchDatasetVersionCatalog(
         versions: visible.map((version, versionIndex) => governanceVersion(
           version,
           deprecations.get(version.key),
+          versions,
           governance.value,
           governance.milliseconds,
           versionIndex,
