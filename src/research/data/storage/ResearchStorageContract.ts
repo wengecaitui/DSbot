@@ -11,6 +11,7 @@ import {
 import { assertPlainInertData } from '../dictionary/ResearchDictionaryValidation';
 import {
   AVAILABILITY_REQUIREMENTS,
+  DECISION_INPUT_USES,
   EVENT_TIME_REQUIREMENTS,
   HISTORICAL_DECISION_POLICIES,
   RESEARCH_USES,
@@ -118,6 +119,85 @@ function assertTimeEvidence(value: unknown, name: string): void {
   storageViolation(`${name}_STATE`);
 }
 
+function allDecisionUsesDenied(policy: Record<string, unknown>): boolean {
+  return DECISION_INPUT_USES.every((use) => policy[use] === 'DENY');
+}
+
+function assertCanonicalFieldConsistency(
+  field: CanonicalPointInTimeField,
+  record: CanonicalPointInTimeRecord,
+): void {
+  const eventEvidence = field.eventTimeEvidence;
+  if (field.eventTimeRequirement === 'NOT_APPLICABLE') {
+    if (eventEvidence.state !== 'NOT_APPLICABLE') {
+      storageViolation('CANONICAL_EVENT_TIME_REQUIREMENT_EVIDENCE_MISMATCH');
+    }
+  } else if (field.eventTimeRequirement === 'RECORD_EVENT_TIME_SUFFICIENT') {
+    if (
+      eventEvidence.state !== 'KNOWN'
+      || eventEvidence.source !== 'RECORD_ENVELOPE'
+      || eventEvidence.value !== record.eventTime
+    ) {
+      storageViolation('CANONICAL_RECORD_EVENT_TIME_EVIDENCE_MISMATCH');
+    }
+  } else if (
+    eventEvidence.state === 'NOT_APPLICABLE'
+    || (eventEvidence.state === 'KNOWN' && eventEvidence.source !== 'SOURCE_PAYLOAD_PATH')
+  ) {
+    storageViolation('CANONICAL_EVENT_TIME_REQUIREMENT_EVIDENCE_MISMATCH');
+  }
+
+  const availabilityEvidence = field.availabilityEvidence;
+  if (field.availabilityRequirement === 'UNKNOWN') {
+    if (availabilityEvidence.state !== 'UNKNOWN') {
+      storageViolation('CANONICAL_AVAILABILITY_REQUIREMENT_EVIDENCE_MISMATCH');
+    }
+  } else if (field.availabilityRequirement === 'RECORD_AVAILABLE_AT_SUFFICIENT') {
+    if (record.availableAt === null || record.availableAtAuthority === 'UNKNOWN') {
+      if (availabilityEvidence.state !== 'UNKNOWN') {
+        storageViolation('CANONICAL_RECORD_AVAILABILITY_EVIDENCE_MISMATCH');
+      }
+    } else if (
+      availabilityEvidence.state !== 'KNOWN'
+      || availabilityEvidence.source !== 'RECORD_ENVELOPE'
+      || availabilityEvidence.value !== record.availableAt
+    ) {
+      storageViolation('CANONICAL_RECORD_AVAILABILITY_EVIDENCE_MISMATCH');
+    }
+  } else if (
+    availabilityEvidence.state === 'NOT_APPLICABLE'
+    || (availabilityEvidence.state === 'KNOWN' && availabilityEvidence.source !== 'SOURCE_PAYLOAD_PATH')
+  ) {
+    storageViolation('CANONICAL_AVAILABILITY_REQUIREMENT_EVIDENCE_MISMATCH');
+  }
+
+  if (field.semanticRole === 'LABEL' && field.historicalDecisionPolicy !== 'FORBIDDEN_AS_DECISION_INPUT') {
+    storageViolation('CANONICAL_LABEL_HISTORICAL_POLICY_INCONSISTENT');
+  }
+
+  if (
+    (field.semanticRole === 'LABEL'
+      || field.availabilityRequirement === 'UNKNOWN'
+      || field.historicalDecisionPolicy === 'FORBIDDEN_AS_DECISION_INPUT')
+    && !allDecisionUsesDenied(field.researchUsePolicy)
+  ) {
+    storageViolation('CANONICAL_DECISION_POLICY_INCONSISTENT');
+  }
+}
+
+function assertCanonicalCurrencyRelationship(
+  field: CanonicalPointInTimeField,
+  fieldsById: ReadonlyMap<string, CanonicalPointInTimeField>,
+): void {
+  if (typeof field.unit !== 'object' || field.unit.kind !== 'CURRENCY') return;
+  const currencyField = fieldsById.get(field.unit.currencyFieldId);
+  if (currencyField === undefined) storageViolation('CANONICAL_CURRENCY_FIELD_NOT_FOUND');
+  if (currencyField.logicalType !== 'STRING') storageViolation('CANONICAL_CURRENCY_FIELD_NOT_STRING');
+  if (typeof currencyField.unit === 'object' && currencyField.unit.kind === 'CURRENCY') {
+    storageViolation('CANONICAL_CURRENCY_FIELD_IS_CURRENCY');
+  }
+}
+
 function assertField(field: unknown, recordIndex: number, fieldIndex: number): asserts field is CanonicalPointInTimeField {
   if (field === null || typeof field !== 'object' || Array.isArray(field)) storageViolation('FIELD_OBJECT');
   const value = field as Record<string, unknown>;
@@ -174,12 +254,19 @@ function assertRecord(record: unknown, index: number): asserts record is Canonic
   if (value.availableAt !== null && !isCanonicalTimestamp(value.availableAt)) storageViolation('RECORD_AVAILABLE_AT');
   if (Object.hasOwn(value, 'sourceRevision')) assertSourceRevision(value.sourceRevision);
   if (!Array.isArray(value.fields)) storageViolation('RECORD_FIELDS');
+  value.fields.forEach((field, fieldIndex) => assertField(field, index, fieldIndex));
+  const fields = value.fields as CanonicalPointInTimeField[];
   const ids = new Set<string>();
-  value.fields.forEach((field, fieldIndex) => {
-    assertField(field, index, fieldIndex);
+  for (const field of fields) {
     if (ids.has(field.fieldId)) storageViolation('DUPLICATE_FIELD_ID');
     ids.add(field.fieldId);
-  });
+  }
+  const canonicalRecord = value as unknown as CanonicalPointInTimeRecord;
+  const fieldsById = new Map(fields.map((field) => [field.fieldId, field]));
+  for (const field of fields) {
+    assertCanonicalFieldConsistency(field, canonicalRecord);
+    assertCanonicalCurrencyRelationship(field, fieldsById);
+  }
 }
 
 export function assertResearchStorageInterchange(value: unknown): asserts value is ResearchStorageInterchange {

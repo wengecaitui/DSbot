@@ -19,7 +19,7 @@
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
 | 7 | Hermes 握手 + Quant Terminal（7A/7B/7C 已合并） | P1 | ✅完成 | 100% |
 | 8 | 权威生产运行时组合 + Operations Evidence Read Bridge | P1 | ✅完成 | 100% |
-| 9 | Research Data Foundation | P1 | ⏳9A Ingress 实现 PR 当前 | 8% |
+| 9 | Research Data Foundation | P1 | ⏳9E Research Data Hub 当前 | 50% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
 
 ---
@@ -362,17 +362,24 @@
   eligibility 继续只按显式 `decisionTime` 在运行时计算 `available_at <= decision_time`。
 - **保留边界**: `UNKNOWN` 与 `DOCUMENTED_RULE_UNMATERIALIZED` 不产生 PIT 资格；无静态 eligibility。
 
-### Phase 9D — Raw + Analytical Research Storage ⏳ CURRENT
+### Phase 9D — Raw + Analytical Research Storage ✅ MERGED / COMPLETE
 
-- **基线**: `feature/orangeai-split@cebff72080856e5b4b6216e64cef41267e99eb96`。
-- **当前任务**: 以 immutable Parquet artifacts + canonical schema + integrity manifest + final commit receipt
+- **实现 PR / 合并提交**: #135 / `24101b69e04404e6e9c66d29e45b6e43f9e1b3c5`。
+- **已完成**: 以 immutable Parquet artifacts + canonical schema + integrity manifest + final commit receipt
   建立唯一 durable research-storage truth；DuckDB / Polars 仅为验证 bundle 后的只读派生视图。
 - **停止边界**: 不实现 ResearchDataHub、lineage/version/deprecation、真实 provider、backtest kernel、
-  Paper/Testnet/Live 或生产交易权威；9D 合并前保持 CURRENT。
+  Paper/Testnet/Live 或生产交易权威。
 
-### Phase 9E–9G — 后续门禁（DEFERRED）
+### Phase 9E — ResearchDataHub + DatasetUsagePolicy ⏳ CURRENT
 
-- **9E**: ResearchDataHub + DatasetUsagePolicy。
+- **基线**: `feature/orangeai-split@24101b69e04404e6e9c66d29e45b6e43f9e1b3c5`。
+- **当前任务**: 为单个已加载 9D interchange 提供互相隔离的 decision / analysis capability；decision
+  view 仅由显式 `decisionTime` 和现有 9C 逐字段 eligibility 生成，并隐藏所有不合格行的存在。
+- **停止边界**: 无缓存、mutable registry、lineage/version resolution、provider ingestion、backtest kernel、
+  filesystem/network/process、生产交易或 Paper/Testnet/Live 权威。
+
+### Phase 9F–9G — 后续门禁（DEFERRED）
+
 - **9F**: Data lineage / version / deprecation。
 - **9G**: Research ingestion + first provider qualification。
 

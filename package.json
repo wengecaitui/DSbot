@@ -36,6 +36,7 @@
     "test:phase-9b-contract": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9b-data-dictionary-contract.test.ts",
     "test:phase-9c-pit-dataset": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9c-canonical-pit-dataset.test.ts",
     "test:phase-9d-storage": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9d-research-storage.test.ts && python -m unittest quant_engine.tests.test_research_storage",
+    "test:phase-9e-data-hub": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9e-research-data-hub.test.ts",
     "test:quant-engine": "python -m unittest discover -s quant_engine/tests -p \"test_*.py\"",
     "ci": "npm run typecheck && npm run test && npm run test:quant-engine && npm run build",
     "security:exceptions": "node scripts/check-audit-exceptions.mjs",
