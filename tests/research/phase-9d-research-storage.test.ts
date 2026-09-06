@@ -35,6 +35,7 @@ import {
   restoreCanonicalPointInTimeDataset,
   restoreRawResearchRecords,
 } from '../../src/research/data/storage/ResearchStorageContract';
+import { deriveResearchStorageBundleId } from '../../src/research/data/storage/ResearchStorageIdentity';
 
 function policy(patch: Partial<ResearchUsePolicy> = {}): ResearchUsePolicy {
   return {
@@ -249,6 +250,69 @@ describe('Phase 9D inert payload codec', () => {
 });
 
 describe('Phase 9D durable round trip', () => {
+  it('keeps the TypeScript exact-identity capability equal to the Python commit identity', () => {
+    const normalTruth = semanticParityTruth();
+    const normal = createResearchStorageInterchange([normalTruth.raw], normalTruth.dataset);
+    const whole = mutableRepresentativeInterchange();
+    const fractional = mutableRepresentativeInterchange();
+    fractional.canonicalDataset.records[0].fields[1].presence.value = 10.5;
+    const negativeZero = mutableRepresentativeInterchange();
+    negativeZero.canonicalDataset.records[0].fields[1].presence.value = -0;
+    const richTruth = representativeTruth();
+    const richRaw: RawResearchRecord = {
+      ...richTruth.raw,
+      payload: {
+        ...richTruth.raw.payload as Record<string, unknown>,
+        nested: { alpha: [1, 2.5, 1e-7, 1e-6, false, null], unicode: '研究数据' },
+      },
+    };
+    const rich = createResearchStorageInterchange([richRaw], richTruth.dataset);
+    const floatFormattingEdges = [1e-7, 1e-6, 1e-4, 1e15, 1e16, 1e20, Number.MAX_VALUE]
+      .map((value) => {
+        const fixture = mutableRepresentativeInterchange();
+        fixture.canonicalDataset.records[0].fields[1].presence.value = value;
+        return fixture;
+      });
+    const fixtures = [normal, whole, fractional, negativeZero, rich, ...floatFormattingEdges];
+    fixtures.forEach(assertResearchStorageInterchange);
+
+    const root = mkdtempSync(join(tmpdir(), 'dsbot-phase9d-identity-'));
+    try {
+      const paths = fixtures.map((fixture, index) => {
+        const path = join(root, `identity-${index}.json`);
+        if (index === 3) {
+          const transport: any = structuredClone(fixture);
+          transport.canonicalDataset.records[0].fields[1].presence.value = '__NEGATIVE_ZERO__';
+          writeFileSync(
+            path,
+            JSON.stringify(transport).replace('"__NEGATIVE_ZERO__"', '-0.0'),
+            'utf8',
+          );
+        } else {
+          writeFileSync(path, JSON.stringify(fixture), 'utf8');
+        }
+        return path;
+      });
+      const code = [
+        'import json,sys',
+        'from quant_engine.research_storage import commit_research_storage_bundle',
+        'root=sys.argv[1]',
+        'values=[json.load(open(path, encoding="utf-8")) for path in sys.argv[2:]]',
+        'print(json.dumps([commit_research_storage_bundle(root, value)["bundleId"] for value in values]))',
+      ].join(';');
+      const result = spawnSync(process.env.PYTHON ?? 'python', ['-c', code, root, ...paths], {
+        cwd: process.cwd(), encoding: 'utf8', windowsHide: true,
+      });
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.deepEqual(
+        fixtures.map((fixture) => deriveResearchStorageBundleId(fixture)),
+        JSON.parse(result.stdout),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('accepts a constructor-produced currency relationship', () => {
     const { raw, dataset } = representativeTruth();
     const interchange = createResearchStorageInterchange([raw], dataset);
