@@ -206,6 +206,11 @@ function mutableSemanticInterchange(): any {
   return structuredClone(createResearchStorageInterchange([raw], dataset));
 }
 
+function mutableRepresentativeInterchange(): any {
+  const { raw, dataset } = representativeTruth();
+  return structuredClone(createResearchStorageInterchange([raw], dataset));
+}
+
 describe('Phase 9D inert payload codec', () => {
   it('losslessly preserves all bounded inert values and nested numeric-string keys', () => {
     const input = {
@@ -244,6 +249,45 @@ describe('Phase 9D inert payload codec', () => {
 });
 
 describe('Phase 9D durable round trip', () => {
+  it('accepts a constructor-produced currency relationship', () => {
+    const { raw, dataset } = representativeTruth();
+    const interchange = createResearchStorageInterchange([raw], dataset);
+    assert.doesNotThrow(() => assertResearchStorageInterchange(interchange));
+    const price = dataset.records[0].fields.find((item) => item.fieldId === 'price');
+    const currency = dataset.records[0].fields.find((item) => item.fieldId === 'currency');
+    assert.deepEqual(price?.unit, { kind: 'CURRENCY', currencyFieldId: 'currency' });
+    assert.equal(currency?.logicalType, 'STRING');
+    assert.equal(currency?.unit, 'UNITLESS');
+  });
+
+  it('rejects constructor-inconsistent currency relationships before Hub construction', () => {
+    const fixture = (mutate: (fields: any[]) => void): any => {
+      const value = mutableRepresentativeInterchange();
+      mutate(value.canonicalDataset.records[0].fields);
+      return value;
+    };
+    const cases: readonly [string, any, RegExp][] = [
+      ['self reference', fixture((fields) => {
+        fields.find((item) => item.fieldId === 'price').unit.currencyFieldId = 'price';
+      }), /CANONICAL_CURRENCY_FIELD_NOT_STRING/],
+      ['missing reference', fixture((fields) => {
+        fields.find((item) => item.fieldId === 'price').unit.currencyFieldId = 'currency-does-not-exist';
+      }), /CANONICAL_CURRENCY_FIELD_NOT_FOUND/],
+      ['non-STRING reference', fixture((fields) => {
+        fields.find((item) => item.fieldId === 'price').unit.currencyFieldId = 'zero';
+      }), /CANONICAL_CURRENCY_FIELD_NOT_STRING/],
+      ['CURRENCY-valued reference', fixture((fields) => {
+        fields.find((item) => item.fieldId === 'currency').unit = {
+          kind: 'CURRENCY', currencyFieldId: 'currency',
+        };
+      }), /CANONICAL_CURRENCY_FIELD_IS_CURRENCY/],
+    ];
+    for (const [name, value, reason] of cases) {
+      assert.throws(() => assertResearchStorageInterchange(value), reason, name);
+      assert.throws(() => createResearchDataHub(value), reason, name);
+    }
+  });
+
   it('accepts every legal 9C constructor evidence mode used by the frozen contracts', () => {
     const { raw, dataset } = semanticParityTruth();
     const interchange = createResearchStorageInterchange([raw], dataset);

@@ -185,6 +185,19 @@ function assertCanonicalFieldConsistency(
   }
 }
 
+function assertCanonicalCurrencyRelationship(
+  field: CanonicalPointInTimeField,
+  fieldsById: ReadonlyMap<string, CanonicalPointInTimeField>,
+): void {
+  if (typeof field.unit !== 'object' || field.unit.kind !== 'CURRENCY') return;
+  const currencyField = fieldsById.get(field.unit.currencyFieldId);
+  if (currencyField === undefined) storageViolation('CANONICAL_CURRENCY_FIELD_NOT_FOUND');
+  if (currencyField.logicalType !== 'STRING') storageViolation('CANONICAL_CURRENCY_FIELD_NOT_STRING');
+  if (typeof currencyField.unit === 'object' && currencyField.unit.kind === 'CURRENCY') {
+    storageViolation('CANONICAL_CURRENCY_FIELD_IS_CURRENCY');
+  }
+}
+
 function assertField(field: unknown, recordIndex: number, fieldIndex: number): asserts field is CanonicalPointInTimeField {
   if (field === null || typeof field !== 'object' || Array.isArray(field)) storageViolation('FIELD_OBJECT');
   const value = field as Record<string, unknown>;
@@ -241,13 +254,19 @@ function assertRecord(record: unknown, index: number): asserts record is Canonic
   if (value.availableAt !== null && !isCanonicalTimestamp(value.availableAt)) storageViolation('RECORD_AVAILABLE_AT');
   if (Object.hasOwn(value, 'sourceRevision')) assertSourceRevision(value.sourceRevision);
   if (!Array.isArray(value.fields)) storageViolation('RECORD_FIELDS');
+  value.fields.forEach((field, fieldIndex) => assertField(field, index, fieldIndex));
+  const fields = value.fields as CanonicalPointInTimeField[];
   const ids = new Set<string>();
-  value.fields.forEach((field, fieldIndex) => {
-    assertField(field, index, fieldIndex);
-    assertCanonicalFieldConsistency(field, value as unknown as CanonicalPointInTimeRecord);
+  for (const field of fields) {
     if (ids.has(field.fieldId)) storageViolation('DUPLICATE_FIELD_ID');
     ids.add(field.fieldId);
-  });
+  }
+  const canonicalRecord = value as unknown as CanonicalPointInTimeRecord;
+  const fieldsById = new Map(fields.map((field) => [field.fieldId, field]));
+  for (const field of fields) {
+    assertCanonicalFieldConsistency(field, canonicalRecord);
+    assertCanonicalCurrencyRelationship(field, fieldsById);
+  }
 }
 
 export function assertResearchStorageInterchange(value: unknown): asserts value is ResearchStorageInterchange {

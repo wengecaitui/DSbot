@@ -66,6 +66,9 @@ enforces the cross-field requirement, evidence, historical-policy, and research-
 the Phase 9B dictionary and Phase 9C constructor. Record-envelope evidence must also match the corresponding
 record clock and availability authority. These checks reject canonical combinations that no current constructor
 path can produce; they do not evaluate decision-time visibility or create a second PIT eligibility authority.
+For a `CURRENCY` unit, `currencyFieldId` must resolve in the same canonical record to an existing `STRING` field
+whose own unit is not `CURRENCY`. This mirrors the existing constructor invariant and adds no currency code list,
+normalization, or default.
 
 ## Dependencies and security
 

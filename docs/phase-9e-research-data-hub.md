@@ -9,7 +9,8 @@ authority. Phase 9D's bundle reader remains the durable artifact integrity autho
 
 The Hub accepts only a Phase 9D interchange whose canonical requirement, evidence, historical-policy, and
 research-use relationships have passed cross-semantic validation. Invalid canonical truth therefore fails before
-either Hub capability can evaluate or expose it.
+either Hub capability can evaluate or expose it. This includes Phase 9D validation of same-record canonical
+currency references before the Hub uses Phase 9C decision eligibility.
 
 The public Hub has exactly `decisionPort`, `analysisPort`, and `productionAuthority=false`. It has no raw,
 interchange, canonical-dataset, registry, refresh, cache, query, filter, join, or generic data access method. The
