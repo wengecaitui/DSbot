@@ -74,7 +74,8 @@ const definitions = [
   field('nullable', 'STRING'), field('zero', 'INT64'), field('bool', 'BOOLEAN'), field('empty', 'STRING'),
   field('date', 'DATE', { calendarSemantics: { kind: 'NAMED', timezoneId: 'UTC', calendarId: 'UTC_DAY' } }),
   field('timestamp', 'TIMESTAMP_UTC'), field('decimal', { kind: 'DECIMAL', precision: 8, scale: 2 }),
-  field('missing', 'STRING'), field('secondary', 'FLOAT64'),
+  field('missing', 'STRING'),
+  field('secondary', 'FLOAT64', { availabilityRequirement: 'FIELD_LEVEL_REQUIRED' }),
   field('denied', 'FLOAT64', { researchUsePolicy: policy() }),
   field('historicalDenied', 'FLOAT64', {
     historicalDecisionPolicy: 'FORBIDDEN_AS_DECISION_INPUT', researchUsePolicy: policy({ DISPLAY: 'ALLOW' }),
@@ -91,7 +92,10 @@ function binding(definition: CanonicalFieldDefinition): ProviderSourceFieldBindi
     sourceLogicalType: definition.logicalType, sourceUnit: definition.unit,
     sourcePriceSemantics: definition.priceSemantics, sourceObservationSemantics: definition.observationSemantics,
     sourcePresence: 'OPTIONAL', sourceNullable: true,
-    eventTimeBinding: 'RECORD_ENVELOPE', availableAtBinding: 'RECORD_ENVELOPE',
+    eventTimeBinding: 'RECORD_ENVELOPE',
+    availableAtBinding: definition.fieldId === 'secondary'
+      ? { kind: 'SOURCE_PAYLOAD_PATH', path: ['secondaryAvailableAt'] }
+      : 'RECORD_ENVELOPE',
   };
 }
 
@@ -113,7 +117,8 @@ function baseInterchange(): ResearchStorageInterchange {
     ingestedAt: '2026-09-01T00:00:00.000Z', payload: {
       currency: 'USD', price: 10, nullable: null, zero: 0, bool: false, empty: '',
       date: '2026-01-01', timestamp: '2026-01-01T00:00:00.000Z', decimal: '1234.50', missing: 'present',
-      secondary: 20, denied: 30, historicalDenied: 40, label: 'FUTURE_LABEL_SENTINEL_9E',
+      secondary: 20, secondaryAvailableAt: '2026-01-02T00:00:00.000Z',
+      denied: 30, historicalDenied: 40, label: 'FUTURE_LABEL_SENTINEL_9E',
     }, payloadHash: 'a'.repeat(64), manifestVersion: '1.0.0', manifestReference: 'manifest:9e',
     requestId: 'request-9e', sourceProvenanceRef: 'provenance:eligible',
     sourceRevision: { revisionId: 'revision-eligible', observedAt: '2026-09-01T00:00:00.000Z' },
@@ -158,7 +163,12 @@ function duplicateRows(count: number): MutableInterchange {
 function setAvailability(raw: Record<string, any>, record: Record<string, any>, timestamp: string): void {
   raw.availableAt = timestamp;
   record.availableAt = timestamp;
-  for (const item of record.fields) item.availabilityEvidence = { state: 'KNOWN', value: timestamp, source: 'RECORD_ENVELOPE' };
+  for (const item of record.fields) {
+    item.availabilityEvidence = {
+      state: 'KNOWN', value: timestamp,
+      source: item.availabilityRequirement === 'FIELD_LEVEL_REQUIRED' ? 'SOURCE_PAYLOAD_PATH' : 'RECORD_ENVELOPE',
+    };
+  }
 }
 
 function decision(hub: ReturnType<typeof createResearchDataHub>, fieldIds: string[] = ['price'], decisionTime = '2026-01-03T00:00:00.000Z') {
@@ -241,7 +251,7 @@ describe('Phase 9E decision capability', () => {
 
   it('requires all requested fields and never exposes a partial row', () => {
     for (const evidence of [
-      { state: 'KNOWN', value: '2026-02-01T00:00:00.000Z', source: 'RECORD_ENVELOPE' },
+      { state: 'KNOWN', value: '2026-02-01T00:00:00.000Z', source: 'SOURCE_PAYLOAD_PATH' },
       { state: 'UNKNOWN' },
       { state: 'DOCUMENTED_RULE_UNMATERIALIZED', rule: 'published later' },
     ]) {
@@ -286,9 +296,8 @@ describe('Phase 9E decision capability', () => {
     assert.throws(() => decision(hub, ['historicalDenied']), /HISTORICAL_DECISION_FORBIDDEN/);
     const forged = mutableBase();
     const label = forged.canonicalDataset.records[0].fields.find((item) => item.fieldId === 'label')!;
-    label.historicalDecisionPolicy = 'REQUIRES_PROVABLE_AVAILABILITY';
     label.researchUsePolicy.FACTOR_INPUT = 'ALLOW';
-    assert.throws(() => decision(createResearchDataHub(forged as never), ['label']), /LABEL_DECISION_INPUT/);
+    assert.throws(() => decision(createResearchDataHub(forged as never), ['label']), /CANONICAL_DECISION_POLICY_INCONSISTENT/);
   });
 
   it('delegates PIT edges, forecast event time, late ingestion, JOIN_KEY, and currency context to Phase 9C', () => {
@@ -308,9 +317,12 @@ describe('Phase 9E decision capability', () => {
 
     for (const context of [
       { presence: { state: 'MISSING' } }, { presence: { state: 'NULL' } },
-      { availabilityEvidence: { state: 'KNOWN', value: '2026-02-01T00:00:00.000Z', source: 'RECORD_ENVELOPE' } },
-      { availabilityEvidence: { state: 'UNKNOWN' } },
-      { historicalDecisionPolicy: 'FORBIDDEN_AS_DECISION_INPUT' },
+      {
+        availabilityRequirement: 'FIELD_LEVEL_REQUIRED',
+        availabilityEvidence: { state: 'KNOWN', value: '2026-02-01T00:00:00.000Z', source: 'SOURCE_PAYLOAD_PATH' },
+      },
+      { availabilityRequirement: 'FIELD_LEVEL_REQUIRED', availabilityEvidence: { state: 'UNKNOWN' } },
+      { historicalDecisionPolicy: 'FORBIDDEN_AS_DECISION_INPUT', researchUsePolicy: policy() },
     ]) {
       const data = mutableBase();
       Object.assign(data.canonicalDataset.records[0].fields.find((item) => item.fieldId === 'currency')!, context);

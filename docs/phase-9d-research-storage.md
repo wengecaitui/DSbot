@@ -61,6 +61,12 @@ dataset is evaluated by the unchanged Phase 9C runtime functions, so storage can
 decision eligibility. The existing P2 remains: the current `INT64` vocabulary is represented only within the
 Phase 9C JavaScript safe-integer domain.
 
+A stored canonical dataset is validated semantically as well as structurally. The storage interchange validator
+enforces the cross-field requirement, evidence, historical-policy, and research-use relationships guaranteed by
+the Phase 9B dictionary and Phase 9C constructor. Record-envelope evidence must also match the corresponding
+record clock and availability authority. These checks reject canonical combinations that no current constructor
+path can produce; they do not evaluate decision-time visibility or create a second PIT eligibility authority.
+
 ## Dependencies and security
 
 - DuckDB `1.5.5`: fixed library-controlled query over validated local Parquet through an in-memory connection.

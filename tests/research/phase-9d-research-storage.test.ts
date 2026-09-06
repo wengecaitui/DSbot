@@ -17,6 +17,7 @@ import type {
   ProviderSourceFieldBinding,
   SourcePath,
 } from '../../src/research/data/dictionary/ProviderSourceBindingContract';
+import { createResearchDataHub } from '../../src/research/data/hub/ResearchDataHub';
 import { createCanonicalPointInTimeDataset } from '../../src/research/data/pit/CanonicalPointInTimeDataset';
 import {
   evaluateDecisionInputEligibility,
@@ -29,6 +30,7 @@ import {
 } from '../../src/research/data/storage/InertPayloadCodec';
 import {
   PHASE_9D_RESEARCH_STORAGE_BOUNDARY,
+  assertResearchStorageInterchange,
   createResearchStorageInterchange,
   restoreCanonicalPointInTimeDataset,
   restoreRawResearchRecords,
@@ -148,6 +150,62 @@ function representativeTruth() {
   return { raw, dataset };
 }
 
+function semanticParityTruth() {
+  const recordField = field('recordField', 'FLOAT64');
+  const eventPath = field('eventPath', 'FLOAT64', { eventTimeRequirement: 'FIELD_LEVEL_REQUIRED' });
+  const eventRule = field('eventRule', 'FLOAT64', { eventTimeRequirement: 'FIELD_LEVEL_REQUIRED' });
+  const eventMissing = field('eventMissing', 'FLOAT64', { eventTimeRequirement: 'FIELD_LEVEL_REQUIRED' });
+  const eventNotApplicable = field('eventNotApplicable', 'FLOAT64', { eventTimeRequirement: 'NOT_APPLICABLE' });
+  const availabilityPath = field('availabilityPath', 'FLOAT64', { availabilityRequirement: 'FIELD_LEVEL_REQUIRED' });
+  const availabilityRule = field('availabilityRule', 'FLOAT64', { availabilityRequirement: 'FIELD_LEVEL_REQUIRED' });
+  const availabilityMissing = field('availabilityMissing', 'FLOAT64', { availabilityRequirement: 'FIELD_LEVEL_REQUIRED' });
+  const availabilityUnknown = field('availabilityUnknown', 'FLOAT64', {
+    availabilityRequirement: 'UNKNOWN', researchUsePolicy: policy(),
+  });
+  const fields = [
+    recordField, eventPath, eventRule, eventMissing, eventNotApplicable,
+    availabilityPath, availabilityRule, availabilityMissing, availabilityUnknown,
+  ];
+  const bindings = [
+    binding(recordField),
+    binding(eventPath, ['eventPath'], { eventTimeBinding: { kind: 'SOURCE_PAYLOAD_PATH', path: ['eventTimestamp'] } }),
+    binding(eventRule, ['eventRule'], { eventTimeBinding: { kind: 'DOCUMENTED_RULE', rule: 'Provider event calendar.' } }),
+    binding(eventMissing, ['eventMissing'], { eventTimeBinding: { kind: 'SOURCE_PAYLOAD_PATH', path: ['missingEventTimestamp'] } }),
+    binding(eventNotApplicable),
+    binding(availabilityPath, ['availabilityPath'], { availableAtBinding: { kind: 'SOURCE_PAYLOAD_PATH', path: ['availabilityTimestamp'] } }),
+    binding(availabilityRule, ['availabilityRule'], { availableAtBinding: { kind: 'DOCUMENTED_RULE', rule: 'Provider publication calendar.' } }),
+    binding(availabilityMissing, ['availabilityMissing'], { availableAtBinding: { kind: 'SOURCE_PAYLOAD_PATH', path: ['missingAvailabilityTimestamp'] } }),
+    binding(availabilityUnknown),
+  ];
+  const dictionary: CanonicalFieldDictionary = {
+    schemaVersion: '1.0.0', dictionaryId: 'research.semantic-parity', dictionaryVersion: '1.0.0',
+    dataDomain: 'market-bars', fields, productionAuthority: false,
+  };
+  const bindingSet: ProviderSourceBindingSet = {
+    schemaVersion: '1.0.0', bindingId: 'provider.semantic-parity', bindingVersion: '1.0.0',
+    providerId: 'example-provider', adapterId: 'example-adapter', sourceDatasetRef: 'source:pit',
+    dictionaryId: dictionary.dictionaryId, dictionaryVersion: dictionary.dictionaryVersion,
+    bindings, productionAuthority: false,
+  };
+  const raw: RawResearchRecord = {
+    ...representativeTruth().raw,
+    sourceRecordId: 'semantic-parity-record',
+    payload: {
+      recordField: 1, eventPath: 2, eventRule: 3, eventMissing: 4, eventNotApplicable: 5,
+      availabilityPath: 6, availabilityRule: 7, availabilityMissing: 8, availabilityUnknown: 9,
+      eventTimestamp: '2026-01-01T01:00:00.000Z',
+      availabilityTimestamp: '2026-01-02T01:00:00.000Z',
+    },
+  };
+  const dataset = createCanonicalPointInTimeDataset({ records: [raw], dictionary, bindingSet, manifest: manifest() });
+  return { raw, dataset };
+}
+
+function mutableSemanticInterchange(): any {
+  const { raw, dataset } = semanticParityTruth();
+  return structuredClone(createResearchStorageInterchange([raw], dataset));
+}
+
 describe('Phase 9D inert payload codec', () => {
   it('losslessly preserves all bounded inert values and nested numeric-string keys', () => {
     const input = {
@@ -186,6 +244,89 @@ describe('Phase 9D inert payload codec', () => {
 });
 
 describe('Phase 9D durable round trip', () => {
+  it('accepts every legal 9C constructor evidence mode used by the frozen contracts', () => {
+    const { raw, dataset } = semanticParityTruth();
+    const interchange = createResearchStorageInterchange([raw], dataset);
+    assert.doesNotThrow(() => assertResearchStorageInterchange(interchange));
+    const fields = Object.fromEntries(dataset.records[0].fields.map((item) => [item.fieldId, item]));
+    assert.deepEqual(fields.recordField.eventTimeEvidence, {
+      state: 'KNOWN', value: raw.eventTime, source: 'RECORD_ENVELOPE',
+    });
+    assert.deepEqual(fields.recordField.availabilityEvidence, {
+      state: 'KNOWN', value: raw.availableAt, source: 'RECORD_ENVELOPE',
+    });
+    assert.equal(fields.eventPath.eventTimeEvidence.state, 'KNOWN');
+    assert.equal(fields.eventRule.eventTimeEvidence.state, 'DOCUMENTED_RULE_UNMATERIALIZED');
+    assert.equal(fields.eventMissing.eventTimeEvidence.state, 'UNKNOWN');
+    assert.equal(fields.eventNotApplicable.eventTimeEvidence.state, 'NOT_APPLICABLE');
+    assert.equal(fields.availabilityPath.availabilityEvidence.state, 'KNOWN');
+    assert.equal(fields.availabilityRule.availabilityEvidence.state, 'DOCUMENTED_RULE_UNMATERIALIZED');
+    assert.equal(fields.availabilityMissing.availabilityEvidence.state, 'UNKNOWN');
+    assert.equal(fields.availabilityUnknown.availabilityEvidence.state, 'UNKNOWN');
+  });
+
+  it('rejects canonical semantic combinations that no 9B/9C constructor path can produce', () => {
+    const mutateField = (fieldId: string, mutate: (field: any, value: any) => void): any => {
+      const value = mutableSemanticInterchange();
+      const target = value.canonicalDataset.records[0].fields.find((item: any) => item.fieldId === fieldId);
+      mutate(target, value);
+      return value;
+    };
+    const cases: readonly [string, any, RegExp][] = [
+      ['unknown requirement with known evidence', mutateField('availabilityUnknown', (target) => {
+        target.availabilityEvidence = { state: 'KNOWN', value: '2026-01-02T00:00:00.000Z', source: 'RECORD_ENVELOPE' };
+      }), /CANONICAL_AVAILABILITY_REQUIREMENT_EVIDENCE_MISMATCH/],
+      ['unknown requirement with decision permission', mutateField('availabilityUnknown', (target) => {
+        target.researchUsePolicy.FACTOR_INPUT = 'ALLOW';
+      }), /CANONICAL_DECISION_POLICY_INCONSISTENT/],
+      ['label with decision permission', mutateField('recordField', (target) => {
+        target.semanticRole = 'LABEL';
+        target.historicalDecisionPolicy = 'FORBIDDEN_AS_DECISION_INPUT';
+      }), /CANONICAL_DECISION_POLICY_INCONSISTENT/],
+      ['label without forbidden historical policy', mutateField('availabilityUnknown', (target) => {
+        target.semanticRole = 'LABEL';
+      }), /CANONICAL_LABEL_HISTORICAL_POLICY_INCONSISTENT/],
+      ['historically forbidden field with decision permission', mutateField('recordField', (target) => {
+        target.historicalDecisionPolicy = 'FORBIDDEN_AS_DECISION_INPUT';
+      }), /CANONICAL_DECISION_POLICY_INCONSISTENT/],
+      ['not-applicable event requirement with known evidence', mutateField('eventNotApplicable', (target) => {
+        target.eventTimeEvidence = { state: 'KNOWN', value: '2026-01-01T00:00:00.000Z', source: 'RECORD_ENVELOPE' };
+      }), /CANONICAL_EVENT_TIME_REQUIREMENT_EVIDENCE_MISMATCH/],
+      ['record event evidence mismatch', mutateField('recordField', (target) => {
+        target.eventTimeEvidence.value = '2026-01-01T00:00:00.001Z';
+      }), /CANONICAL_RECORD_EVENT_TIME_EVIDENCE_MISMATCH/],
+      ['record availability evidence mismatch', mutateField('recordField', (target) => {
+        target.availabilityEvidence.value = '2026-01-02T00:00:00.001Z';
+      }), /CANONICAL_RECORD_AVAILABILITY_EVIDENCE_MISMATCH/],
+      ['field event evidence forged from record envelope', mutateField('eventPath', (target) => {
+        target.eventTimeEvidence.source = 'RECORD_ENVELOPE';
+      }), /CANONICAL_EVENT_TIME_REQUIREMENT_EVIDENCE_MISMATCH/],
+      ['field availability evidence forged from record envelope', mutateField('availabilityPath', (target) => {
+        target.availabilityEvidence.source = 'RECORD_ENVELOPE';
+      }), /CANONICAL_AVAILABILITY_REQUIREMENT_EVIDENCE_MISMATCH/],
+      ['known envelope availability without authority', mutateField('recordField', (_target, value) => {
+        value.rawRecords[0].availableAt = null;
+        value.rawRecords[0].availableAtAuthority = 'UNKNOWN';
+        value.canonicalDataset.records[0].availableAt = null;
+        value.canonicalDataset.records[0].availableAtAuthority = 'UNKNOWN';
+      }), /CANONICAL_RECORD_AVAILABILITY_EVIDENCE_MISMATCH/],
+    ];
+    for (const [name, value, reason] of cases) {
+      assert.throws(() => assertResearchStorageInterchange(value), reason, name);
+    }
+  });
+
+  it('rejects the cross-layer UNKNOWN-availability forgery at storage and Hub entry', () => {
+    const forged = mutableSemanticInterchange();
+    const target = forged.canonicalDataset.records[0].fields.find((item: any) => item.fieldId === 'availabilityUnknown');
+    target.availabilityEvidence = {
+      state: 'KNOWN', value: forged.canonicalDataset.records[0].availableAt, source: 'RECORD_ENVELOPE',
+    };
+    target.researchUsePolicy.FACTOR_INPUT = 'ALLOW';
+    assert.throws(() => assertResearchStorageInterchange(forged), /CANONICAL_AVAILABILITY_REQUIREMENT_EVIDENCE_MISMATCH/);
+    assert.throws(() => createResearchDataHub(forged), /CANONICAL_AVAILABILITY_REQUIREMENT_EVIDENCE_MISMATCH/);
+  });
+
   it('preserves 9A raw, 9B-bound 9C truth and runtime PIT decisions through real Parquet storage', () => {
     const { raw, dataset } = representativeTruth();
     const decisionTimes = [
