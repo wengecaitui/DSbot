@@ -394,8 +394,9 @@
 ### Phase 9G — First Real Provider Qualification ⏳ CURRENT
 
 - **基线**: `feature/orangeai-split@1de4e525ac6eba256536f487525b37be2c465011`。
-- **当前任务**: 通过现有 `ResearchProviderIngress` 接入 TickFlow 免费历史 A 股日 K REST，范围固定为
-  `period=1d`、`adjust=none` 和单页 `count<=10000`。
+- **当前任务**: 通过现有 `ResearchProviderIngress` 接入 TickFlow 免费历史日 K REST，标的范围固定为
+  沪深京交易所后缀的六位代码（不声明品种类别），参数固定为 `period=1d`、`adjust=none` 和单页
+  `count<=10000`。
 - **时间边界**: provider `timestamp` 仅映射为 `eventTime`；`availableAt=null` 且 authority 为
   `UNKNOWN`，因此 qualification 仅表示 bounded research ingestion，不授予 PIT 或 decision-input 资格。
 - **停止边界**: 网络 I/O 仅位于 TickFlow adapter；不增加 storage/process、第二 ingress、第二 PIT

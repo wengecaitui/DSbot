@@ -124,7 +124,8 @@ describe('Phase 9G TickFlow manifest and qualification boundary', () => {
       provider: 'tickflow',
       adapter: 'tickflow-historical-kline-v1',
       dataset: 'historical-raw-1d-klines',
-      marketScope: 'CN-equities',
+      marketScope: 'CN-SH-SZ-BJ-6digit-symbols',
+      instrumentClassVerified: false,
       period: '1d',
       adjust: 'none',
       productionAuthority: false,
@@ -146,11 +147,28 @@ describe('Phase 9G TickFlow manifest and qualification boundary', () => {
     }
   });
 
-  it('accepts only its pinned CN symbol configuration and rejects adjusted configuration', () => {
+  it('keeps manifest scope equal to the accepted six-digit SH/SZ/BJ symbol syntax', () => {
     const subject = adapter(transport(() => response()));
-    assert.doesNotThrow(() => subject.validateConfiguration({ symbol: SYMBOL }));
+    assert.deepEqual(subject.describe().marketScopes, ['CN-SH-SZ-BJ-6digit-symbols']);
+    assert.equal(TICKFLOW_QUALIFICATION.marketScope, subject.describe().marketScopes[0]);
+    assert.equal(TICKFLOW_QUALIFICATION.instrumentClassVerified, false);
+    for (const symbol of ['600000.SH', '510300.SH', '159915.SZ', '000001.SH', '430047.BJ']) {
+      const candidate = createTickFlowHistoricalKlineAdapter(
+        { symbol },
+        { fetch: transport(() => response()) },
+      );
+      assert.doesNotThrow(() => candidate.validateConfiguration({ symbol }));
+    }
+    for (const symbol of ['AAPL.US', '00700.HK', '600000', 'ABC.SH']) {
+      assert.throws(
+        () => createTickFlowHistoricalKlineAdapter(
+          { symbol },
+          { fetch: transport(() => response()) },
+        ),
+        /CONFIGURATION_SYMBOL/,
+      );
+    }
     for (const invalid of [
-      { symbol: 'AAPL.US' },
       { symbol: '600000.SH', adjust: 'forward' },
       { symbol: '600000.SH', period: '1m' },
       { symbol: '600000.SH', baseUrl: 'https://example.test' },
@@ -359,6 +377,11 @@ describe('Phase 9G TickFlow authority boundary', () => {
     const qualificationSource = readFileSync(QUALIFICATION_SOURCE, 'utf8');
     assert.equal(adapterSource.includes('globalThis.fetch'), true);
     assert.equal(qualificationSource.includes('fetch('), false);
+    const legacyClassScope = ['CN', 'equities'].join('-');
+    const legacyClassPattern = ['CN', 'EQUITY', 'SYMBOL'].join('_');
+    assert.equal(adapterSource.includes(legacyClassScope), false);
+    assert.equal(adapterSource.includes(legacyClassPattern), false);
+    assert.equal(qualificationSource.includes(legacyClassScope), false);
     for (const forbidden of [
       'MarketDataRuntime', 'TradingKernel', 'ProductionSpine', 'PreTradeRiskGateway',
       'ResearchDataHub', 'ResearchDatasetVersionCatalog', 'node:fs', 'node:child_process',

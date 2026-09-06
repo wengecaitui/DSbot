@@ -20,7 +20,7 @@ const MANIFEST_VERSION = '1.0.0';
 const MANIFEST_REFERENCE = 'tickflow:manifest:historical-kline-v1';
 const PERIOD = '1d';
 const ADJUST = 'none';
-const CN_EQUITY_SYMBOL = /^\d{6}\.(?:SH|SZ|BJ)$/;
+const CN_EXCHANGE_SYMBOL = /^\d{6}\.(?:SH|SZ|BJ)$/;
 const REQUIRED_COLUMNS = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'amount'] as const;
 const OPTIONAL_COLUMNS = ['open_interest', 'prev_close', 'settlement_price'] as const;
 
@@ -62,7 +62,7 @@ function exactConfiguration(value: unknown): TickFlowHistoricalKlineConfiguratio
   if (Object.keys(descriptors).length !== 1 || descriptors.symbol === undefined) fail('CONFIGURATION_FIELDS');
   if (descriptors.symbol.get !== undefined || descriptors.symbol.set !== undefined) fail('CONFIGURATION_ACCESSOR');
   const symbol = descriptors.symbol.value;
-  if (typeof symbol !== 'string' || !CN_EQUITY_SYMBOL.test(symbol)) fail('CONFIGURATION_SYMBOL');
+  if (typeof symbol !== 'string' || !CN_EXCHANGE_SYMBOL.test(symbol)) fail('CONFIGURATION_SYMBOL');
   return Object.freeze({ symbol });
 }
 
@@ -84,7 +84,7 @@ export const TICKFLOW_PROVIDER_MANIFEST: ProviderManifest = deepFreeze({
   adapterId: ADAPTER_ID,
   adapterVersion: ADAPTER_VERSION,
   dataDomains: ['market-bars'],
-  marketScopes: ['CN-equities'],
+  marketScopes: ['CN-SH-SZ-BJ-6digit-symbols'],
   transport: { kind: 'request-response', protocol: 'HTTPS-REST' },
   auth: { mode: 'NONE', credentialReferences: [] },
   pagination: {

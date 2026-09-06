@@ -5,7 +5,7 @@
 The provider contract was checked against TickFlow's official documentation and official SDK on 2026-09-07.
 The free service origin is fixed to `https://free-api.tickflow.org`, requires no API key, and offers historical
 daily-or-longer K-lines without real-time or minute data. This qualification uses only `GET /v1/klines` with a single
-CN-equity symbol, `period=1d`, explicit `adjust=none`, and `count<=10000`.
+six-digit symbol carrying an `SH`, `SZ`, or `BJ` suffix, `period=1d`, explicit `adjust=none`, and `count<=10000`.
 
 Official references:
 
@@ -20,8 +20,12 @@ The SDK license does not establish unrestricted redistribution rights for provid
 
 The adapter implements exactly `describe()`, `validateConfiguration()`, and `fetch()`. It is registered through the
 existing `ResearchProviderIngress`; Phase 9G adds no second registry, generic fetch pipeline, automatic pagination, or
-retry. The configuration contains only the pinned CN symbol. Callers cannot choose an origin, path, period, adjustment,
-or credential.
+retry. The configuration contains only the pinned exchange-qualified symbol. Callers cannot choose an origin, path,
+period, adjustment, or credential.
+
+The manifest scope `CN-SH-SZ-BJ-6digit-symbols` describes exactly this syntax. The same syntax can name several
+instrument classes, so Phase 9G does not infer a class from code ranges and records `instrumentClassVerified=false` in
+the qualification declaration. Unknown or nonexistent symbols remain provider-boundary failures.
 
 The supported path is:
 
