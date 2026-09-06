@@ -2,8 +2,6 @@
   "$schema": "https://github.com/IBM/audit-ci/raw/main/docs/schema.json",
   "moderate": true,
   "allowlist": [
-    "GHSA-528h-pc64-c93x",
-    "GHSA-v5mp-jgw5-2x6j",
-    "GHSA-82x6-q7mm-w9cf"
+    "GHSA-528h-pc64-c93x"
   ]
 }
