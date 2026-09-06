@@ -38,6 +38,7 @@
     "test:phase-9d-storage": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9d-research-storage.test.ts && python -m unittest quant_engine.tests.test_research_storage",
     "test:phase-9e-data-hub": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9e-research-data-hub.test.ts",
     "test:phase-9f-lineage": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9f-data-lineage-versioning.test.ts",
+    "test:phase-9g-tickflow": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/research/phase-9g-tickflow-provider.test.ts",
     "test:quant-engine": "python -m unittest discover -s quant_engine/tests -p \"test_*.py\"",
     "ci": "npm run typecheck && npm run test && npm run test:quant-engine && npm run build",
     "security:exceptions": "node scripts/check-audit-exceptions.mjs",
