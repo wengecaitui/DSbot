@@ -1,13 +1,24 @@
 /**
  * Phase 10 deterministic evidence aggregation.
  *
- * This gate consumes exact-head workflow observations from the existing proof
- * and receipt workflows. It grants no Paper, Testnet, Live, or production
- * authority and performs no I/O.
+ * This gate reverifies exact artifact content where an existing in-memory
+ * verifier is available and rejects unauthenticated workflow summaries. It
+ * grants no Paper, Testnet, Live, or production authority and performs no I/O.
  */
-import { REFERENCE_PROOF_CONTRACT_VERSION } from './ReferenceInfrastructureProof';
-import { STAGE_4B2_RECEIPT_SCHEMA } from './PaperReadinessReview';
-import { RECEIPT_4B3_SCHEMA } from './RuntimeSafety';
+import { createHash } from 'node:crypto';
+import {
+  REFERENCE_PROOF_CONTRACT_VERSION,
+  verifyReferenceInfrastructureProof,
+} from './ReferenceInfrastructureProof';
+import {
+  STAGE_4B2_RECEIPT_SCHEMA,
+  verifyStage4B2Receipt,
+} from './PaperReadinessReview';
+import {
+  RECEIPT_4B3_SCHEMA,
+  type Stage4B3Receipt,
+  verifyStage4B3Receipt,
+} from './RuntimeSafety';
 import { SHADOW_RUNTIME_PROOF_SCHEMA_VERSION } from '../shadow/ShadowRuntimeProof';
 
 export const PRODUCTION_READINESS_EVIDENCE_FAMILIES = Object.freeze([
@@ -56,16 +67,43 @@ export interface SecurityEvidenceObservation extends ExactHeadWorkflowObservatio
   readonly exceptions: readonly SecurityExceptionObservation[];
 }
 
-export interface ExistingArtifactEvidenceObservation extends ExactHeadWorkflowObservationBase {
-  readonly family:
-    | 'REFERENCE_INFRASTRUCTURE_PROOF'
-    | 'INDICATOR_ASSET_READINESS_PROOF'
-    | 'STAGE_4B2_PAPER_READINESS_RECEIPT'
-    | 'STAGE_4B3_SAFETY_RECEIPT'
-    | 'STAGE_4B4_SHADOW_RUNTIME_PROOF';
+interface ExistingArtifactEvidenceObservationBase extends ExactHeadWorkflowObservationBase {
   readonly artifactContract: string;
   readonly artifactSha256: string;
+  readonly artifactJson: string;
 }
+
+export interface ReferenceInfrastructureEvidenceObservation
+  extends ExistingArtifactEvidenceObservationBase {
+  readonly family: 'REFERENCE_INFRASTRUCTURE_PROOF';
+}
+
+export interface IndicatorAssetReadinessEvidenceObservation
+  extends ExistingArtifactEvidenceObservationBase {
+  readonly family: 'INDICATOR_ASSET_READINESS_PROOF';
+}
+
+export interface Stage4B2EvidenceObservation extends ExistingArtifactEvidenceObservationBase {
+  readonly family: 'STAGE_4B2_PAPER_READINESS_RECEIPT';
+  readonly stage4AClosureAuditId: string;
+  readonly stage4B1ArtifactJson: string;
+}
+
+export interface Stage4B3EvidenceObservation extends ExistingArtifactEvidenceObservationBase {
+  readonly family: 'STAGE_4B3_SAFETY_RECEIPT';
+  readonly stage4B2ReceiptJson: string;
+}
+
+export interface Stage4B4EvidenceObservation extends ExistingArtifactEvidenceObservationBase {
+  readonly family: 'STAGE_4B4_SHADOW_RUNTIME_PROOF';
+}
+
+export type ExistingArtifactEvidenceObservation =
+  | ReferenceInfrastructureEvidenceObservation
+  | IndicatorAssetReadinessEvidenceObservation
+  | Stage4B2EvidenceObservation
+  | Stage4B3EvidenceObservation
+  | Stage4B4EvidenceObservation;
 
 export type ProductionReadinessEvidenceObservation =
   | CiEvidenceObservation
@@ -99,7 +137,13 @@ const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const CHECK_KEYS = Object.freeze([
   'completedAt', 'conclusion', 'family', 'headSha', 'runId', 'status', 'validUntil', 'workflow',
 ]);
-const ARTIFACT_KEYS = Object.freeze([...CHECK_KEYS, 'artifactContract', 'artifactSha256'].sort());
+const ARTIFACT_KEYS = Object.freeze([
+  ...CHECK_KEYS, 'artifactContract', 'artifactJson', 'artifactSha256',
+].sort());
+const STAGE_4B2_KEYS = Object.freeze([
+  ...ARTIFACT_KEYS, 'stage4AClosureAuditId', 'stage4B1ArtifactJson',
+].sort());
+const STAGE_4B3_KEYS = Object.freeze([...ARTIFACT_KEYS, 'stage4B2ReceiptJson'].sort());
 const SECURITY_KEYS = Object.freeze([...CHECK_KEYS, 'exceptions'].sort());
 const INPUT_KEYS = Object.freeze(['candidateHead', 'evaluationTime', 'evidence']);
 const EXCEPTION_KEYS = Object.freeze(['advisoryId', 'expiresAt', 'package']);
@@ -132,6 +176,17 @@ const EXPECTED = Object.freeze({
 const WARNINGS = Object.freeze([
   'INT64_JS_SAFE_INTEGER_LIMITATION',
   'PYTHON_BRIDGE_PARALLEL_STARTUP_TIMING_INSTABILITY',
+]);
+
+// Repository-owned mirror of the unresolved exception in
+// security/audit-exceptions.json. It stays fail-closed until an ordinary source
+// change removes it after the independent remediation is complete.
+const REPOSITORY_SECURITY_BLOCKERS = Object.freeze([
+  Object.freeze({
+    advisoryId: 'GHSA-528h-pc64-c93x',
+    package: 'stream-json',
+    expiresAt: '2026-09-11',
+  }),
 ]);
 
 type PlainValue = null | string | number | boolean | PlainValue[] | { [key: string]: PlainValue };
@@ -201,6 +256,87 @@ function dateMs(value: PlainValue | undefined): number | null {
   return milliseconds;
 }
 
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function parseArtifact(value: PlainValue | undefined): unknown {
+  if (typeof value !== 'string') throw new Error('ARTIFACT_JSON_INVALID');
+  const parsed: unknown = JSON.parse(value);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('ARTIFACT_JSON_INVALID');
+  }
+  return parsed;
+}
+
+function reverifyArtifact(
+  family: ExistingArtifactEvidenceObservation['family'],
+  observation: Record<string, PlainValue>,
+  candidateHead: string,
+): string | null {
+  if (typeof observation.artifactJson !== 'string' ||
+      typeof observation.artifactSha256 !== 'string' ||
+      !SHA256.test(observation.artifactSha256) ||
+      sha256(observation.artifactJson) !== observation.artifactSha256) {
+    return `ARTIFACT_BYTES_INVALID:${family}`;
+  }
+
+  let artifact: unknown;
+  try {
+    artifact = parseArtifact(observation.artifactJson);
+  } catch {
+    return `ARTIFACT_CONTENT_INVALID:${family}`;
+  }
+
+  try {
+    if (family === 'REFERENCE_INFRASTRUCTURE_PROOF') {
+      verifyReferenceInfrastructureProof(artifact, {
+        expectedRepository: 'wengecaitui/DSbot',
+        expectedSourceCommit: candidateHead,
+        expectedWorkflow: '.github/workflows/reference-infrastructure-proof.yml',
+      });
+      return null;
+    }
+
+    if (family === 'STAGE_4B2_PAPER_READINESS_RECEIPT') {
+      if (typeof observation.stage4AClosureAuditId !== 'string' ||
+          typeof observation.stage4B1ArtifactJson !== 'string') {
+        return `ARTIFACT_SUPPORTING_EVIDENCE_INVALID:${family}`;
+      }
+      const stage4B1Artifact = parseArtifact(observation.stage4B1ArtifactJson);
+      verifyStage4B2Receipt(artifact, {
+        sourceCommit: candidateHead,
+        stage4AClosureAuditId: observation.stage4AClosureAuditId,
+        stage4B1Artifact,
+        stage4B1ArtifactSourceSha256: sha256(observation.stage4B1ArtifactJson),
+      });
+      return null;
+    }
+
+    if (family === 'STAGE_4B3_SAFETY_RECEIPT') {
+      if (typeof observation.stage4B2ReceiptJson !== 'string') {
+        return `ARTIFACT_SUPPORTING_EVIDENCE_INVALID:${family}`;
+      }
+      const receipt = artifact as Stage4B3Receipt;
+      verifyStage4B3Receipt(
+        receipt,
+        observation.stage4B2ReceiptJson,
+        sha256(observation.stage4B2ReceiptJson),
+      );
+      if (receipt.sourceCommit !== candidateHead) {
+        return `ARTIFACT_HEAD_MISMATCH:${family}`;
+      }
+      return null;
+    }
+  } catch {
+    return `ARTIFACT_REVERIFICATION_FAILED:${family}`;
+  }
+
+  // These existing verifiers require repository or ledger/snapshot reads.
+  // Under this gate's no-I/O boundary, their content cannot be authenticated.
+  return `ARTIFACT_REVERIFICATION_UNAVAILABLE:${family}`;
+}
+
 function frozenResult(
   candidateHead: string,
   state: ProductionReadinessState,
@@ -233,7 +369,7 @@ function candidateHeadWithoutAccessors(input: unknown): string {
   }
 }
 
-/** Evaluate immutable, already-issued workflow evidence for one exact candidate head. */
+/** Evaluate immutable evidence content for one exact candidate head. */
 export function evaluateProductionReadinessEvidence(
   input: ProductionReadinessEvidenceInput,
 ): ProductionReadinessEvidenceResult {
@@ -255,6 +391,13 @@ export function evaluateProductionReadinessEvidence(
 
   const evaluationMs = timestampMs(cloned.evaluationTime);
   if (evaluationMs === null) errors.add('EVALUATION_TIME_INVALID');
+  if (evaluationMs !== null) {
+    for (const exception of REPOSITORY_SECURITY_BLOCKERS) {
+      const expiryMs = dateMs(exception.expiresAt)!;
+      const lifecycle = evaluationMs >= expiryMs ? 'EXPIRED' : 'ACTIVE';
+      activationBlockers.add(`SECURITY_EXCEPTION_${lifecycle}:${exception.advisoryId}`);
+    }
+  }
   if (!Array.isArray(cloned.evidence)) {
     errors.add('EVIDENCE_COLLECTION_INVALID');
     return frozenResult(candidateHead, 'EVIDENCE_INVALID', false, errors);
@@ -279,7 +422,11 @@ export function evaluateProductionReadinessEvidence(
       ? SECURITY_KEYS
       : typedFamily === 'CI'
         ? CHECK_KEYS
-        : ARTIFACT_KEYS;
+        : typedFamily === 'STAGE_4B2_PAPER_READINESS_RECEIPT'
+          ? STAGE_4B2_KEYS
+          : typedFamily === 'STAGE_4B3_SAFETY_RECEIPT'
+            ? STAGE_4B3_KEYS
+            : ARTIFACT_KEYS;
     if (!hasExactKeys(raw, expectedKeys)) errors.add(`EVIDENCE_SHAPE_INVALID:${typedFamily}`);
 
     if (typeof raw.headSha !== 'string' || !GIT_SHA.test(raw.headSha)) {
@@ -317,9 +464,18 @@ export function evaluateProductionReadinessEvidence(
     const contract = EXPECTED[typedFamily].contract;
     if (contract !== null) {
       if (raw.artifactContract !== contract) errors.add(`EVIDENCE_CONTRACT_MISMATCH:${typedFamily}`);
-      if (typeof raw.artifactSha256 !== 'string' || !SHA256.test(raw.artifactSha256)) {
-        errors.add(`EVIDENCE_ARTIFACT_DIGEST_INVALID:${typedFamily}`);
+      const verificationError = reverifyArtifact(
+        typedFamily as ExistingArtifactEvidenceObservation['family'],
+        raw,
+        candidateHead,
+      );
+      if (verificationError !== null) {
+        errors.add(verificationError);
       }
+    } else {
+      // CI and Security expose no repository-owned, offline-verifiable receipt.
+      // A caller-created workflow summary cannot establish GitHub workflow truth.
+      errors.add(`UNVERIFIED_EXTERNAL_OBSERVATION:${typedFamily}`);
     }
 
     if (typedFamily === 'SECURITY') {
@@ -352,7 +508,9 @@ export function evaluateProductionReadinessEvidence(
   for (const family of PRODUCTION_READINESS_EVIDENCE_FAMILIES) {
     if (!seen.has(family)) errors.add(`MISSING_EVIDENCE:${family}`);
   }
-  if (errors.size !== 0) return frozenResult(candidateHead, 'EVIDENCE_INVALID', false, errors);
+  if (errors.size !== 0) {
+    return frozenResult(candidateHead, 'EVIDENCE_INVALID', false, [...errors, ...activationBlockers]);
+  }
   if (activationBlockers.size !== 0) {
     return frozenResult(candidateHead, 'BLOCKED', true, activationBlockers);
   }

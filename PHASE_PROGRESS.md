@@ -410,7 +410,8 @@
 - **当前任务**: 聚合现有 CI、Security、Reference Infrastructure、Indicator Asset 与 Stage 4B2–4B4
   工作流的精确 HEAD 证据；缺失、失败、过期、重复或混合 HEAD 的证据均 fail closed。
 - **结果边界**: 最大状态仅为 `READY_FOR_ACTIVATION_DECISION`；不授予 production、Testnet 或 Live
-  权威。当前 `GHSA-528h-pc64-c93x` 例外存在时状态为 `BLOCKED`，到期仍不视为解决。
+  权威。CI/Security 调用方摘要没有离线可认证收据时为 `EVIDENCE_INVALID`；省略当前
+  `GHSA-528h-pc64-c93x` 例外不能获得正向结果，到期也不视为解决。
 - **停止边界**: 不增加 network/storage/process I/O，不改变 Phase 9A–9G、TradingKernel、OMS、Risk
   或 MarketDataRuntime 权威，不执行自动激活。
 
