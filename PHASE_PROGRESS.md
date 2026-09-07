@@ -19,8 +19,8 @@
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
 | 7 | Hermes 握手 + Quant Terminal（7A/7B/7C 已合并） | P1 | ✅完成 | 100% |
 | 8 | 权威生产运行时组合 + Operations Evidence Read Bridge | P1 | ✅完成 | 100% |
-| 9 | Research Data Foundation | P1 | ⏳9G First Provider Qualification 当前 | 70% |
-| 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
+| 9 | Research Data Foundation | P1 | ✅9G First Provider Qualification 已合并 | 100% |
+| 10 | Production Readiness Evidence Gate | P2 | ⏳本地实现 | 80% |
 
 ---
 
@@ -391,10 +391,10 @@
 - **停止边界**: 不自动选择版本，不读取 bundle 或数据，不改变 9C PIT / 9E Hub 权威，不增加
   filesystem/network/process、provider ingestion、backtest kernel 或生产交易权威。
 
-### Phase 9G — First Real Provider Qualification ⏳ CURRENT
+### Phase 9G — First Real Provider Qualification ✅ MERGED / COMPLETE
 
-- **基线**: `feature/orangeai-split@1de4e525ac6eba256536f487525b37be2c465011`。
-- **当前任务**: 通过现有 `ResearchProviderIngress` 接入 TickFlow 免费历史日 K REST，标的范围固定为
+- **实现 PR / 合并提交**: #140 / `f03629c33c4d867578f144889a7d09b73c29c8aa`。
+- **已完成**: 通过现有 `ResearchProviderIngress` 接入 TickFlow 免费历史日 K REST，标的范围固定为
   沪深京交易所后缀的六位代码（不声明品种类别），参数固定为 `period=1d`、`adjust=none` 和单页
   `count<=10000`。
 - **时间边界**: provider `timestamp` 仅映射为 `eventTime`；`availableAt=null` 且 authority 为
@@ -404,7 +404,18 @@
 
 ---
 
-## Phase 10 — 审核与验证 🔲
+## Phase 10 — Production Readiness Evidence Gate ⏳ CURRENT
+
+- **基线**: `feature/orangeai-split@f03629c33c4d867578f144889a7d09b73c29c8aa`。
+- **当前任务**: 聚合现有 CI、Security、Reference Infrastructure、Indicator Asset 与 Stage 4B2–4B4
+  工作流的精确 HEAD 证据；缺失、失败、过期、重复或混合 HEAD 的证据均 fail closed。
+- **结果边界**: 最大状态仅为 `READY_FOR_ACTIVATION_DECISION`；不授予 production、Testnet 或 Live
+  权威。CI/Security 调用方摘要没有离线可认证收据时为 `EVIDENCE_INVALID`；省略当前
+  `GHSA-528h-pc64-c93x` 例外不能获得正向结果，到期也不视为解决。
+- **停止边界**: 不增加 network/storage/process I/O，不改变 Phase 9A–9G、TradingKernel、OMS、Risk
+  或 MarketDataRuntime 权威，不执行自动激活。
+
+### 历史审核清单（不属于本次证据聚合门）
 
 ### 10.1 代码审核（tsc + lint）🔲
 - ⏳ 当前 TS 编译有 8 个历史债务错误（不在新代码中）
