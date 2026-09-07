@@ -19,7 +19,7 @@
 | 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
 | 7 | Hermes 握手 + Quant Terminal（7A/7B/7C 已合并） | P1 | ✅完成 | 100% |
 | 8 | 权威生产运行时组合 + Operations Evidence Read Bridge | P1 | ✅完成 | 100% |
-| 9 | Research Data Foundation | P1 | ⏳9F Lineage Governance 当前 | 60% |
+| 9 | Research Data Foundation | P1 | ⏳9G First Provider Qualification 当前 | 70% |
 | 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
 
 ---
@@ -383,17 +383,24 @@
 - **实现 PR / 合并提交**: #138 / `58076b6b813ec84cf7757cd72016727ee9f2c585`。
 - **当前状态**: `toml@4.2.0` 已成为集成基线；Phase 9F 不改变剩余的临时 `stream-json` 例外范围。
 
-### Phase 9F — Research Data Lineage / Version / Deprecation ⏳ CURRENT
+### Phase 9F — Research Data Lineage / Version / Deprecation ✅ MERGED / COMPLETE
 
-- **基线**: `feature/orangeai-split@58076b6b813ec84cf7757cd72016727ee9f2c585`。
-- **当前任务**: 以 Phase 9D `storageBundleId` 作为精确版本身份，建立 immutable lineage、显式
+- **实现 PR / 合并提交**: #139 / `1de4e525ac6eba256536f487525b37be2c465011`。
+- **已完成**: 以 Phase 9D `storageBundleId` 作为精确版本身份，建立 immutable lineage、显式
   supersession、deprecation 与按 `governanceTime` 限界的 metadata catalog。
 - **停止边界**: 不自动选择版本，不读取 bundle 或数据，不改变 9C PIT / 9E Hub 权威，不增加
   filesystem/network/process、provider ingestion、backtest kernel 或生产交易权威。
 
-### Phase 9G — Research Ingestion + First Provider Qualification（DEFERRED）
+### Phase 9G — First Real Provider Qualification ⏳ CURRENT
 
-- 真实 research provider ingestion 与首个 provider qualification 保持延后。
+- **基线**: `feature/orangeai-split@1de4e525ac6eba256536f487525b37be2c465011`。
+- **当前任务**: 通过现有 `ResearchProviderIngress` 接入 TickFlow 免费历史日 K REST，标的范围固定为
+  沪深京交易所后缀的六位代码（不声明品种类别），参数固定为 `period=1d`、`adjust=none` 和单页
+  `count<=10000`。
+- **时间边界**: provider `timestamp` 仅映射为 `eventTime`；`availableAt=null` 且 authority 为
+  `UNKNOWN`，因此 qualification 仅表示 bounded research ingestion，不授予 PIT 或 decision-input 资格。
+- **停止边界**: 网络 I/O 仅位于 TickFlow adapter；不增加 storage/process、第二 ingress、第二 PIT
+  authority、backtest、Paper/Testnet/Live 或生产交易权威。
 
 ---
 
