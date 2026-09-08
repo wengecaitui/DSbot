@@ -109,7 +109,7 @@ export async function dispatchHandler(
   // Central production-runtime quarantine: every registered direct mutation
   // tool fails closed before credential read / private-key use / authenticated
   // mutation request. Read-only handlers are unaffected.
-  const quarantineReason = quarantineReasonForTool(toolName);
+  const quarantineReason = quarantineReasonForTool(toolName, toolInput);
   if (quarantineReason !== null) {
     return errorResult(quarantineReason);
   }
