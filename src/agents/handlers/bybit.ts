@@ -9,7 +9,7 @@ import type { ToolInput, HandlerResult, HandlersMap, HandlerContext } from './ty
 import { errorResult } from './types';
 import type { BybitConfig } from '../../exchanges/bybit';
 import * as bybit from '../../exchanges/bybit';
-import { isDirectExchangeExecutionQuarantined, directExecutionQuarantineReason } from './direct-exchange-execution';
+import { isDirectMutationQuarantined, directMutationQuarantineReason } from './direct-exchange-execution';
 
 // =============================================================================
 // HELPERS
@@ -110,8 +110,8 @@ async function longHandler(
   toolInput: ToolInput,
   context: HandlerContext
 ): Promise<HandlerResult> {
-  if (isDirectExchangeExecutionQuarantined('bybit')) {
-    return errorResult(directExecutionQuarantineReason('bybit'));
+  if (isDirectMutationQuarantined('bybit')) {
+    return errorResult(directMutationQuarantineReason('bybit'));
   }
   const env = getBybitConfig();
   if (!env) return errorResult('Set BYBIT_API_KEY and BYBIT_API_SECRET');
@@ -143,8 +143,8 @@ async function shortHandler(
   toolInput: ToolInput,
   context: HandlerContext
 ): Promise<HandlerResult> {
-  if (isDirectExchangeExecutionQuarantined('bybit')) {
-    return errorResult(directExecutionQuarantineReason('bybit'));
+  if (isDirectMutationQuarantined('bybit')) {
+    return errorResult(directMutationQuarantineReason('bybit'));
   }
   const env = getBybitConfig();
   if (!env) return errorResult('Set BYBIT_API_KEY and BYBIT_API_SECRET');
@@ -176,8 +176,8 @@ async function closeHandler(
   toolInput: ToolInput,
   context: HandlerContext
 ): Promise<HandlerResult> {
-  if (isDirectExchangeExecutionQuarantined('bybit')) {
-    return errorResult(directExecutionQuarantineReason('bybit'));
+  if (isDirectMutationQuarantined('bybit')) {
+    return errorResult(directMutationQuarantineReason('bybit'));
   }
   const env = getBybitConfig();
   if (!env) return errorResult('Set BYBIT_API_KEY and BYBIT_API_SECRET');

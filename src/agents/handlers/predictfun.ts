@@ -5,11 +5,19 @@
  * Migrated from inline switch cases in agents/index.ts.
  */
 
-import type { ToolInput, HandlerResult, HandlersMap, HandlerContext } from './types';
+import type { ToolInput, HandlerResult, HandlersMap, HandlerContext, HandlerFn } from './types';
+import { errorResult } from './types';
 import { createLogger } from '../../utils/logger';
 import * as predictfun from '../../exchanges/predictfun';
+import { isDirectMutationQuarantined, directMutationQuarantineReason } from './direct-exchange-execution';
 
 const logger = createLogger('handlers:predictfun');
+
+function quarantinePredictFunMutation(handler: HandlerFn): HandlerFn {
+  return async (toolInput, context) => isDirectMutationQuarantined('predictfun')
+    ? errorResult(directMutationQuarantineReason('predictfun'))
+    : handler(toolInput, context);
+}
 
 // =============================================================================
 // HELPERS
@@ -503,11 +511,11 @@ export const predictfunHandlers: HandlersMap = {
   predictfun_order_by_hash: orderByHashHandler,
   predictfun_matches: matchesHandler,
   // Trading
-  predictfun_create_order: createOrderHandler,
-  predictfun_cancel_orders: cancelOrdersHandler,
-  predictfun_redeem_positions: redeemPositionsHandler,
-  predictfun_merge_positions: mergePositionsHandler,
-  predictfun_set_approvals: setApprovalsHandler,
+  predictfun_create_order: quarantinePredictFunMutation(createOrderHandler),
+  predictfun_cancel_orders: quarantinePredictFunMutation(cancelOrdersHandler),
+  predictfun_redeem_positions: quarantinePredictFunMutation(redeemPositionsHandler),
+  predictfun_merge_positions: quarantinePredictFunMutation(mergePositionsHandler),
+  predictfun_set_approvals: quarantinePredictFunMutation(setApprovalsHandler),
   predictfun_balance: balanceHandler,
 };
 

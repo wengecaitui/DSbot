@@ -165,6 +165,7 @@ import * as mexc from '../exchanges/mexc';
 import * as opinion from '../exchanges/opinion';
 // predictfun — migrated to handlers/predictfun.ts
 import { dispatchHandler, hasHandler } from './handlers';
+import { quarantineReasonForTool } from './handlers/direct-exchange-execution';
 
 // Background process tracking
 const backgroundProcesses: Map<string, {
@@ -8447,6 +8448,9 @@ async function executeTool(
   toolInput: Record<string, unknown>,
   context: AgentContext
 ): Promise<string> {
+  const quarantineReason = quarantineReasonForTool(toolName, toolInput);
+  if (quarantineReason !== null) return JSON.stringify({ error: quarantineReason });
+
   const { feeds, db, session, subagents: subagentManager } = context;
   const userId = session.userId;
 

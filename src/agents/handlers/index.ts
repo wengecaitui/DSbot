@@ -17,8 +17,12 @@
  */
 
 import type { ToolInput, HandlerResult, HandlerContext, HandlersMap } from './types';
+import { errorResult } from './types';
 export type { ToolInput, HandlerResult, HandlerContext, HandlersMap } from './types';
 export { errorResult, successResult, safeHandler } from './types';
+import {
+  quarantineReasonForTool,
+} from './direct-exchange-execution';
 
 // Platform handlers
 import { opinionHandlers } from './opinion';
@@ -100,6 +104,14 @@ export async function dispatchHandler(
 
   if (!handler) {
     return null; // No modular handler, fall back to inline switch
+  }
+
+  // Central production-runtime quarantine: every registered direct mutation
+  // tool fails closed before credential read / private-key use / authenticated
+  // mutation request. Read-only handlers are unaffected.
+  const quarantineReason = quarantineReasonForTool(toolName, toolInput);
+  if (quarantineReason !== null) {
+    return errorResult(quarantineReason);
   }
 
   return handler(toolInput, context);

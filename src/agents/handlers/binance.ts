@@ -9,7 +9,7 @@ import type { ToolInput, HandlerResult, HandlersMap, HandlerContext } from './ty
 import { errorResult, successResult } from './types';
 import type { BinanceFuturesConfig } from '../../exchanges/binance-futures';
 import * as binanceFutures from '../../exchanges/binance-futures';
-import { isDirectExchangeExecutionQuarantined, directExecutionQuarantineReason } from './direct-exchange-execution';
+import { isDirectMutationQuarantined, directMutationQuarantineReason } from './direct-exchange-execution';
 
 // =============================================================================
 // HELPERS
@@ -110,8 +110,8 @@ async function longHandler(
   toolInput: ToolInput,
   context: HandlerContext
 ): Promise<HandlerResult> {
-  if (isDirectExchangeExecutionQuarantined('binance')) {
-    return errorResult(directExecutionQuarantineReason('binance'));
+  if (isDirectMutationQuarantined('binance')) {
+    return errorResult(directMutationQuarantineReason('binance'));
   }
   const env = getBinanceConfig();
   if (!env) return errorResult('Set BINANCE_API_KEY and BINANCE_API_SECRET');
@@ -143,8 +143,8 @@ async function shortHandler(
   toolInput: ToolInput,
   context: HandlerContext
 ): Promise<HandlerResult> {
-  if (isDirectExchangeExecutionQuarantined('binance')) {
-    return errorResult(directExecutionQuarantineReason('binance'));
+  if (isDirectMutationQuarantined('binance')) {
+    return errorResult(directMutationQuarantineReason('binance'));
   }
   const env = getBinanceConfig();
   if (!env) return errorResult('Set BINANCE_API_KEY and BINANCE_API_SECRET');
@@ -176,8 +176,8 @@ async function closeHandler(
   toolInput: ToolInput,
   context: HandlerContext
 ): Promise<HandlerResult> {
-  if (isDirectExchangeExecutionQuarantined('binance')) {
-    return errorResult(directExecutionQuarantineReason('binance'));
+  if (isDirectMutationQuarantined('binance')) {
+    return errorResult(directMutationQuarantineReason('binance'));
   }
   const env = getBinanceConfig();
   if (!env) return errorResult('Set BINANCE_API_KEY and BINANCE_API_SECRET');

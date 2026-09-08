@@ -28,7 +28,7 @@ import { initDCAPersistence } from '../execution/dca-persistence';
 import { createFeedManager } from '../feeds';
 import { createSessionManager } from '../sessions';
 import { createAgentManager } from '../agents';
-import { setDirectExchangeExecutionQuarantined } from '../agents/handlers/direct-exchange-execution';
+import { setDirectMutationQuarantined } from '../agents/handlers/direct-exchange-execution';
 import { createChannelManager } from '../channels';
 import { createPairingService } from '../pairing';
 import { createMemoryService } from '../memory';
@@ -470,8 +470,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     // Phase 8A no-dual-execution-authority: fail closed any Agent handler that
     // trades directly against exchange credentials instead of routing through
     // the authoritative ProductionSpine -> PreTradeRiskGateway -> OMS path.
-    setDirectExchangeExecutionQuarantined('binance', true);
-    setDirectExchangeExecutionQuarantined('bybit', true);
+    setDirectMutationQuarantined(true);
   }
   configureHttpClient(currentConfig.http);
   const configPath = process.env.CLODDS_CONFIG_PATH || CONFIG_FILE;
