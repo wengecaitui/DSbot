@@ -5,10 +5,24 @@
  * Supports market/limit/stop orders, position management, and account info.
  */
 
+import {
+  directMutationQuarantineReason,
+  isDirectMutationQuarantined,
+} from '../../../agents/handlers/direct-exchange-execution';
+
 const SUPPORTED_EXCHANGES = ['binance', 'bybit', 'hyperliquid', 'mexc'] as const;
 type Exchange = typeof SUPPORTED_EXCHANGES[number];
 type Side = 'BUY' | 'SELL';
 type Margin = 'ISOLATED' | 'CROSS';
+
+const MUTATION_COMMANDS = new Set([
+  'open', 'long', 'short', 'close', 'closeall', 'close-all',
+  'limit', 'stop', 'sl', 'tp', 'cancel', 'cancelall', 'leverage', 'margin',
+]);
+
+export function isTradingFuturesMutationCommand(command: string): boolean {
+  return MUTATION_COMMANDS.has(command.toLowerCase());
+}
 
 function helpText(): string {
   return `**Futures Trading Commands**
@@ -94,6 +108,10 @@ function normalizeSymbol(symbol: string, exchange: string): string {
 async function execute(args: string): Promise<string> {
   const parts = args.trim().split(/\s+/);
   const cmd = parts[0]?.toLowerCase() || 'help';
+
+  if (isTradingFuturesMutationCommand(cmd) && isDirectMutationQuarantined('trading-futures')) {
+    return `Error: ${directMutationQuarantineReason('trading-futures')}`;
+  }
 
   try {
     const futuresMod = await import('../../../trading/futures/index');

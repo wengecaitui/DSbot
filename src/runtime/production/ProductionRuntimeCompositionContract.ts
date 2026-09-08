@@ -36,6 +36,10 @@ export const LEGACY_WRITE_CAPABLE_PATHS = Object.freeze([
   'TriggerOrderManager',
   'ExecutionQueue',
   'position auto-close',
+  'Binance/Bybit Agent mutations',
+  'Opinion Agent mutations',
+  'PredictFun Agent mutations',
+  'trading-futures Skill mutations',
 ] as const);
 
 export interface ProductionRuntimeCompositionContract {
@@ -50,7 +54,8 @@ export interface ProductionRuntimeCompositionContract {
   readonly maximumSpinesPerScope: 1;
   readonly secondSpineAllowed: false;
   readonly durableJournalRequired: true;
-  readonly durablePaperLedgerRequired: true;
+  readonly paperModeDurableLedgerRequired: true;
+  readonly limitedLivePaperTruthAllowed: false;
   readonly explicitAccountIdentityRequired: true;
   readonly explicitExchangeIdentityRequired: true;
   readonly marketRuntimeIdentity: 'OWNER_INSTANCE';
@@ -85,7 +90,8 @@ export const PHASE_8A_PRODUCTION_RUNTIME_CONTRACT: ProductionRuntimeCompositionC
   maximumSpinesPerScope: 1,
   secondSpineAllowed: false,
   durableJournalRequired: true,
-  durablePaperLedgerRequired: true,
+  paperModeDurableLedgerRequired: true,
+  limitedLivePaperTruthAllowed: false,
   explicitAccountIdentityRequired: true,
   explicitExchangeIdentityRequired: true,
   marketRuntimeIdentity: 'OWNER_INSTANCE',
@@ -122,8 +128,11 @@ export function assertProductionRuntimeCompositionContract(
   if (value.singletonScope !== 'EXCHANGE_ACCOUNT' || value.maximumSpinesPerScope !== 1 || value.secondSpineAllowed) {
     violations.push('exactly one spine is allowed per exchange/account scope');
   }
-  if (!value.durableJournalRequired || !value.durablePaperLedgerRequired) {
+  if (!value.durableJournalRequired || !value.paperModeDurableLedgerRequired) {
     violations.push('authoritative runtime durability cannot fall back to memory');
+  }
+  if (value.limitedLivePaperTruthAllowed) {
+    violations.push('limited-live cannot use Paper execution truth');
   }
   if (!value.explicitAccountIdentityRequired || !value.explicitExchangeIdentityRequired) {
     violations.push('runtime identity must be explicit');

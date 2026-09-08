@@ -5,6 +5,17 @@
  */
 
 import { USDMClient } from 'binance';
+
+export {
+  BinanceFuturesExecutionAdapter,
+  toBinanceFuturesClientOrderId,
+} from './BinanceFuturesExecutionAdapter';
+export type {
+  BinanceFuturesExecutionClient,
+  BinanceFuturesInstrumentRules,
+  BinanceFuturesMarketOrderRequest,
+  BinanceFuturesMarketOrderResult,
+} from './BinanceFuturesExecutionAdapter';
 import { logger } from '../../utils/logger';
 
 // =============================================================================

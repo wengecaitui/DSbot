@@ -33,6 +33,12 @@ export interface GatewayInput {
   readonly policyResolution: PolicyResolution;
   readonly positionResolution: PositionResolution;
   readonly hardRisk: HardRiskSnapshot;
+  /** Optional composition-owned limit. Limited-live fixes this at 1 with scaling disabled. */
+  readonly positionLimits?: {
+    readonly maxConcurrentPositions: number;
+    readonly openPositionCount: number;
+    readonly allowScale: boolean;
+  };
 }
 
 export type RiskReasonCode =

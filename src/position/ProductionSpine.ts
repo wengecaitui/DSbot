@@ -12,6 +12,7 @@ import { createKernelPositionStateStore, type KernelPositionStateStore } from '.
 import { createKernelMarketStateStore, type KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
 import { createKernelPolicyStore, type KernelPolicyStore } from '../kernel/KernelPolicyStore';
 import { OmsCore } from '../oms/OmsCore';
+import type { ExecutionAdapter } from '../oms/oms-types';
 import type { ProjectorMap } from '../recovery/ReplayCoordinator';
 import { PaperExecutionAdapter } from '../oms/PaperExecutionAdapter';
 import { PaperExecutionService, type ExecuteParams } from '../paper/PaperExecutionService';
@@ -22,14 +23,18 @@ import { createPositionManagerRuntime } from './PositionManagerRuntime';
 import { PositionPlanStore } from './PositionPlanStore';
 import { systemDomainClock } from '../runtime/Clock';
 import { evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
-import type { AccountBoundHardRiskSnapshot, GatewayInput } from '../risk/pretrade-risk-types';
+import type { AccountBoundHardRiskSnapshot, GatewayInput, TradeAction } from '../risk/pretrade-risk-types';
 import type { TradeIntent } from '../types/trade-intent';
 import type { EventJournalPort } from '../kernel/EventJournalPort';
 import { createFileEventJournal, type FileEventJournal } from '../recovery/FileEventJournal';
 import { bridgeMarketToKernel } from './MarketBridge';
 import type { MarketDataRuntime } from '../runtime/market/MarketDataRuntime';
 import { reconcile } from '../reconciliation/reconcile';
-import type { ReconciliationReport, ExecutionTruthSnapshot } from '../reconciliation/reconciliation-types';
+import type {
+  ReconciliationReport,
+  ExecutionTruthPort,
+  ExecutionTruthSnapshot,
+} from '../reconciliation/reconciliation-types';
 import { createPaperExecutionTruthPort } from '../reconciliation/PaperExecutionTruthPort';
 import { buildLocalReconciliationSnapshot } from '../reconciliation/local-snapshot';
 import { computeRuntimeAccounting } from '../accounting/runtime-accounting';
@@ -57,6 +62,14 @@ export interface ProductionSpineConfig {
    * can establish LIVE_READY freshness. No public helper injects tickers.
    */
   marketRuntime?: MarketDataRuntime;
+  /** Omitted for backward-compatible Paper composition. */
+  execution?:
+    | { readonly mode: 'paper' }
+    | {
+        readonly mode: 'limited-live';
+        readonly adapter: ExecutionAdapter;
+        readonly truthPort: ExecutionTruthPort;
+      };
 }
 
 export interface ProductionSpine {
@@ -67,8 +80,10 @@ export interface ProductionSpine {
   oms: OmsCore;
   planStore: PositionPlanStore;
   protection: ReturnType<typeof createPositionManagerRuntime>;
-  adapter: PaperExecutionAdapter;
-  service: PaperExecutionService;
+  executionMode: 'paper' | 'limited-live';
+  adapter: ExecutionAdapter;
+  /** Present only for Paper compatibility; limited-live never fabricates Paper truth. */
+  service: PaperExecutionService | null;
   privateConfig: { hardRisk: () => AccountBoundHardRiskSnapshot };
   /** Set internally by RecoveryManager — read-only to callers */
   readonly recoveryVerified: boolean;
@@ -84,7 +99,7 @@ export interface ProductionSpine {
 export interface ExecuteThroughGatewayResult {
   admitted: boolean;
   riskCode: string | null;
-  action: 'open' | 'close';
+  action: TradeAction;
   omsResult?: { status: string; order?: any; fill?: any; reason?: string };
 }
 
@@ -125,23 +140,46 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   });
   kernel.subscribe('market.ticker.updated', (e) => { marketStore.apply(e); });
 
-  // ── Paper execution service ──
-  const paperConfig: PaperAccountConfig = config.paperAccount ?? {
-    accountId: config.accountId ?? `${config.exchange}-paper`,
-    exchange,
-    initialCashUsd: 100000,
-  } as PaperAccountConfig;
-  const persistence = config.persistence ?? inMemoryPersistence();
-  const service = await PaperExecutionService.open(paperConfig, persistence);
+  const executionMode = config.execution?.mode ?? 'paper';
 
-  // ── OMS + adapter (prices filled per-request from market store) ──
+  // ── Execution adapter + factual truth port ──
   const defaultExecuteParams: ExecuteParams = {
     markPriceUsd: 0,
     feeBps: 10,
     slippageBps: 0,
     executedAtMs: Date.now(),
   };
-  const adapter = new PaperExecutionAdapter(service, defaultExecuteParams);
+  let service: PaperExecutionService | null = null;
+  let adapter: ExecutionAdapter;
+  let truthPort: ExecutionTruthPort;
+  let reconciliationIdentity: { accountId: string; exchange: any };
+  if (executionMode === 'paper') {
+    const paperConfig: PaperAccountConfig = config.paperAccount ?? {
+      accountId: config.accountId ?? `${config.exchange}-paper`,
+      exchange,
+      initialCashUsd: 100000,
+    } as PaperAccountConfig;
+    const persistence = config.persistence ?? inMemoryPersistence();
+    service = await PaperExecutionService.open(paperConfig, persistence);
+    adapter = new PaperExecutionAdapter(service, defaultExecuteParams);
+    truthPort = createPaperExecutionTruthPort({ service, now: () => clock.now() });
+    const identity = service.getIdentity();
+    reconciliationIdentity = { accountId: identity.accountId, exchange: identity.exchange };
+  } else {
+    if (!config.execution || config.execution.mode !== 'limited-live') {
+      throw new Error('LIMITED_LIVE_EXECUTION_BINDING_INVALID');
+    }
+    if (!config.execution.adapter || typeof config.execution.adapter.submit !== 'function' ||
+        !config.execution.truthPort || typeof config.execution.truthPort.acquireTruth !== 'function') {
+      throw new Error('LIMITED_LIVE_EXECUTION_BINDING_INVALID');
+    }
+    if (typeof config.accountId !== 'string' || config.accountId.length === 0) {
+      throw new Error('LIMITED_LIVE_ACCOUNT_ID_REQUIRED');
+    }
+    adapter = config.execution.adapter;
+    truthPort = config.execution.truthPort;
+    reconciliationIdentity = { accountId: config.accountId, exchange };
+  }
   const oms = new OmsCore(kernel, adapter);
 
   // ── Position state store ──
@@ -155,11 +193,14 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   const dynamicPriceOms = {
     ...oms,
     submitRequest: (intent: TradeIntent, action: any, approvedUsd: number) => {
-      const snapshot = marketStore.getSnapshot(intent.exchange as any, intent.symbol);
-      const price = snapshot?.ticker?.ticker?.last ?? (adapter as any).params.markPriceUsd;
-      const p = (adapter as any).params;
-      p.markPriceUsd = price;
-      p.executedAtMs = Date.now();
+      if (executionMode === 'paper') {
+        const snapshot = marketStore.getSnapshot(intent.exchange as any, intent.symbol);
+        const paperAdapter = adapter as PaperExecutionAdapter;
+        const price = snapshot?.ticker?.ticker?.last ?? (paperAdapter as any).params.markPriceUsd;
+        const p = (paperAdapter as any).params;
+        p.markPriceUsd = price;
+        p.executedAtMs = Date.now();
+      }
       return oms.submitRequest(intent, action, approvedUsd);
     },
     getStore: () => oms.getStore(),
@@ -196,7 +237,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
   const spine = {
     kernel, positionStore, marketStore, policyStore,
-    oms: dynamicPriceOms, planStore, protection, adapter, service,
+    oms: dynamicPriceOms, planStore, protection, executionMode, adapter, service,
     privateConfig: { hardRisk: config.hardRisk },
 
     get recoveryVerified() { return recoveryVerified; },
@@ -206,6 +247,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     // Phase 6A: derived read-only runtime accounting. No mutation, no persistence write.
     accounting: {
       snapshot(): RuntimeAccountingSnapshot {
+        if (!service) throw new Error('LIMITED_LIVE_ACCOUNTING_UNAVAILABLE_L0');
         const account = service.snapshot();
         const fills = service.entries()
           .filter((e) => e.type === 'fill')
@@ -216,6 +258,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       // Phase 6B: derived read-only trade lifecycle. No mutation, no persistence
       // write, no OMS/execution/market writes, no state mutation.
       lifecycle(): TradeLifecycle {
+        if (!service) throw new Error('LIMITED_LIVE_LIFECYCLE_UNAVAILABLE_L0');
         const account = service.snapshot();
         const fills = service.entries().filter((e) => e.type === 'fill') as PaperFillLedgerEntry[];
         return computeTradeLifecycle({ account, fills });
@@ -231,17 +274,15 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // authority first; grants reconciliationVerified only on a genuine current MATCH.
   async function runCurrentReconciliation(): Promise<ReconciliationReport> {
     reconciliationVerified = false; // revoke stale authority before each attempt
-    const identity = service.getIdentity();
     const local = buildLocalReconciliationSnapshot(
       oms.getStore(),
       positionStore,
       planStore,
-      { accountId: identity.accountId, exchange: identity.exchange },
+      reconciliationIdentity,
     );
     let external: ExecutionTruthSnapshot;
     try {
-      const port = createPaperExecutionTruthPort({ service, now: () => clock.now() });
-      external = await port.acquireTruth();
+      external = await truthPort.acquireTruth();
     } catch (err) {
       reconciliationVerified = false; // fail closed on acquisition failure
       lastReconciliationReport = null;
@@ -361,13 +402,13 @@ function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
 }
 
 /**
- * Execute a TradeIntent through PreTradeRiskGateway → OmsCore → PaperExecutionAdapter.
+ * Execute a TradeIntent through PreTradeRiskGateway → OmsCore → the configured adapter.
  * Uses the factual market price and real policy resolution.
  */
 export async function executeThroughGateway(
   spine: ProductionSpine,
   intent: TradeIntent,
-  action: 'open' | 'close',
+  action: TradeAction,
   approvedUsd: number,
 ): Promise<ExecuteThroughGatewayResult> {
   // Block entries before LIVE_READY (protection mode !== 'live')
@@ -403,6 +444,13 @@ export async function executeThroughGateway(
     positionResolution: pos as any,
     policyResolution: policyStore.resolve(exchange, symbol) as any,
     hardRisk: hardRiskSnapshot,
+    ...(spine.executionMode === 'limited-live' ? {
+      positionLimits: {
+        maxConcurrentPositions: 1,
+        openPositionCount: positionStore.listResolved().filter((item) => item.status === 'open').length,
+        allowScale: false,
+      },
+    } : {}),
   };
 
   const riskResult = evaluatePreTradeRisk(gatewayInput);
@@ -412,8 +460,8 @@ export async function executeThroughGateway(
 
   const authorisedUsd = riskResult.approvedPositionUsd;
 
-  // Set factual market price before execution
-  if (marketSnapshot?.ticker) {
+  // Paper execution keeps its historical dynamic-price behavior.
+  if (spine.executionMode === 'paper' && marketSnapshot?.ticker) {
     (adapter as any).params.markPriceUsd = (marketSnapshot as any).ticker?.ticker?.last ?? (marketSnapshot as any).ticker?.last ?? 0;
     (adapter as any).params.executedAtMs = Date.now();
   }

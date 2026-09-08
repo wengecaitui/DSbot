@@ -33,7 +33,8 @@ describe('Phase 8A authoritative production runtime composition contract', () =>
       { maximumSpinesPerScope: 2 },
       { secondSpineAllowed: true },
       { durableJournalRequired: false },
-      { durablePaperLedgerRequired: false },
+      { paperModeDurableLedgerRequired: false },
+      { limitedLivePaperTruthAllowed: true },
       { workbenchCanCreateRuntime: true },
       { workbenchCanActivateRuntime: true },
       { applicationBootSubmitsOrders: true },
@@ -60,6 +61,10 @@ describe('Phase 8A authoritative production runtime composition contract', () =>
       'TriggerOrderManager',
       'ExecutionQueue',
       'position auto-close',
+      'Binance/Bybit Agent mutations',
+      'Opinion Agent mutations',
+      'PredictFun Agent mutations',
+      'trading-futures Skill mutations',
     ]);
     for (const patch of [
       { dualExecutionAuthorityAllowed: true },

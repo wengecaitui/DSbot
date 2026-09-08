@@ -15,6 +15,8 @@ import type { AccountBoundHardRiskSnapshot } from '../../risk/pretrade-risk-type
 import { createFileEventJournal, type FileEventJournal } from '../../recovery/FileEventJournal';
 import type { RecoveryResult } from '../../recovery/RecoveryManager';
 import type { ReconciliationReport } from '../../reconciliation/reconciliation-types';
+import type { ExecutionTruthPort } from '../../reconciliation/reconciliation-types';
+import type { ExecutionAdapter } from '../../oms/oms-types';
 import {
   createProductionSpine,
   recoverAndStart,
@@ -51,7 +53,7 @@ export interface ProductionRuntimeMarketEntry {
 
 export interface ProductionRuntimeConfig {
   readonly enabled: boolean;
-  readonly mode?: 'paper';
+  readonly mode?: 'paper' | 'limited-live';
   readonly exchange?: ExchangeId;
   readonly accountId?: string;
   readonly journalPath?: string;
@@ -126,6 +128,9 @@ export interface ProductionRuntimeOwnerDependencies {
     config: ProductionRuntimeHardRiskConfig,
   ): CanonicalHardRiskSource;
   createSpine(config: ProductionSpineConfig): Promise<ProductionSpine>;
+  createLimitedLiveExecution(
+    identity: ProductionRuntimeIdentity,
+  ): { readonly adapter: ExecutionAdapter; readonly truthPort: ExecutionTruthPort } | null;
   recover(
     spine: ProductionSpine,
     journal: FileEventJournal,
@@ -135,11 +140,12 @@ export interface ProductionRuntimeOwnerDependencies {
 }
 
 interface ValidatedProductionRuntimeConfig {
+  readonly mode: 'paper' | 'limited-live';
   readonly identity: ProductionRuntimeIdentity;
   readonly journalPath: string;
   readonly checkpointPath?: string;
-  readonly paperLedgerDir: string;
-  readonly paperAccount: PaperAccountConfig;
+  readonly paperLedgerDir?: string;
+  readonly paperAccount?: PaperAccountConfig;
   readonly hardRisk: ProductionRuntimeHardRiskConfig;
   readonly marketPlan: SubscriptionPlan;
   readonly marketStaleAfterMs?: number;
@@ -275,22 +281,31 @@ function validateMarketPlan(config: ProductionRuntimeConfig['market']): Subscrip
 }
 
 function validateConfig(config: ProductionRuntimeConfig): ValidatedProductionRuntimeConfig {
-  if (config.mode !== 'paper') throw new Error('mode must be explicitly paper');
+  if (config.mode !== 'paper' && config.mode !== 'limited-live') {
+    throw new Error('mode must be explicitly paper or limited-live');
+  }
   if (!isExchangeId(config.exchange)) throw new Error('exchange must be explicitly bitget or binance');
+  if (config.mode === 'limited-live' && config.exchange !== 'binance') {
+    throw new Error('LIMITED_LIVE_L0_REQUIRES_BINANCE');
+  }
   if (typeof config.accountId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(config.accountId)) {
     throw new Error('accountId must be explicit and valid');
   }
   const identity = copyIdentity({ exchange: config.exchange, accountId: config.accountId });
   const journalPath = validateAbsolutePath('journalPath', config.journalPath);
-  const paperLedgerDir = validateAbsolutePath('paperLedgerDir', config.paperLedgerDir);
+  const paperLedgerDir = config.mode === 'paper'
+    ? validateAbsolutePath('paperLedgerDir', config.paperLedgerDir)
+    : undefined;
   const checkpointPath = config.checkpointPath === undefined
     ? undefined
     : validateAbsolutePath('checkpointPath', config.checkpointPath);
-  const paperAccount = canonicalizePaperAccountConfig({
-    exchange: identity.exchange,
-    accountId: identity.accountId,
-    initialCashUsd: config.initialCashUsd ?? Number.NaN,
-  });
+  const paperAccount = config.mode === 'paper'
+    ? canonicalizePaperAccountConfig({
+        exchange: identity.exchange,
+        accountId: identity.accountId,
+        initialCashUsd: config.initialCashUsd ?? Number.NaN,
+      })
+    : undefined;
   if (!config.hardRisk) throw new Error('hardRisk facts are required');
   createConfiguredCanonicalHardRiskSource(identity, config.hardRisk);
   const marketPlan = validateMarketPlan(config.market);
@@ -302,11 +317,12 @@ function validateConfig(config: ProductionRuntimeConfig): ValidatedProductionRun
     throw new Error('market.staleAfterMs must be finite and positive');
   }
   return {
+    mode: config.mode,
     identity,
     journalPath,
     ...(checkpointPath === undefined ? {} : { checkpointPath }),
-    paperLedgerDir,
-    paperAccount,
+    ...(paperLedgerDir === undefined ? {} : { paperLedgerDir }),
+    ...(paperAccount === undefined ? {} : { paperAccount }),
     hardRisk: config.hardRisk,
     marketPlan,
     ...(marketStaleAfterMs === undefined ? {} : { marketStaleAfterMs }),
@@ -347,6 +363,7 @@ const defaultDependencies: ProductionRuntimeOwnerDependencies = {
   createMarketRuntime: createOwnerMarketRuntime,
   createHardRiskSource: createConfiguredCanonicalHardRiskSource,
   createSpine: createProductionSpine,
+  createLimitedLiveExecution: () => null,
   recover: recoverAndStart,
   reconcile: reconcileRecoveredState,
 };
@@ -442,8 +459,17 @@ export function createApplicationProductionRuntimeOwner(
         const hardRiskSource = dependencies.createHardRiskSource(validated.identity, validated.hardRisk);
         assertCanonicalHardRiskSource(validated.identity, hardRiskSource);
 
+        const limitedLiveExecution = validated.mode === 'limited-live'
+          ? dependencies.createLimitedLiveExecution(validated.identity)
+          : null;
+        if (validated.mode === 'limited-live' && limitedLiveExecution === null) {
+          throw new Error('LIVE_EXECUTION_NOT_ACTIVATED_L0');
+        }
+
         journal = dependencies.createJournal(validated.journalPath);
-        const persistence = dependencies.createPaperPersistence(validated.paperAccount, validated.paperLedgerDir);
+        const persistence = validated.mode === 'paper'
+          ? dependencies.createPaperPersistence(validated.paperAccount!, validated.paperLedgerDir!)
+          : undefined;
         marketRuntime = dependencies.createMarketRuntime(
           validated.identity,
           validated.marketPlan,
@@ -455,8 +481,11 @@ export function createApplicationProductionRuntimeOwner(
         authoritativeSpine = await dependencies.createSpine({
           exchange: validated.identity.exchange,
           accountId: validated.identity.accountId,
-          paperAccount: validated.paperAccount,
-          persistence,
+          ...(validated.paperAccount === undefined ? {} : { paperAccount: validated.paperAccount }),
+          ...(persistence === undefined ? {} : { persistence }),
+          execution: validated.mode === 'paper'
+            ? { mode: 'paper' }
+            : { mode: 'limited-live', ...limitedLiveExecution! },
           journal,
           hardRisk: readHardRisk,
           marketRuntime,

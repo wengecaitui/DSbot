@@ -5,8 +5,15 @@
  */
 
 import * as opinion from '../../exchanges/opinion';
-import type { ToolInput, HandlerResult, HandlerContext, HandlersMap } from './types';
-import { safeHandler, errorResult, successResult } from './types';
+import type { ToolInput, HandlerResult, HandlerContext, HandlerFn, HandlersMap } from './types';
+import { safeHandler, errorResult } from './types';
+import { isDirectMutationQuarantined, directMutationQuarantineReason } from './direct-exchange-execution';
+
+function quarantineOpinionMutation(handler: HandlerFn): HandlerFn {
+  return async (toolInput, context) => isDirectMutationQuarantined('opinion')
+    ? errorResult(directMutationQuarantineReason('opinion'))
+    : handler(toolInput, context);
+}
 
 // API Base URL
 const API_BASE = 'https://proxy.opinion.trade:8443/openapi';
@@ -356,20 +363,20 @@ export const opinionHandlers: HandlersMap = {
   opinion_orderbook: orderbookHandler,
   opinion_price_history: priceHistoryHandler,
   opinion_quote_tokens: quoteTokensHandler,
-  opinion_place_order: placeOrderHandler,
-  opinion_cancel_order: cancelOrderHandler,
-  opinion_cancel_all_orders: cancelAllOrdersHandler,
+  opinion_place_order: quarantineOpinionMutation(placeOrderHandler),
+  opinion_cancel_order: quarantineOpinionMutation(cancelOrderHandler),
+  opinion_cancel_all_orders: quarantineOpinionMutation(cancelAllOrdersHandler),
   opinion_orders: ordersHandler,
   opinion_positions: positionsHandler,
   opinion_balances: balancesHandler,
   opinion_trades: tradesHandler,
-  opinion_redeem: redeemHandler,
+  opinion_redeem: quarantineOpinionMutation(redeemHandler),
   opinion_categorical_market: categoricalMarketHandler,
   opinion_fee_rates: feeRatesHandler,
   opinion_order_by_id: orderByIdHandler,
-  opinion_enable_trading: enableTradingHandler,
-  opinion_split: splitHandler,
-  opinion_merge: mergeHandler,
+  opinion_enable_trading: quarantineOpinionMutation(enableTradingHandler),
+  opinion_split: quarantineOpinionMutation(splitHandler),
+  opinion_merge: quarantineOpinionMutation(mergeHandler),
 };
 
 export default opinionHandlers;

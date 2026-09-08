@@ -47,6 +47,18 @@ function validatePosition(input: GatewayInput): RiskReasonCode | null {
   const isOpposite = (pr.side === 'long' && input.intent.direction === 'short') || (pr.side === 'short' && input.intent.direction === 'long');
   const isSame = (pr.side === input.intent.direction);
   if (input.action === 'open') {
+    const limits = input.positionLimits;
+    if (limits !== undefined) {
+      if (!Number.isSafeInteger(limits.maxConcurrentPositions) || limits.maxConcurrentPositions <= 0 ||
+          !Number.isSafeInteger(limits.openPositionCount) || limits.openPositionCount < 0 ||
+          typeof limits.allowScale !== 'boolean') {
+        return 'HARD_RISK_CONFIG_INVALID';
+      }
+      if ((!limits.allowScale && pr.status === 'open') ||
+          (pr.status !== 'open' && limits.openPositionCount >= limits.maxConcurrentPositions)) {
+        return 'POSITION_LIMIT_REACHED';
+      }
+    }
     if (pr.status === 'flat') return null;
     if (isSame) return null;
     if (isOpposite) return 'ACTION_POSITION_CONFLICT';

@@ -19,8 +19,8 @@ import { LEGACY_WRITE_CAPABLE_PATHS } from '../../src/runtime/production/Product
 import { binanceHandlers } from '../../src/agents/handlers/binance';
 import { bybitHandlers } from '../../src/agents/handlers/bybit';
 import {
-  isDirectExchangeExecutionQuarantined,
-  setDirectExchangeExecutionQuarantined,
+  isDirectMutationQuarantined,
+  setDirectMutationQuarantined,
 } from '../../src/agents/handlers/direct-exchange-execution';
 import type { HandlerContext } from '../../src/agents/handlers/types';
 
@@ -355,8 +355,7 @@ describe('Phase 8A application production runtime owner', () => {
   });
 
   it('fails closed direct Binance/Bybit agent mutations when the authoritative runtime quarantines them', async () => {
-    setDirectExchangeExecutionQuarantined('binance', true);
-    setDirectExchangeExecutionQuarantined('bybit', true);
+    setDirectMutationQuarantined(true);
     try {
       const context = {} as HandlerContext; // quarantine short-circuits before db/credential use
       const mutations = [
@@ -373,16 +372,14 @@ describe('Phase 8A application production runtime owner', () => {
         assert.doesNotMatch(result, /"success"\s*:\s*true/, `${tool} must not submit an order`);
       }
     } finally {
-      setDirectExchangeExecutionQuarantined('binance', false);
-      setDirectExchangeExecutionQuarantined('bybit', false);
+      setDirectMutationQuarantined(false);
     }
-    assert.equal(isDirectExchangeExecutionQuarantined('binance'), false);
-    assert.equal(isDirectExchangeExecutionQuarantined('bybit'), false);
+    assert.equal(isDirectMutationQuarantined('binance'), false);
+    assert.equal(isDirectMutationQuarantined('bybit'), false);
 
     // Gateway wiring: quarantine is enabled whenever the owner quarantines legacy writes.
     const gatewaySource = readFileSync('src/gateway/index.ts', 'utf8');
-    assert.match(gatewaySource, /setDirectExchangeExecutionQuarantined\('binance', true\)/);
-    assert.match(gatewaySource, /setDirectExchangeExecutionQuarantined\('bybit', true\)/);
+    assert.match(gatewaySource, /setDirectMutationQuarantined\(true\)/);
   });
 
   it('retains the singleton reservation and reports STOP_FAILED when shutdown cleanup fails', async () => {

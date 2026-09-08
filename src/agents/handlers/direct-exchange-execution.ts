@@ -1,37 +1,31 @@
 /**
- * Phase 8A: direct exchange mutation quarantine.
+ * Central quarantine for legacy mutation surfaces that do not route through
+ * the authoritative ProductionSpine -> PreTradeRiskGateway -> OMS path.
  *
- * Agent platform handlers (binance.ts, bybit.ts) previously traded directly
- * against exchange credentials (BINANCE_API_KEY / BINANCE_API_SECRET, etc.)
- * without routing through the authoritative ProductionSpine ->
- * PreTradeRiskGateway -> OMS path. That would let a direct Agent execution
- * authority coexist with the owner spine for the same runtime identity,
- * violating the Phase 8A "no dual execution authority" invariant.
- *
- * When the Application Production Runtime Owner quarantines legacy write paths
- * (productionRuntime.enabled === true), createGateway() marks these direct
- * exchange mutation surfaces quarantined. The corresponding mutation handlers
- * then fail closed before reading credentials or contacting the exchange.
- * Read-only handlers (balance, positions, orders, price, funding) are
- * intentionally left untouched.
+ * The application ProductionRuntimeOwner establishes this state. Handlers and
+ * skills only query it, before reading credentials or constructing clients.
  */
 
-export type DirectExchangeId = 'binance' | 'bybit';
+export const DIRECT_MUTATION_SURFACES = Object.freeze([
+  'binance',
+  'bybit',
+  'opinion',
+  'predictfun',
+  'trading-futures',
+] as const);
 
-const quarantined = new Set<DirectExchangeId>();
+export type DirectMutationSurface = typeof DIRECT_MUTATION_SURFACES[number];
 
-export function setDirectExchangeExecutionQuarantined(
-  exchange: DirectExchangeId,
-  value: boolean,
-): void {
-  if (value) quarantined.add(exchange);
-  else quarantined.delete(exchange);
+let quarantined = false;
+
+export function setDirectMutationQuarantined(value: boolean): void {
+  quarantined = value;
 }
 
-export function isDirectExchangeExecutionQuarantined(exchange: DirectExchangeId): boolean {
-  return quarantined.has(exchange);
+export function isDirectMutationQuarantined(_surface: DirectMutationSurface): boolean {
+  return quarantined;
 }
 
-export function directExecutionQuarantineReason(exchange: DirectExchangeId): string {
-  return `${exchange} direct execution is quarantined by the authoritative production runtime`;
+export function directMutationQuarantineReason(surface: DirectMutationSurface): string {
+  return `${surface} direct mutation is quarantined by the authoritative production runtime`;
 }
