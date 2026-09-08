@@ -364,7 +364,9 @@ describe('Live L0 authoritative execution preparation', () => {
     setDirectMutationQuarantined(true);
     try {
       assert.deepEqual(DIRECT_MUTATION_SURFACES, [
-        'binance', 'bybit', 'opinion', 'predictfun', 'trading-futures',
+        'binance', 'bybit', 'hyperliquid', 'kalshi', 'opinion', 'predictfun',
+        'betfair', 'smarkets', 'manifold', 'polymarket', 'solana', 'acp',
+        'credentials', 'wallets', 'trading-futures',
       ]);
       for (const handler of [
         binanceHandlers.binance_futures_long,
