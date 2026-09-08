@@ -506,6 +506,48 @@ export function runSecurityExceptionNegativeProbes(registry, lockfile, runtimeSo
   if (excludedErrors.length > 0) throw new Error('excluded docs/tests negative probe produced a false positive');
   passed += 1;
 
+  const fingerprintRegistry = clone(registry);
+  const fingerprintLockfile = clone(lockfile);
+  if (fingerprintRegistry.exceptions.length === 0) {
+    const packageName = 'security-negative-probe-package';
+    const packagePath = `node_modules/${packageName}`;
+    const consumerPath = 'node_modules/security-negative-probe-consumer';
+    fingerprintRegistry.exceptions.push({
+      advisoryId: 'GHSA-aaaa-bbbb-cccc',
+      package: packageName,
+      severity: 'moderate',
+      reason: 'Synthetic exception used only to exercise validator negative probes.',
+      owner: 'security-negative-probe',
+      createdAt: '2026-09-04',
+      expiresAt: '2026-09-11',
+      maximumLifetimeDays: 7,
+      compensatingControls: ['Synthetic negative probe only.'],
+      removalCondition: 'Synthetic negative probe only.',
+      dependencyFingerprint: {
+        topology: [{
+          packageName,
+          packagePath,
+          version: '1.0.0',
+          integrity: 'sha512-security-negative-probe',
+          consumers: [{
+            path: consumerPath,
+            version: '1.0.0',
+            dependencyType: 'dependencies',
+            dependencySpecifier: '1.0.0',
+          }],
+        }],
+      },
+    });
+    fingerprintLockfile.packages[packagePath] = {
+      version: '1.0.0',
+      integrity: 'sha512-security-negative-probe',
+    };
+    fingerprintLockfile.packages[consumerPath] = {
+      version: '1.0.0',
+      dependencies: { [packageName]: '1.0.0' },
+    };
+  }
+
   const fingerprintMutations = [
     ['integrity mismatch', ERROR_CODES.INTEGRITY_MISMATCH, (registryCopy, lockfileCopy) => {
       const target = registryCopy.exceptions[0].dependencyFingerprint.topology[0];
@@ -515,13 +557,17 @@ export function runSecurityExceptionNegativeProbes(registry, lockfile, runtimeSo
       const target = registryCopy.exceptions[0].dependencyFingerprint.topology[0];
       lockfileCopy.packages[target.packagePath].version = '0.0.0-negative-probe';
     }],
-    ['unexpected dependency consumer', ERROR_CODES.UNEXPECTED_CONSUMER, (_registryCopy, lockfileCopy) => {
-      lockfileCopy.packages['node_modules/security-negative-probe'] = { version: '1.0.0', dependencies: { 'stream-json': '^1.9.1' } };
+    ['unexpected dependency consumer', ERROR_CODES.UNEXPECTED_CONSUMER, (registryCopy, lockfileCopy) => {
+      const target = registryCopy.exceptions[0].dependencyFingerprint.topology[0];
+      lockfileCopy.packages['node_modules/security-negative-probe-unexpected-consumer'] = {
+        version: '1.0.0',
+        dependencies: { [target.packageName]: target.consumers[0].dependencySpecifier },
+      };
     }],
   ];
   for (const [label, code, mutate] of fingerprintMutations) {
-    const registryCopy = clone(registry);
-    const lockfileCopy = clone(lockfile);
+    const registryCopy = clone(fingerprintRegistry);
+    const lockfileCopy = clone(fingerprintLockfile);
     mutate(registryCopy, lockfileCopy);
     expectCode(label, validateDependencyFingerprint(registryCopy.exceptions[0], lockfileCopy), code);
   }
@@ -530,12 +576,12 @@ export function runSecurityExceptionNegativeProbes(registry, lockfile, runtimeSo
     ['expiry', (registryCopy) => { registryCopy.exceptions[0].expiresAt = '2026-09-05'; }, ERROR_CODES.EXPIRED],
     ['wildcard', (registryCopy) => { registryCopy.exceptions[0].advisoryId = '*'; }, ERROR_CODES.WILDCARD],
   ]) {
-    const registryCopy = clone(registry);
+    const registryCopy = clone(fingerprintRegistry);
     mutate(registryCopy);
-    const result = validateAuditExceptions({ registry: registryCopy, allowlist: { allowlist: registry.exceptions.map((entry) => entry.advisoryId) }, now: '2026-09-05' });
+    const result = validateAuditExceptions({ registry: registryCopy, allowlist: { allowlist: fingerprintRegistry.exceptions.map((entry) => entry.advisoryId) }, now: '2026-09-05' });
     expectCode(label, result.errors, code);
   }
-  const unauthorized = validateAuditExceptions({ registry, allowlist: { allowlist: [...registry.exceptions.map((entry) => entry.advisoryId), 'GHSA-aaaa-bbbb-cccc'] }, now: '2026-09-05' });
+  const unauthorized = validateAuditExceptions({ registry: fingerprintRegistry, allowlist: { allowlist: [...fingerprintRegistry.exceptions.map((entry) => entry.advisoryId), 'GHSA-dddd-eeee-ffff'] }, now: '2026-09-05' });
   expectCode('unauthorized GHSA allowlist entry', unauthorized.errors, ERROR_CODES.ALLOWLIST_MISMATCH);
 
   return { passed, total: passed, guard, anchorSourceFingerprint: registry.anchorSourceFingerprint };

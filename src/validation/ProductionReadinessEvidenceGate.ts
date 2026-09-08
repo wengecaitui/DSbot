@@ -178,16 +178,9 @@ const WARNINGS = Object.freeze([
   'PYTHON_BRIDGE_PARALLEL_STARTUP_TIMING_INSTABILITY',
 ]);
 
-// Repository-owned mirror of the unresolved exception in
-// security/audit-exceptions.json. It stays fail-closed until an ordinary source
-// change removes it after the independent remediation is complete.
-const REPOSITORY_SECURITY_BLOCKERS = Object.freeze([
-  Object.freeze({
-    advisoryId: 'GHSA-528h-pc64-c93x',
-    package: 'stream-json',
-    expiresAt: '2026-09-11',
-  }),
-]);
+// Repository-owned mirrors of unresolved exceptions in
+// security/audit-exceptions.json.
+const REPOSITORY_SECURITY_BLOCKERS: readonly SecurityExceptionObservation[] = Object.freeze([]);
 
 type PlainValue = null | string | number | boolean | PlainValue[] | { [key: string]: PlainValue };
 

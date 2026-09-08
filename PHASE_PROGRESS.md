@@ -381,7 +381,8 @@
 ### TOML dependency remediation ✅ MERGED / COMPLETE
 
 - **实现 PR / 合并提交**: #138 / `58076b6b813ec84cf7757cd72016727ee9f2c585`。
-- **当前状态**: `toml@4.2.0` 已成为集成基线；Phase 9F 不改变剩余的临时 `stream-json` 例外范围。
+- **历史状态**: `toml@4.2.0` 成为集成基线时，Phase 9F 未改变当时剩余的临时安全例外；
+  后续 Security Clean 在依赖证明通过后独立移除了该例外。
 
 ### Phase 9F — Research Data Lineage / Version / Deprecation ✅ MERGED / COMPLETE
 
@@ -411,7 +412,8 @@
   工作流的精确 HEAD 证据；缺失、失败、过期、重复或混合 HEAD 的证据均 fail closed。
 - **结果边界**: 最大状态仅为 `READY_FOR_ACTIVATION_DECISION`；不授予 production、Testnet 或 Live
   权威。CI/Security 调用方摘要没有离线可认证收据时为 `EVIDENCE_INVALID`；省略当前
-  `GHSA-528h-pc64-c93x` 例外不能获得正向结果，到期也不视为解决。
+  安全例外不能获得正向结果，到期也不视为解决。Security Clean 已在依赖证明通过后将仓库安全
+  例外与对应 blocker mirror 清零；空的调用方数组本身仍不构成外部安全证明。
 - **停止边界**: 不增加 network/storage/process I/O，不改变 Phase 9A–9G、TradingKernel、OMS、Risk
   或 MarketDataRuntime 权威，不执行自动激活。
 

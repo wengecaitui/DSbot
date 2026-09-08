@@ -41,13 +41,12 @@ adding `verified=true` or an equivalent flag is insufficient.
 
 Security exceptions present in an observation remain blockers. Before expiry an
 exception is classified as active; at and after expiry it is classified as
-expired and remains a blocker because expiration is not resolution. Omitting
-the current `GHSA-528h-pc64-c93x` `stream-json` exception cannot produce a ready
-result. The gate carries a repository-owned fail-closed mirror of this current
-exception, and its regression test binds that mirror to
-`security/audit-exceptions.json`. The unauthenticated Security observation is
-also independently invalid. Phase 10 does not claim that an empty caller array
-proves the exception was resolved.
+expired and remains a blocker because expiration is not resolution. The gate's
+repository-owned fail-closed mirror is bound by regression tests to
+`security/audit-exceptions.json`. Security Clean removed the repository blocker
+only after dependency and audit proof passed, leaving both registries empty.
+The unauthenticated Security observation is still independently invalid: Phase
+10 does not claim that an empty caller array proves security readiness.
 
 The current INT64 JavaScript safe-integer limitation and PythonBridge parallel
 startup timing instability remain visible as warning-only debt. The gate does
