@@ -66,33 +66,31 @@ test('PHASE10: seven caller-created successes with empty Security exceptions can
   assert.ok(result.blockers.includes(
     'ARTIFACT_BYTES_INVALID:REFERENCE_INFRASTRUCTURE_PROOF',
   ));
-  assert.ok(result.blockers.includes(
-    'SECURITY_EXCEPTION_ACTIVE:GHSA-528h-pc64-c93x',
-  ));
+  assert.equal(result.blockers.some((blocker) => blocker.startsWith('SECURITY_EXCEPTION_')), false);
   assert.equal(result.productionAuthority, false);
   assert.equal(result.testnetAuthority, false);
   assert.equal(result.liveAuthority, false);
   assert.equal(JSON.stringify(result).includes('PRODUCTION_READY'), false);
 });
 
-test('PHASE10: current stream-json exception is an active activation blocker', () => {
-  const current = [{ advisoryId: 'GHSA-528h-pc64-c93x', package: 'stream-json', expiresAt: '2026-09-11' }];
+test('PHASE10: a caller-reported security exception is an active activation blocker', () => {
+  const current = [{ advisoryId: 'GHSA-aaaa-bbbb-cccc', package: 'example-security-package', expiresAt: '2026-09-11' }];
   const result = evaluateProductionReadinessEvidence(input(evidence(current)));
   assert.equal(result.state, 'EVIDENCE_INVALID');
   assert.equal(result.evidenceValid, false);
   assert.equal(result.activationDecisionEligible, false);
-  assert.ok(result.blockers.includes('SECURITY_EXCEPTION_ACTIVE:GHSA-528h-pc64-c93x'));
+  assert.ok(result.blockers.includes('SECURITY_EXCEPTION_ACTIVE:GHSA-aaaa-bbbb-cccc'));
 });
 
 test('PHASE10: an expired exception remains an activation blocker', () => {
-  const expired = [{ advisoryId: 'GHSA-528h-pc64-c93x', package: 'stream-json', expiresAt: '2026-09-07' }];
+  const expired = [{ advisoryId: 'GHSA-aaaa-bbbb-cccc', package: 'example-security-package', expiresAt: '2026-09-07' }];
   const result = evaluateProductionReadinessEvidence(input(evidence(expired)));
   assert.equal(result.state, 'EVIDENCE_INVALID');
   assert.equal(result.evidenceValid, false);
-  assert.ok(result.blockers.includes('SECURITY_EXCEPTION_EXPIRED:GHSA-528h-pc64-c93x'));
+  assert.ok(result.blockers.includes('SECURITY_EXCEPTION_EXPIRED:GHSA-aaaa-bbbb-cccc'));
 });
 
-test('PHASE10: repository-owned current blocker identity matches the exception registry', () => {
+test('PHASE10: repository-owned blocker mirror is empty after exception cleanup', () => {
   const registry = JSON.parse(readFileSync(
     resolve(process.cwd(), 'security/audit-exceptions.json'),
     'utf8',
@@ -101,13 +99,9 @@ test('PHASE10: repository-owned current blocker identity matches the exception r
     advisoryId,
     package: packageName,
     expiresAt,
-  })), [{
-    advisoryId: 'GHSA-528h-pc64-c93x',
-    package: 'stream-json',
-    expiresAt: '2026-09-11',
-  }]);
+  })), []);
   const result = evaluateProductionReadinessEvidence(input(evidence([])));
-  assert.ok(result.blockers.includes('SECURITY_EXCEPTION_ACTIVE:GHSA-528h-pc64-c93x'));
+  assert.equal(result.blockers.some((blocker) => blocker.startsWith('SECURITY_EXCEPTION_')), false);
   assert.equal(result.activationDecisionEligible, false);
 });
 
