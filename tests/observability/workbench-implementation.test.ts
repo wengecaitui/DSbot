@@ -287,4 +287,17 @@ describe('UI-U0/U1 trusted terminal presentation contract', () => {
     assert.match(appSource, /activated: 'NOT_ACTIVATED'/);
     assert.doesNotMatch(appSource, /readVerified: data \?/);
   });
+
+  it('places chart and pre-trade risk in distinct rows at the narrower desktop breakpoint', () => {
+    const narrowerDesktop = stylesSource.slice(
+      stylesSource.indexOf('@media (max-width: 1180px)'),
+      stylesSource.indexOf('@media (max-width: 820px)'),
+    );
+
+    assert.match(narrowerDesktop, /\.trading-chart\s*\{[^}]*grid-column:\s*2;[^}]*grid-row:\s*1;/s);
+    assert.match(narrowerDesktop, /\.trading-risk\s*\{[^}]*grid-column:\s*2;[^}]*grid-row:\s*2;/s);
+    assert.doesNotMatch(narrowerDesktop, /\.trading-chart,\s*\.trading-risk\s*\{/);
+    assert.match(stylesSource, /\.trading-watchlist \.availability-notice\s*\{[^}]*flex-direction:\s*column;/s);
+    assert.match(stylesSource, /\.trading-watchlist \.availability-notice p\s*\{[^}]*text-align:\s*left;/s);
+  });
 });
