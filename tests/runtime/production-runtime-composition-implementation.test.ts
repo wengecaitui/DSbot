@@ -118,7 +118,7 @@ describe('Phase 8A application production runtime owner', () => {
     try {
       assert.equal(owner.authoritativeSpine(), null);
       assert.deepEqual(Object.keys(owner.read).sort(), [
-        'identity', 'reconciliation', 'recovery', 'status',
+        'binanceAuthenticatedReadStatus', 'identity', 'reconciliation', 'recovery', 'status',
       ]);
       await owner.start();
 
@@ -335,7 +335,9 @@ describe('Phase 8A application production runtime owner', () => {
       // Public read surface exposes evidence only — no spine, no mutable authority.
       assert.equal('productionSpine' in owner.read, false);
       assert.equal((owner.read as unknown as Record<string, unknown>).productionSpine, undefined);
-      assert.deepEqual(Object.keys(owner.read).sort(), ['identity', 'reconciliation', 'recovery', 'status']);
+      assert.deepEqual(Object.keys(owner.read).sort(), [
+        'binanceAuthenticatedReadStatus', 'identity', 'reconciliation', 'recovery', 'status',
+      ]);
       for (const mutable of ['kernel', 'oms', 'adapter', 'service', 'protection', 'stores', 'policyStore', 'positionStore']) {
         assert.equal((owner.read as unknown as Record<string, unknown>)[mutable], undefined, mutable);
       }

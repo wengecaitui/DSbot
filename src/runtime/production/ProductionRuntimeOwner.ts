@@ -18,6 +18,11 @@ import type { ReconciliationReport } from '../../reconciliation/reconciliation-t
 import type { ExecutionTruthPort } from '../../reconciliation/reconciliation-types';
 import type { ExecutionAdapter } from '../../oms/oms-types';
 import {
+  createBinanceAuthenticatedReadFoundation,
+  type BinanceAuthenticatedReadFoundation,
+  type BinanceAuthenticatedReadStatus,
+} from '../binance/BinanceAuthenticatedReadFoundation';
+import {
   createProductionSpine,
   recoverAndStart,
   reconcileRecoveredState,
@@ -98,10 +103,13 @@ export interface ProductionRuntimePublicReadView {
   identity(): ProductionRuntimeIdentity | null;
   recovery(): RecoveryResult | null;
   reconciliation(): ReconciliationReport | null;
+  binanceAuthenticatedReadStatus(): BinanceAuthenticatedReadStatus;
 }
 
 export interface ApplicationProductionRuntimeOwner {
   readonly read: ProductionRuntimePublicReadView;
+  /** Internal, read-only L1A ports. No credential, execution, or activation surface. */
+  readonly binanceAuthenticatedRead: BinanceAuthenticatedReadFoundation;
   /**
    * Internal Workbench spine provider only. Resolves the exact owner spine (or
    * null); wired exclusively into WorkbenchReadAdapter inside createGateway and
@@ -131,6 +139,9 @@ export interface ProductionRuntimeOwnerDependencies {
   createLimitedLiveExecution(
     identity: ProductionRuntimeIdentity,
   ): { readonly adapter: ExecutionAdapter; readonly truthPort: ExecutionTruthPort } | null;
+  createBinanceAuthenticatedRead(
+    identity: ProductionRuntimeIdentity | null,
+  ): BinanceAuthenticatedReadFoundation;
   recover(
     spine: ProductionSpine,
     journal: FileEventJournal,
@@ -364,6 +375,13 @@ const defaultDependencies: ProductionRuntimeOwnerDependencies = {
   createHardRiskSource: createConfiguredCanonicalHardRiskSource,
   createSpine: createProductionSpine,
   createLimitedLiveExecution: () => null,
+  createBinanceAuthenticatedRead(identity) {
+    return createBinanceAuthenticatedReadFoundation(
+      identity?.exchange === 'binance'
+        ? Object.freeze({ exchange: 'binance', accountId: identity.accountId })
+        : null,
+    );
+  },
   recover: recoverAndStart,
   reconcile: reconcileRecoveredState,
 };
@@ -404,6 +422,10 @@ export function createApplicationProductionRuntimeOwner(
     reason = 'authoritative production runtime is disabled';
   }
 
+  const binanceAuthenticatedRead = dependencies.createBinanceAuthenticatedRead(
+    validated ? copyIdentity(validated.identity) : null,
+  );
+
   function releaseReservation(): void {
     if (!validated || reservation === null) return;
     const key = identityKey(validated.identity);
@@ -443,6 +465,7 @@ export function createApplicationProductionRuntimeOwner(
     identity: () => (validated ? copyIdentity(validated.identity) : null),
     recovery: () => recoveryEvidence,
     reconciliation: () => reconciliationEvidence,
+    binanceAuthenticatedReadStatus: binanceAuthenticatedRead.status,
   });
 
   async function start(): Promise<void> {
@@ -552,7 +575,14 @@ export function createApplicationProductionRuntimeOwner(
     return stopPromise;
   }
 
-  return Object.freeze({ read, authoritativeSpine: binding.provider.productionSpine, legacyWrites, start, stop });
+  return Object.freeze({
+    read,
+    binanceAuthenticatedRead,
+    authoritativeSpine: binding.provider.productionSpine,
+    legacyWrites,
+    start,
+    stop,
+  });
 }
 
 /** Test-only convenience type for injected collectors; production uses exchange providers. */
