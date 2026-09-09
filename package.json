@@ -161,11 +161,11 @@
     "json5": "^2.2.3",
     "mammoth": "^1.11.0",
     "node-cron": "^3.0.3",
-    "nodemailer": "^9.0.3",
+    "nodemailer": "^9.1.1",
     "pg": "^8.17.2",
     "pino": "^8.18.0",
     "pino-pretty": "^10.3.1",
-    "sharp": "0.35.3",
+    "sharp": "0.35.4",
     "sql.js": "^1.14.0",
     "tiktoken": "^1.0.22",
     "tmi.js": "^1.8.5",
@@ -192,8 +192,9 @@
       "ws": "8.21.0"
     },
     "nanoid": "^3.3.18",
-    "js-yaml@>=3.0.0 <4.0.0": "3.15.1",
-    "js-yaml@>=4.0.0 <5.0.0": "4.3.1",
+    "js-yaml@>=3.0.0 <4.0.0": "3.15.2",
+    "js-yaml@>=4.0.0 <5.0.0": "4.3.2",
+    "baseline-browser-mapping": "2.11.0",
     "bigint-buffer": "npm:@vekexasia/bigint-buffer2@^1.0.4",
     "ajv": "^8.18.0",
     "minimatch": "^10.2.1",
@@ -204,7 +205,7 @@
     "@cosmjs/stargate": "^0.38.1",
     "@cosmjs/tendermint-rpc": "^0.38.1",
     "@cosmjs/cosmwasm-stargate": "^0.38.1",
-    "sharp": "0.35.3"
+    "sharp": "0.35.4"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
