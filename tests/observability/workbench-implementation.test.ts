@@ -217,3 +217,87 @@ describe('Phase 7C shared frontend query boundary', () => {
     assert.doesNotMatch(previewSource, /ANTHROPIC_API_KEY/);
   });
 });
+
+describe('UI-U0/U1 trusted terminal presentation contract', () => {
+  const appSource = readFileSync('web/src/App.tsx', 'utf8');
+  const primitiveSource = readFileSync('web/src/components/Primitives.tsx', 'utf8');
+  const stylesSource = readFileSync('web/src/styles.css', 'utf8');
+
+  it('preserves route IDs while presenting operations as Evidence', () => {
+    for (const route of ['overview', 'market', 'trading', 'research', 'policy', 'safety', 'operations', 'data', 'settings']) {
+      assert.match(appSource, new RegExp(`id: '${route}'`));
+    }
+    assert.match(appSource, /id: 'operations', label: 'Evidence'/);
+    assert.match(appSource, /next === 'overview' \? '\/workbench\/' : `\/workbench\/\$\{next\}`/);
+  });
+
+  it('keeps the UI read-only and renders future execution only as locked architecture', () => {
+    assert.match(appSource, /Execution control surface/);
+    assert.match(appSource, /<LockedControl/);
+    assert.match(appSource, /ProductionSpine → PreTradeRiskGateway → OMS → ExecutionAdapter/);
+    assert.doesNotMatch(appSource, /<button[^>]*>\s*(?:BUY|SELL|Buy|Sell|Place order|Cancel order)/);
+    assert.doesNotMatch(appSource, /\b(?:submitOrder|placeOrder|cancelOrder|setLiveReady|activateLiveReadiness)\s*\(/);
+  });
+
+  it('renders unavailable and missing states without inventing flat or financial values', () => {
+    assert.match(appSource, /CHART SOURCE UNAVAILABLE/);
+    assert.match(appSource, /missing ≠ flat/);
+    assert.match(appSource, /No observed position is not evidence of a flat account/);
+    assert.match(appSource, /TickFlow operationalization is not claimed/);
+    assert.match(appSource, /formatMoney\(account\?\.equityUsd\)/);
+    assert.doesNotMatch(appSource, /(?:Equity|PnL|exposure)[^\n]{0,80}value=(?:"|\{)\s*[-+]?\d/);
+  });
+
+  it('never paints stale, unknown, unavailable, or locked states as verified green', () => {
+    const factualGoodBranch = primitiveSource.match(/if \(\[(.*?)\]\.includes\(value\)\) return 'good';/s)?.[1] ?? '';
+    assert.doesNotMatch(factualGoodBranch, /STALE|UNKNOWN|UNAVAILABLE|LOCKED|OBSERVED/);
+    assert.match(primitiveSource, /return 'neutral'/);
+    assert.match(stylesSource, /\.tone-good \{ color: var\(--green\)/);
+    assert.match(stylesSource, /\.tone-info \{ color: var\(--cyan\)/);
+  });
+
+  it('separates observed, verified, and authorized evidence states', () => {
+    assert.match(appSource, />OBSERVED</);
+    assert.match(appSource, />VERIFIED</);
+    assert.match(appSource, />AUTHORIZED</);
+    assert.match(appSource, /CI success cannot stand in for Phase 10 verification/);
+    assert.match(appSource, /Phase 10 cannot activate Live/);
+    assert.match(appSource, /NOT_AUTHORIZED/);
+    assert.match(appSource, /NOT_ACTIVATED/);
+  });
+
+  it('keeps the research evidence skeleton visible when upstream data is absent', () => {
+    const researchPage = appSource.slice(
+      appSource.indexOf('function ResearchPage'),
+      appSource.indexOf('function PolicyPage'),
+    );
+
+    assert.match(researchPage, /const data = query\.data\?\.data/);
+    assert.doesNotMatch(researchPage, /<EnvelopeFrame/);
+    assert.match(researchPage, /No canonical dataset dictionary is exposed/);
+    assert.match(researchPage, /NOT IMPLEMENTED \/ NOT VERIFIED/);
+  });
+
+  it('keeps capability dimensions independent and missing evidence unknown', () => {
+    for (const heading of ['Implemented', 'Configured', 'Connected', 'Read Verified', 'Write Routed', 'Activated']) {
+      assert.match(primitiveSource, new RegExp(`<th>${heading}<\\/th>`));
+    }
+    assert.match(appSource, /readVerified: 'UNKNOWN'/);
+    assert.match(appSource, /writeRouted: 'LOCKED'/);
+    assert.match(appSource, /activated: 'NOT_ACTIVATED'/);
+    assert.doesNotMatch(appSource, /readVerified: data \?/);
+  });
+
+  it('places chart and pre-trade risk in distinct rows at the narrower desktop breakpoint', () => {
+    const narrowerDesktop = stylesSource.slice(
+      stylesSource.indexOf('@media (max-width: 1180px)'),
+      stylesSource.indexOf('@media (max-width: 820px)'),
+    );
+
+    assert.match(narrowerDesktop, /\.trading-chart\s*\{[^}]*grid-column:\s*2;[^}]*grid-row:\s*1;/s);
+    assert.match(narrowerDesktop, /\.trading-risk\s*\{[^}]*grid-column:\s*2;[^}]*grid-row:\s*2;/s);
+    assert.doesNotMatch(narrowerDesktop, /\.trading-chart,\s*\.trading-risk\s*\{/);
+    assert.match(stylesSource, /\.trading-watchlist \.availability-notice\s*\{[^}]*flex-direction:\s*column;/s);
+    assert.match(stylesSource, /\.trading-watchlist \.availability-notice p\s*\{[^}]*text-align:\s*left;/s);
+  });
+});

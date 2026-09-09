@@ -1,10 +1,23 @@
 import type { PropsWithChildren, ReactNode } from 'react';
 import type { Availability, Freshness, Provenance } from '../api/types';
 
-type Tone = 'good' | 'warn' | 'bad' | 'neutral';
+type Tone = 'good' | 'info' | 'warn' | 'bad' | 'neutral';
+
+export type CapabilityValue = 'YES' | 'NO' | 'OBSERVED' | 'VERIFIED' | 'AUTHORIZED' | 'UNKNOWN' | 'UNAVAILABLE' | 'LOCKED' | 'NOT_ACTIVATED';
+
+export interface CapabilityRow {
+  capability: string;
+  implemented: CapabilityValue;
+  configured: CapabilityValue;
+  connected: CapabilityValue;
+  readVerified: CapabilityValue;
+  writeRouted: CapabilityValue;
+  activated: CapabilityValue;
+}
 
 function toneFor(value: string): Tone {
   if (['HEALTHY', 'AVAILABLE', 'FRESH', 'READY', 'MATCH', 'CLEAR', 'healthy', 'running', 'COMPLETE'].includes(value)) return 'good';
+  if (['READ_ONLY', 'OBSERVED', 'IMPLEMENTED'].includes(value)) return 'info';
   if (['STALE', 'INCOMPLETE', 'NOT_READY', 'half_open'].includes(value)) return 'warn';
   if (['UNHEALTHY', 'TRIGGERED', 'FAILED', 'open', 'unhealthy'].includes(value)) return 'bad';
   return 'neutral';
@@ -27,6 +40,43 @@ export function Panel({ title, eyebrow, action, children, className = '' }: Prop
 
 export function Metric({ label, value, meta }: { label: string; value: ReactNode; meta?: ReactNode }) {
   return <div className="metric"><span>{label}</span><strong>{value}</strong>{meta && <small>{meta}</small>}</div>;
+}
+
+export function SectionHeader({ index, title, detail, action }: { index: string; title: string; detail?: string; action?: ReactNode }) {
+  return <div className="section-header">
+    <span>{index}</span>
+    <div><h2>{title}</h2>{detail && <p>{detail}</p>}</div>
+    {action && <div className="section-action">{action}</div>}
+  </div>;
+}
+
+export function FreshnessStamp({ capturedAt, lastUpdatedAt, freshness }: { capturedAt: number | null; lastUpdatedAt: number | null; freshness: Freshness }) {
+  const ageMs = capturedAt !== null && lastUpdatedAt !== null ? Math.max(0, capturedAt - lastUpdatedAt) : null;
+  const age = ageMs === null ? 'AGE UNKNOWN' : ageMs < 1_000 ? `${ageMs}ms old` : `${Math.round(ageMs / 1_000)}s old`;
+  return <div className="freshness-stamp"><StatusBadge value={freshness} /><span>{age}</span><time>{formatTime(capturedAt)}</time></div>;
+}
+
+export function LockedControl({ title, detail }: { title: string; detail: string }) {
+  return <div className="locked-control" aria-disabled="true"><span>LOCKED</span><div><strong>{title}</strong><p>{detail}</p></div></div>;
+}
+
+export function CapabilityState({ value }: { value: CapabilityValue }) {
+  return <StatusBadge value={value} />;
+}
+
+export function CapabilityMatrix({ rows }: { rows: CapabilityRow[] }) {
+  return <div className="table-wrap capability-matrix"><table>
+    <thead><tr><th>Capability</th><th>Implemented</th><th>Configured</th><th>Connected</th><th>Read Verified</th><th>Write Routed</th><th>Activated</th></tr></thead>
+    <tbody>{rows.map(row => <tr key={row.capability}>
+      <td><b>{row.capability}</b></td>
+      <td><CapabilityState value={row.implemented} /></td>
+      <td><CapabilityState value={row.configured} /></td>
+      <td><CapabilityState value={row.connected} /></td>
+      <td><CapabilityState value={row.readVerified} /></td>
+      <td><CapabilityState value={row.writeRouted} /></td>
+      <td><CapabilityState value={row.activated} /></td>
+    </tr>)}</tbody>
+  </table></div>;
 }
 
 export function AvailabilityNotice({ availability, freshness, reason }: { availability: Availability; freshness: Freshness; reason?: string }) {

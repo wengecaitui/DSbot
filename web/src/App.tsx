@@ -4,14 +4,19 @@ import { workbenchQueries } from './api/queries';
 import type { Availability, Freshness, ReadEnvelope } from './api/types';
 import {
   AvailabilityNotice,
+  CapabilityMatrix,
   EmptyState,
   formatMoney,
   formatNumber,
   formatTime,
+  FreshnessStamp,
+  LockedControl,
   Metric,
   Panel,
   ProvenanceLine,
+  SectionHeader,
   StatusBadge,
+  type CapabilityRow,
 } from './components/Primitives';
 
 type RouteId = 'overview' | 'market' | 'trading' | 'research' | 'policy' | 'safety' | 'operations' | 'data' | 'settings';
@@ -23,7 +28,7 @@ const ROUTES: Array<{ id: RouteId; label: string; glyph: string; group: string }
   { id: 'research', label: 'Research', glyph: '◇', group: 'Intelligence' },
   { id: 'policy', label: 'Policy', glyph: '◈', group: 'Intelligence' },
   { id: 'safety', label: 'Safety', glyph: '⬡', group: 'Control' },
-  { id: 'operations', label: 'Operations', glyph: '⌘', group: 'Control' },
+  { id: 'operations', label: 'Evidence', glyph: '⌘', group: 'Control' },
   { id: 'data', label: 'Data', glyph: '▦', group: 'System' },
   { id: 'settings', label: 'Settings', glyph: '⚙', group: 'System' },
 ];
@@ -80,36 +85,54 @@ function PageHeading({ eyebrow, title, detail, status }: { eyebrow: string; titl
 
 function PersistentStatus() {
   const query = useQuery(workbenchQueries.status());
+  const runtimeQuery = useQuery(workbenchQueries.runtime());
   if (query.isPending) return <div className="persistent-status status-connecting"><div className="status-title"><i /><span>READ-ONLY</span></div><b>CONNECTING TO APPLICATION GATEWAY</b></div>;
   if (query.isError) return <div className="persistent-status status-offline"><b>READ LINK UNAVAILABLE</b><span>{query.error.message}</span></div>;
   const status = query.data?.status;
   const items = [
-    ['ENV', status?.environment], ['MARKET', status?.marketFreshness], ['RECOVERY', status?.recovery],
+    ['ENV', status?.environment], ['MODE', runtimeQuery.data?.data?.mode], ['MARKET', status?.marketFreshness], ['RECOVERY', status?.recovery],
     ['RECON', status?.reconciliation], ['LIVE_READY', status?.liveReady], ['KILL', status?.killSwitch], ['HERMES', status?.hermes],
   ];
   return <div className="persistent-status">
     <div className="status-title"><i /><span>READ-ONLY</span></div>
     <div className="status-items">{items.map(([label, value]) => <div key={label}><small>{label}</small><StatusBadge value={value} /></div>)}</div>
-    <time>{query.data ? formatTime(query.data.capturedAt) : 'CONNECTING'}</time>
+    {query.data ? <FreshnessStamp capturedAt={query.data.capturedAt} lastUpdatedAt={runtimeQuery.data?.provenance.lastUpdatedAt ?? null} freshness={runtimeQuery.data?.freshness ?? 'UNKNOWN'} /> : <time>CONNECTING</time>}
   </div>;
 }
 
 function OverviewPage() {
   const query = useQuery(workbenchQueries.overview());
+  const operations = useQuery(workbenchQueries.operations());
   if (query.isError) return <QueryFailure message={query.error.message} />;
   if (!query.data) return <LoadingState label="the Overview read model" />;
   const view = query.data;
   const account = view.account.data?.accounting;
   const safety = view.safety.data;
+  const positions = view.trading.data?.positions ?? [];
   return <>
-    <PageHeading eyebrow="Terminal / Overview" title="System truth, without shortcuts" detail="Canonical runtime facts, their freshness, and every unavailable boundary in one read-only surface." status={view.runtime.data?.health} />
-    <div className="metric-strip">
+    <PageHeading eyebrow="Terminal / Global Command Center" title="Authoritative state at a glance" detail="Dense operational truth from existing read projections. Missing, stale and unverified evidence stays visible and never becomes a healthy default." status={view.runtime.data?.health} />
+    <div className="metric-strip command-kpis">
+      <Metric label="Runtime" value={<StatusBadge value={view.runtime.data?.health} />} meta={view.runtime.freshness} />
+      <Metric label="Market" value={<StatusBadge value={view.market.freshness} />} meta={`${view.market.data?.instruments.length ?? 0} observed`} />
       <Metric label="Equity" value={formatMoney(account?.equityUsd)} meta={account?.valuationStatus ?? view.account.availability} />
       <Metric label="Realized PnL" value={formatMoney(account?.realizedPnlUsd)} meta="canonical ledger" />
       <Metric label="Gross exposure" value={formatMoney(account?.grossExposureUsd)} meta={account?.valuationStatus ?? 'UNAVAILABLE'} />
       <Metric label="Open positions" value={account ? account.openPositions : 'UNAVAILABLE'} meta="missing ≠ flat" />
-      <Metric label="LIVE_READY" value={<StatusBadge value={safety?.liveReady.status} />} meta="display only" />
+      <Metric label="LIVE_READY" value={<StatusBadge value={safety?.liveReady.status} />} meta="observed, not mutable" />
+      <Metric label="Kill switch" value={<StatusBadge value={safety?.killSwitch.status} />} meta={safety?.killSwitch.reason ?? 'reason unavailable'} />
     </div>
+    <SectionHeader index="01" title="System flow & authority" detail="One read path. The future write path is represented only as locked architecture." />
+    <Panel title="Canonical read flow" eyebrow="Presentation boundary" className="panel-wide terminal-panel">
+      <div className="authority-flow">
+        <div><small>SOURCE</small><b>Canonical stores</b><StatusBadge value={view.runtime.availability} /></div><i>→</i>
+        <div><small>PROJECTION</small><b>Workbench API</b><StatusBadge value="READ_ONLY" /></div><i>→</i>
+        <div><small>CONTRACT</small><b>ReadEnvelope</b><StatusBadge value={view.runtime.freshness} /></div><i>→</i>
+        <div><small>SURFACE</small><b>Command Center</b><StatusBadge value="OBSERVED" /></div>
+      </div>
+      <LockedControl title="UI Intent → ProductionSpine → PreTradeRiskGateway → OMS → ExecutionAdapter" detail="No current Workbench route can enter this chain or mutate LIVE_READY." />
+      <ProvenanceLine value={view.runtime.provenance} />
+    </Panel>
+    <SectionHeader index="02" title="Market, positions & exposure" detail="Financial values are rendered only when the canonical read model supplies them." />
     <div className="dashboard-grid">
       <Panel title="Runtime" eyebrow="Authority" action={<StatusBadge value={view.runtime.freshness} />}>
         <EnvelopeFrame envelope={view.runtime}>{runtime => <div className="key-grid">
@@ -126,7 +149,7 @@ function OverviewPage() {
       </Panel>
       <Panel title="Trading state" eyebrow="Positions & orders">
         <EnvelopeFrame envelope={view.trading}>{trading => <div className="key-grid">
-          <Metric label="Positions observed" value={trading.positions.length} />
+          <Metric label="Positions observed" value={positions.length} />
           <Metric label="Orders observed" value={trading.orders.length} />
           <Metric label="Unknown submissions" value={trading.orders.filter(order => order.status === 'SUBMISSION_UNKNOWN').length} />
           <Metric label="Protection plans" value={trading.protectivePlans.length} />
@@ -137,11 +160,20 @@ function OverviewPage() {
           <div><span>Recovery</span><StatusBadge value={value.recovery?.mode ?? 'UNKNOWN'} /></div>
           <div><span>Reconciliation</span><StatusBadge value={value.reconciliation?.outcome ?? 'UNKNOWN'} /></div>
           <div><span>Kill / risk</span><StatusBadge value={value.killSwitch.status} /></div>
+          <div><span>Activation</span><StatusBadge value="NOT_ACTIVATED" /></div>
           {value.riskBlockers.map(blocker => <p key={blocker} className="blocker">{blocker}</p>)}
         </div>}</EnvelopeFrame>
       </Panel>
       <Panel title="Recent activity" eyebrow="Observed evidence" className="panel-wide">
         <EnvelopeFrame envelope={view.activity}>{activity => activity.events.length ? <EventTable events={activity.events.slice(-8)} /> : <EmptyState title="No recent events" detail="No canonical observability event source has emitted evidence." />}</EnvelopeFrame>
+      </Panel>
+      <Panel title="Operations evidence" eyebrow="Observed, not approved" className="panel-wide">
+        {operations.isError ? <EmptyState title="UNAVAILABLE" detail="Operations evidence query failed; no status is inferred." /> : operations.data ? <EnvelopeFrame envelope={operations.data}>{data => <div className="operations-summary">
+          <Metric label="Hermes" value={<StatusBadge value={data.hermes?.health} />} meta="runtime observation" />
+          <Metric label="Events" value={data.recentEvents.length} meta="observed records" />
+          <Metric label="Control center" value={<StatusBadge value={data.projectControlCenter?.status ?? 'UNAVAILABLE'} />} meta="cannot grant approval" />
+          <Metric label="Activation" value={<StatusBadge value="NOT_ACTIVATED" />} meta="no Live authority" />
+        </div>}</EnvelopeFrame> : <LoadingState label="Operations evidence" />}
       </Panel>
     </div>
   </>;
@@ -156,29 +188,77 @@ function MarketPage() {
 }
 
 function TradingPage() {
-  const [tab, setTab] = useState('Positions');
   const trading = useQuery(workbenchQueries.trading());
   const account = useQuery(workbenchQueries.account());
+  const market = useQuery(workbenchQueries.market());
+  const safety = useQuery(workbenchQueries.safety());
   if (trading.isError || account.isError) return <QueryFailure message={(trading.error ?? account.error)?.message ?? 'Trading read failed'} />;
-  return <><PageHeading eyebrow="Terminal / Trading" title="Positions, orders, accounting" detail="Canonical states are passed through; this screen has no execution controls." />
-    <Tabs values={['Positions', 'Orders', 'Accounting']} active={tab} onChange={setTab} />
-    {tab === 'Positions' && trading.data && <Panel title="Position resolution" eyebrow="missing ≠ flat"><EnvelopeFrame envelope={trading.data}>{data => data.positions.length ? <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Venue</th><th>Status</th><th>Side</th><th>Quantity</th><th>Average entry</th></tr></thead><tbody>{data.positions.map(item => <tr key={`${item.exchange}:${item.symbol}`}><td><b>{item.symbol}</b></td><td>{item.exchange}</td><td><StatusBadge value={item.resolution.status} /></td><td>{item.resolution.side}</td><td>{formatNumber(item.resolution.signedQuantity, 8)}</td><td>{item.resolution.status === 'missing' ? 'UNAVAILABLE' : formatNumber(item.resolution.averageEntryPrice)}</td></tr>)}</tbody></table></div> : <EmptyState title="No position evidence" detail="No initialized or tracked position resolution is available." />}</EnvelopeFrame></Panel>}
-    {tab === 'Orders' && trading.data && <Panel title="OMS orders" eyebrow="Exact status"><EnvelopeFrame envelope={trading.data}>{data => data.orders.length ? <div className="table-wrap"><table><thead><tr><th>Order</th><th>Instrument</th><th>Action</th><th>Side</th><th>Status</th><th>Version</th></tr></thead><tbody>{data.orders.map(order => <tr key={order.orderId}><td className="mono">{order.orderId}</td><td>{order.symbol}</td><td>{order.action}</td><td>{order.side}</td><td><StatusBadge value={order.status} /></td><td>{order.orderVersion}</td></tr>)}</tbody></table></div> : <EmptyState title="No OMS orders" detail="The canonical order store returned an empty read set." />}</EnvelopeFrame></Panel>}
-    {tab === 'Accounting' && account.data && <Panel title="Runtime accounting" eyebrow="No browser recomputation"><EnvelopeFrame envelope={account.data}>{data => data.accounting ? <div className="metric-grid"><Metric label="Cash" value={formatMoney(data.accounting.cashUsd)} /><Metric label="Equity" value={formatMoney(data.accounting.equityUsd)} meta={data.accounting.valuationStatus} /><Metric label="Realized PnL" value={formatMoney(data.accounting.realizedPnlUsd)} /><Metric label="Unrealized PnL" value={formatMoney(data.accounting.unrealizedPnlUsd)} /><Metric label="Net exposure" value={formatMoney(data.accounting.netExposureUsd)} /><Metric label="Fees" value={formatMoney(data.accounting.totalFeesUsd)} /><Metric label="Slippage" value={formatMoney(data.accounting.slippage.totalObservedSlippageUsd)} meta={data.accounting.slippage.status} /><Metric label="Closed trades" value={data.tradeLifecycle?.closedTrades ?? 'UNAVAILABLE'} /></div> : <EmptyState title="Accounting unavailable" detail="No canonical RuntimeAccounting projection is mounted." />}</EnvelopeFrame></Panel>}
+  const latest = market.data?.data?.instruments[0];
+  return <><PageHeading eyebrow="Terminal / Execution Observability" title="Trading state without an order ticket" detail="Market context, risk observations, OMS state and account facts share one read-only surface. No control here can submit, cancel or modify an order." status={trading.data?.freshness} />
+    <div className="trading-layout">
+      <Panel title="Instrument facts" eyebrow="Watchlist / canonical market" className="trading-watchlist">
+        {market.isError ? <EmptyState title="UNAVAILABLE" detail="Market read failed; no instrument facts are inferred." /> : market.data ? <EnvelopeFrame envelope={market.data}>{data => data.instruments.length ? <div className="compact-list">{data.instruments.slice(0, 8).map(item => <div key={`${item.exchange}:${item.symbol}`}><b>{item.symbol}</b><span>{item.exchange}</span><strong>{formatNumber(item.ticker?.ticker?.last)}</strong><StatusBadge value={item.isStale ? 'STALE' : 'FRESH'} /></div>)}</div> : <EmptyState title="No factual watchlist" detail="The market store has no observed instruments." />}</EnvelopeFrame> : <LoadingState label="market facts" />}
+      </Panel>
+      <Panel title={latest?.symbol ?? 'Market context'} eyebrow="Chart / price observation" className="trading-chart">
+        <div className="market-fact-strip"><Metric label="Last" value={formatNumber(latest?.ticker?.ticker?.last)} /><Metric label="Bid" value={formatNumber(latest?.ticker?.ticker?.bestBid)} /><Metric label="Ask" value={formatNumber(latest?.ticker?.ticker?.bestAsk)} /><Metric label="Mark" value="UNAVAILABLE" /><Metric label="Index" value="UNAVAILABLE" /><Metric label="Funding" value="UNAVAILABLE" /></div>
+        <div className="chart-unavailable"><span>CHART SOURCE UNAVAILABLE</span><p>No canonical time-series projection is exposed to Workbench. A decorative price curve would be false evidence.</p></div>
+        {market.data && <FreshnessStamp capturedAt={market.data.provenance.capturedAt} lastUpdatedAt={latest?.lastUpdatedAt ?? market.data.provenance.lastUpdatedAt} freshness={market.data.freshness} />}
+      </Panel>
+      <Panel title="Strategy & pre-trade risk" eyebrow="Observation only" className="trading-risk">
+        <div className="observation-lanes"><div><span>Strategy intent</span><StatusBadge value="UNAVAILABLE" /><p>No canonical strategy-intent read source is mounted.</p></div><div><span>Risk admission</span><StatusBadge value={safety.data?.availability ?? 'UNKNOWN'} /><p>{safety.data?.data?.riskBlockers.join(' · ') || 'No verified pre-trade decision is available.'}</p></div></div>
+        <LockedControl title="Execution control surface" detail="Order entry is not implemented in Workbench. Future writes must traverse ProductionSpine → PreTradeRiskGateway → OMS → ExecutionAdapter." />
+      </Panel>
+      <Panel title="OMS order timeline" eyebrow="Exact status" className="trading-orders">
+        {trading.data && <EnvelopeFrame envelope={trading.data}>{data => data.orders.length ? <div className="table-wrap"><table><thead><tr><th>Order ID</th><th>Instrument</th><th>Intent</th><th>Side</th><th>Status</th><th>Version</th></tr></thead><tbody>{data.orders.map(order => <tr key={order.orderId}><td className="mono">{order.orderId}</td><td>{order.symbol}</td><td>{order.action}</td><td>{order.side}</td><td><StatusBadge value={order.status} /></td><td className="mono">v{order.orderVersion}</td></tr>)}</tbody></table></div> : <EmptyState title="No OMS orders" detail="The canonical order store returned an empty read set." />}</EnvelopeFrame>}
+      </Panel>
+      <Panel title="Positions" eyebrow="missing ≠ flat" className="trading-positions">
+        {trading.data && <EnvelopeFrame envelope={trading.data}>{data => data.positions.length ? <div className="table-wrap"><table><thead><tr><th>Instrument</th><th>Venue</th><th>Resolution</th><th>Side</th><th>Quantity</th><th>Average entry</th></tr></thead><tbody>{data.positions.map(item => <tr key={`${item.exchange}:${item.symbol}`}><td><b>{item.symbol}</b></td><td>{item.exchange}</td><td><StatusBadge value={item.resolution.status} /></td><td>{item.resolution.side}</td><td>{item.resolution.status === 'missing' ? 'UNAVAILABLE' : formatNumber(item.resolution.signedQuantity, 8)}</td><td>{item.resolution.status === 'missing' ? 'UNAVAILABLE' : formatNumber(item.resolution.averageEntryPrice)}</td></tr>)}</tbody></table></div> : <EmptyState title="No position evidence" detail="No observed position is not evidence of a flat account." />}</EnvelopeFrame>}
+      </Panel>
+      <Panel title="Protective plans" eyebrow="Plan store" className="trading-protection">
+        {trading.data && <EnvelopeFrame envelope={trading.data}>{data => data.protectivePlans.length ? <div className="compact-list">{data.protectivePlans.map(plan => <div key={plan.planId}><b>{plan.symbol}</b><span className="mono">{plan.planId}</span><StatusBadge value={plan.status} /></div>)}</div> : <EmptyState title="UNAVAILABLE" detail="No protective-plan evidence is available; protection is not assumed." />}</EnvelopeFrame>}
+      </Panel>
+      <Panel title="Account facts" eyebrow="No browser recomputation" className="trading-account">
+        {account.data && <EnvelopeFrame envelope={account.data}>{data => data.accounting ? <div className="metric-grid"><Metric label="Cash" value={formatMoney(data.accounting.cashUsd)} /><Metric label="Equity" value={formatMoney(data.accounting.equityUsd)} meta={data.accounting.valuationStatus} /><Metric label="Realized PnL" value={formatMoney(data.accounting.realizedPnlUsd)} /><Metric label="Unrealized PnL" value={formatMoney(data.accounting.unrealizedPnlUsd)} /><Metric label="Net exposure" value={formatMoney(data.accounting.netExposureUsd)} /><Metric label="Fees" value={formatMoney(data.accounting.totalFeesUsd)} /><Metric label="Slippage" value={formatMoney(data.accounting.slippage.totalObservedSlippageUsd)} meta={data.accounting.slippage.status} /><Metric label="Closed trades" value={data.tradeLifecycle?.closedTrades ?? 'UNAVAILABLE'} /></div> : <EmptyState title="Accounting unavailable" detail="No canonical RuntimeAccounting projection is mounted." />}</EnvelopeFrame>}
+      </Panel>
+    </div>
   </>;
 }
 
 function ResearchPage() {
-  const [tab, setTab] = useState('Evidence');
   const query = useQuery(workbenchQueries.research());
   if (query.isError) return <QueryFailure message={query.error.message} />;
-  return <><PageHeading eyebrow="Intelligence / Research" title="Research evidence, separated from execution" detail="Unsupported providers and jobs stay unavailable; no A-share or backtest data is fabricated." status={query.data?.availability} />
-    <Tabs values={['Evidence', 'Providers', 'Backtest', 'Regime']} active={tab} onChange={setTab} />
-    {query.data && <Panel title={tab} eyebrow="Non-authoritative research"><EnvelopeFrame envelope={query.data}>{data => {
-      if (tab === 'Evidence') return data.evidence.length ? <div className="compact-list">{data.evidence.map(item => <div key={item.evidenceId}><b>{item.kind}</b><span>{item.producedBy}</span><StatusBadge value="READ_ONLY" /></div>)}</div> : <EmptyState title="No research evidence" detail="No deterministic research evidence is currently mounted." />;
-      if (tab === 'Providers') return data.providers.length ? <div className="compact-list">{data.providers.map(item => <div key={item.providerId}><b>{item.providerId}</b><span>{item.datasets.join(', ') || 'no datasets'}</span><StatusBadge value={item.status} /></div>)}</div> : <EmptyState title="No providers mounted" detail="TickFlow, AkShare, scraping, and external production feeds are not implemented in V1." />;
-      return <EmptyState title={`${tab} workspace reserved`} detail="The canonical runtime does not expose this capability. No optimizer, walk-forward executor, or synthetic result is present." />;
-    }}</EnvelopeFrame></Panel>}
+  const data = query.data?.data;
+  const providers = data?.providers ?? [];
+  const evidence = data?.evidence ?? [];
+  return <><PageHeading eyebrow="Intelligence / Research Data Hub" title="Data lineage before conclusions" detail="Provider ingress, point-in-time controls and evaluation boundaries are presented as separate evidence stages. Unsupported stages remain unavailable." status={query.data?.availability} />
+    {query.data && <AvailabilityNotice availability={query.data.availability} freshness={query.data.freshness} reason={query.data.reason} />}
+    <SectionHeader index="01" title="Research pipeline" detail="An observed provider never implies canonicalization, PIT qualification, storage, or decision eligibility." />
+    <div className="research-pipeline">
+      <div><small>01</small><b>Provider Ingress</b><StatusBadge value={providers.length ? 'OBSERVED' : 'UNAVAILABLE'} /></div><i>→</i>
+      <div><small>02</small><b>Canonical Dictionary</b><StatusBadge value="UNAVAILABLE" /></div><i>→</i>
+      <div><small>03</small><b>PIT Dataset</b><StatusBadge value="UNAVAILABLE" /></div><i>→</i>
+      <div><small>04</small><b>Storage</b><StatusBadge value="UNAVAILABLE" /></div><i>→</i>
+      <div><small>05</small><b>Decision View</b><StatusBadge value="UNAVAILABLE" /></div>
+    </div>
+    <div className="research-grid">
+      <Panel title="Providers" eyebrow="Ingress observations">
+        {providers.length ? <div className="compact-list">{providers.map(item => <div key={item.providerId}><b>{item.providerId}</b><span>{item.datasets.join(', ') || 'no datasets'}</span><StatusBadge value={item.status} /></div>)}</div> : <EmptyState title="UNAVAILABLE" detail="No provider is mounted. TickFlow operationalization is not claimed." />}
+      </Panel>
+      <Panel title="Datasets" eyebrow="Dictionary / availability">
+        {providers.some(item => item.datasets.length) ? <div className="compact-list">{providers.flatMap(provider => provider.datasets.map(dataset => <div key={`${provider.providerId}:${dataset}`}><b>{dataset}</b><span>{provider.providerId}</span><StatusBadge value="OBSERVED" /></div>))}</div> : <EmptyState title="UNAVAILABLE" detail="No canonical dataset dictionary is exposed by the current read model." />}
+      </Panel>
+      <Panel title="PIT & lineage" eyebrow="Version authority">
+        <div className="fact-register"><div><span>PIT status</span><StatusBadge value="NOT_VERIFIED" /></div><div><span>Version</span><b className="mono">UNKNOWN</b></div><div><span>Lineage</span><StatusBadge value="UNAVAILABLE" /></div><div><span>Availability</span><StatusBadge value={query.data?.availability ?? 'UNAVAILABLE'} /></div></div>
+      </Panel>
+      <Panel title="Evaluation boundaries" eyebrow="Anti-overfit contract">
+        <div className="split-boundaries"><div><span>TRAIN</span><StatusBadge value="UNAVAILABLE" /></div><i>→</i><div><span>VALIDATION</span><StatusBadge value="UNAVAILABLE" /></div><i>⊣</i><div><span>LOCKED TEST</span><StatusBadge value="LOCKED" /></div></div>
+        <p className="boundary-copy">No split ranges or dataset identity were supplied. The labels describe required isolation, not completed evidence.</p>
+      </Panel>
+      <Panel title="Backtest evidence" eyebrow="No synthetic results" className="panel-wide">
+        {evidence.length ? <div className="table-wrap"><table><thead><tr><th>Evidence ID</th><th>Kind</th><th>Producer</th><th>Authority</th></tr></thead><tbody>{evidence.map(item => <tr key={item.evidenceId}><td className="mono">{item.evidenceId}</td><td>{item.kind}</td><td>{item.producedBy}</td><td><StatusBadge value="READ_ONLY" /></td></tr>)}</tbody></table></div> : <EmptyState title="NOT IMPLEMENTED / NOT VERIFIED" detail="No deterministic backtest, optimizer, walk-forward, or locked-test evidence is mounted." />}
+      </Panel>
+    </div>
+    {query.data && <ProvenanceLine value={query.data.provenance} />}
   </>;
 }
 
@@ -206,16 +286,50 @@ function EventTable({ events }: { events: Array<{ eventId: string; timestamp: st
 }
 
 function OperationsPage() {
-  const [tab, setTab] = useState('Hermes');
   const query = useQuery(workbenchQueries.operations());
+  const runtime = useQuery(workbenchQueries.runtime());
+  const safety = useQuery(workbenchQueries.safety());
   if (query.isError) return <QueryFailure message={query.error.message} />;
-  return <><PageHeading eyebrow="Control / Operations" title="Runtime and delivery evidence" detail="Project Control Center remains Operations-only and cannot grant trading approval." status={query.data?.freshness} />
-    <Tabs values={['Hermes', 'Events', 'Control Center']} active={tab} onChange={setTab} />
-    {query.data && <Panel title={tab} eyebrow="Read-only operations"><EnvelopeFrame envelope={query.data}>{data => {
-      if (tab === 'Hermes') return data.hermes ? <div className="metric-grid"><Metric label="State" value={<StatusBadge value={data.hermes.state} />} /><Metric label="Health" value={<StatusBadge value={data.hermes.health} />} /><Metric label="Circuit" value={<StatusBadge value={data.hermes.circuitState} />} /><Metric label="Generation" value={data.hermes.generation} /></div> : <EmptyState title="Hermes unavailable" detail="No coordinator snapshot was provided." />;
-      if (tab === 'Events') return data.recentEvents.length ? <EventTable events={data.recentEvents} /> : <EmptyState title="Events unavailable" detail="No factual runtime event source is mounted." />;
-      return data.projectControlCenter ? <div><div className="metric-grid"><Metric label="Status" value={data.projectControlCenter.status} /><Metric label="Capability" value={data.projectControlCenter.currentCapability} /><Metric label="Task" value={data.projectControlCenter.currentTask} /></div><div className="boundary-strip"><StatusBadge value={data.projectControlCenter.boundaries.readOnlyDashboard ? 'READ_ONLY' : 'UNKNOWN'} /><StatusBadge value={data.projectControlCenter.boundaries.dashboardGrantsApproval ? 'APPROVAL_ENABLED' : 'NO_APPROVAL'} /><StatusBadge value={data.projectControlCenter.boundaries.tradingEnvironmentActivated ? 'TRADING_ACTIVE' : 'TRADING_INACTIVE'} /></div></div> : <EmptyState title="Project Control Center unavailable" detail="Engineering evidence was not mounted into the application gateway." />;
-    }}</EnvelopeFrame></Panel>}
+  const data = query.data?.data;
+  const capabilityRows: CapabilityRow[] = [
+    { capability: 'Workbench read API', implemented: 'YES', configured: data ? 'OBSERVED' : 'UNKNOWN', connected: data ? 'OBSERVED' : 'UNKNOWN', readVerified: 'UNKNOWN', writeRouted: 'LOCKED', activated: 'NOT_ACTIVATED' },
+    { capability: 'Hermes coordination', implemented: data?.hermes ? 'OBSERVED' : 'UNKNOWN', configured: 'UNKNOWN', connected: data?.hermes ? 'OBSERVED' : 'UNKNOWN', readVerified: 'UNKNOWN', writeRouted: 'LOCKED', activated: 'NOT_ACTIVATED' },
+    { capability: 'Trading authority', implemented: 'UNKNOWN', configured: runtime.data?.data?.mode ? 'OBSERVED' : 'UNKNOWN', connected: 'UNKNOWN', readVerified: 'UNKNOWN', writeRouted: 'LOCKED', activated: 'NOT_ACTIVATED' },
+  ];
+  return <><PageHeading eyebrow="Control / Production Readiness Evidence" title="Evidence is not authority" detail="Observed, verified and authorized are independent states. CI success cannot stand in for Phase 10 verification, and Phase 10 cannot activate Live." status={query.data?.freshness} />
+    <div className="trust-lanes">
+      <div><span>OBSERVED</span><StatusBadge value={data ? 'OBSERVED' : 'UNAVAILABLE'} /><p>A read projection returned data.</p></div>
+      <div><span>VERIFIED</span><StatusBadge value="UNKNOWN" /><p>No authenticatable verification receipt is exposed here.</p></div>
+      <div><span>AUTHORIZED</span><StatusBadge value="NOT_AUTHORIZED" /><p>Workbench cannot grant approval or activate trading.</p></div>
+    </div>
+    <SectionHeader index="01" title="Readiness register" detail="Unavailable evidence remains explicit; no caller summary is upgraded into proof." action={query.data && <FreshnessStamp capturedAt={query.data.provenance.capturedAt} lastUpdatedAt={query.data.provenance.lastUpdatedAt} freshness={query.data.freshness} />} />
+    <div className="evidence-register">
+      <div><span>Exact Git SHA</span><b className="mono">UNAVAILABLE</b><StatusBadge value="NOT_VERIFIED" /></div>
+      <div><span>CI</span><b>Repository receipt</b><StatusBadge value="UNAVAILABLE" /></div>
+      <div><span>Security</span><b>Repository receipt</b><StatusBadge value="UNAVAILABLE" /></div>
+      <div><span>Proof / receipt families</span><b>Offline verification</b><StatusBadge value="UNAVAILABLE" /></div>
+      <div><span>Exceptions</span><b>Security observation</b><StatusBadge value="UNKNOWN" /></div>
+      <div><span>Runtime mode</span><b className="mono">{runtime.data?.data?.mode ?? 'UNKNOWN'}</b><StatusBadge value={runtime.data?.availability ?? 'UNKNOWN'} /></div>
+      <div><span>Activation eligibility</span><b>Safety observation</b><StatusBadge value={safety.data?.data?.liveReady.status ?? 'UNKNOWN'} /></div>
+      <div><span>Live activation</span><b>Authority state</b><StatusBadge value="NOT_ACTIVATED" /></div>
+    </div>
+    <SectionHeader index="02" title="Independent capability matrix" detail="A known state in one column never fills another column." />
+    <Panel title="Capability state" eyebrow="Missing evidence → UNKNOWN / UNAVAILABLE" className="panel-wide terminal-panel"><CapabilityMatrix rows={capabilityRows} /></Panel>
+    <SectionHeader index="03" title="Runtime observations" detail="Operational telemetry is preserved as observation, not transformed into authorization." />
+    <div className="operations-grid">
+      <Panel title="Hermes" eyebrow="Coordinator observation">
+        {data?.hermes ? <div className="metric-grid"><Metric label="State" value={<StatusBadge value={data.hermes.state} />} /><Metric label="Health" value={<StatusBadge value={data.hermes.health} />} /><Metric label="Circuit" value={<StatusBadge value={data.hermes.circuitState} />} /><Metric label="Generation" value={data.hermes.generation} /></div> : <EmptyState title="UNAVAILABLE" detail="No coordinator snapshot was provided." />}
+      </Panel>
+      <Panel title="Blockers & warnings" eyebrow="Fail-closed summary">
+        <div className="safety-stack"><div><span>Risk blockers</span><b>{safety.data?.data?.riskBlockers.length ?? 'UNKNOWN'}</b></div><div><span>Recovery</span><StatusBadge value={safety.data?.data?.recovery?.mode ?? 'UNKNOWN'} /></div><div><span>Reconciliation</span><StatusBadge value={safety.data?.data?.reconciliation?.outcome ?? 'UNKNOWN'} /></div></div>
+      </Panel>
+      <Panel title="Recent evidence events" eyebrow="Observed records" className="panel-wide">
+        {data?.recentEvents.length ? <EventTable events={data.recentEvents} /> : <EmptyState title="UNAVAILABLE" detail="No factual runtime event source is mounted." />}
+      </Panel>
+      <Panel title="Project Control Center" eyebrow="Operations only" className="panel-wide">
+        {data?.projectControlCenter ? <><div className="operations-summary"><Metric label="Status" value={data.projectControlCenter.status} /><Metric label="Capability" value={data.projectControlCenter.currentCapability} /><Metric label="Task" value={data.projectControlCenter.currentTask} /><Metric label="Approval" value={<StatusBadge value="NO_APPROVAL" />} /></div><div className="boundary-strip"><StatusBadge value={data.projectControlCenter.boundaries.readOnlyDashboard ? 'READ_ONLY' : 'UNKNOWN'} /><StatusBadge value={data.projectControlCenter.boundaries.dashboardGrantsApproval ? 'APPROVAL_ENABLED' : 'NO_APPROVAL'} /><StatusBadge value={data.projectControlCenter.boundaries.tradingEnvironmentActivated ? 'TRADING_ACTIVE' : 'NOT_ACTIVATED'} /></div></> : <EmptyState title="UNAVAILABLE" detail="Engineering evidence was not mounted into the application gateway." />}
+      </Panel>
+    </div>
   </>;
 }
 
