@@ -26,7 +26,9 @@ import {
 } from './BinanceUsdMAuthenticatedReadClient';
 import {
   BINANCE_USDM_READ_ENDPOINTS,
+  hasProductionBinanceUsdMReadTransportProvenance,
   type BinanceUsdMReadEndpoint,
+  type BinanceUsdMProductionReadTransport,
   type BinanceUsdMReadTransport,
   type BinanceUsdMReadTransportRequest,
 } from './BinanceUsdMReadTransport';
@@ -37,16 +39,29 @@ import {
 
 export const MAX_BINANCE_TIME_PREFLIGHT_ROUND_TRIP_MS = 5_000 as const;
 
-export interface BinanceAuthenticatedReadQualificationRunnerInput {
+interface BinanceAuthenticatedReadRunnerInput {
   readonly runId: string;
   readonly identity: BinanceReadIdentity;
   readonly requestedSymbols: readonly string[];
   readonly q0Receipt: BinanceOfflineQualificationReceipt | null;
   readonly secretProvider: BinanceReadSecretProvider;
-  readonly transport: BinanceUsdMReadTransport;
   readonly now: () => number;
   readonly staleAfterMs?: number;
   readonly recvWindowMs?: number;
+}
+
+export interface BinanceAuthenticatedReadSimulationRunnerInput
+  extends BinanceAuthenticatedReadRunnerInput {
+  readonly transport: BinanceUsdMReadTransport;
+}
+
+export interface BinanceAuthenticatedReadQualificationRunnerInput
+  extends BinanceAuthenticatedReadRunnerInput {
+  readonly transport: BinanceUsdMProductionReadTransport;
+}
+
+interface InternalRunnerInput extends BinanceAuthenticatedReadRunnerInput {
+  readonly transport: BinanceUsdMReadTransport;
 }
 
 function timestamp(value: unknown): value is number {
@@ -163,8 +178,10 @@ function countFor(
   return counts.get(endpoint) ?? 0;
 }
 
-export async function runBinanceAuthenticatedReadQualification(
-  input: BinanceAuthenticatedReadQualificationRunnerInput,
+async function runQualification(
+  input: InternalRunnerInput,
+  qualificationMode: 'OFFLINE_SIMULATION' | 'REAL_AUTHENTICATED_NETWORK',
+  productionTransportProvenance: boolean,
 ): Promise<BinanceAuthenticatedReadQualificationReceipt> {
   const q0Receipt = input.q0Receipt;
   const secretProvider = input.secretProvider;
@@ -173,11 +190,18 @@ export async function runBinanceAuthenticatedReadQualification(
   const staleAfterMs = input.staleAfterMs;
   const recvWindowMs = input.recvWindowMs;
   const request = createBinanceAuthenticatedReadQualificationRequest({
-    qualificationMode: 'REAL_AUTHENTICATED_NETWORK',
+    qualificationMode,
     runId: input.runId,
     identity: input.identity,
     requestedSymbols: input.requestedSymbols,
   });
+
+  if ((qualificationMode === 'REAL_AUTHENTICATED_NETWORK' && !productionTransportProvenance)
+      || (qualificationMode === 'OFFLINE_SIMULATION' && productionTransportProvenance)) {
+    return failureReceipt(
+      request, q0Receipt, 'BINANCE_READ_CLIENT_UNAVAILABLE', false, null,
+    );
+  }
 
   if (!q0PreconditionSatisfied(q0Receipt)) {
     return failureReceipt(
@@ -306,7 +330,10 @@ export async function runBinanceAuthenticatedReadQualification(
     && countFor(endpointCounts, BINANCE_USDM_READ_ENDPOINTS.MARK_PRICE) === symbolCount
     && countFor(endpointCounts, BINANCE_USDM_READ_ENDPOINTS.EXCHANGE_INFO) === 1;
   const expectedAuthenticatedRequests = 1 + (2 * symbolCount);
-  const productionConnectivityVerified = transportFailed === false
+  const realEvidenceAllowed = qualificationMode === 'REAL_AUTHENTICATED_NETWORK'
+    && productionTransportProvenance;
+  const productionConnectivityVerified = realEvidenceAllowed
+    && transportFailed === false
     && expectedTransportShape
     && authenticatedRequestCount === expectedAuthenticatedRequests
     && accountResult.availability === 'AVAILABLE'
@@ -331,11 +358,33 @@ export async function runBinanceAuthenticatedReadQualification(
     }),
     unexpectedErrorCodes: Object.freeze(transportFailed ? ['BINANCE_Q1_TRANSPORT_FAILED'] : []),
     mutationAttemptCount: 0,
-    authNetworkUsed: authenticatedRequestCount > 0,
-    realCredentialUsed: authenticatedRequestCount > 0,
+    authNetworkUsed: realEvidenceAllowed && authenticatedRequestCount > 0,
+    realCredentialUsed: realEvidenceAllowed && authenticatedRequestCount > 0,
     productionConnectivityVerified,
     q0Receipt,
   });
+}
+
+/** Fake/injected transport path: exercises the contract but can never emit real-world provenance. */
+export async function runBinanceAuthenticatedReadSimulation(
+  input: BinanceAuthenticatedReadSimulationRunnerInput,
+): Promise<BinanceAuthenticatedReadQualificationReceipt> {
+  return runQualification(
+    input,
+    'OFFLINE_SIMULATION',
+    hasProductionBinanceUsdMReadTransportProvenance(input.transport),
+  );
+}
+
+/** Real path: only the out-of-band production transport capability can enter factual REAL mode. */
+export async function runBinanceAuthenticatedReadQualification(
+  input: BinanceAuthenticatedReadQualificationRunnerInput,
+): Promise<BinanceAuthenticatedReadQualificationReceipt> {
+  return runQualification(
+    input,
+    'REAL_AUTHENTICATED_NETWORK',
+    hasProductionBinanceUsdMReadTransportProvenance(input.transport),
+  );
 }
 
 export const BINANCE_Q1_EXPECTED_READ_CLIENT_METHODS = BINANCE_L1A_READ_CLIENT_METHODS;

@@ -28,6 +28,13 @@ export interface BinanceUsdMReadTransport {
   get(request: BinanceUsdMReadTransportRequest): Promise<unknown>;
 }
 
+declare const BINANCE_USDM_PRODUCTION_TRANSPORT: unique symbol;
+
+/** Nominal capability returned only by the closed production constructor. */
+export interface BinanceUsdMProductionReadTransport extends BinanceUsdMReadTransport {
+  readonly [BINANCE_USDM_PRODUCTION_TRANSPORT]: true;
+}
+
 export type BinanceUsdMFetch = (
   input: string | URL,
   init: RequestInit,
@@ -41,6 +48,7 @@ export class BinanceUsdMReadTransportError extends Error {
 }
 
 const ALLOWED_ENDPOINTS = new Set<string>(Object.values(BINANCE_USDM_READ_ENDPOINTS));
+const PRODUCTION_TRANSPORTS = new WeakSet<object>();
 const SECURE_ENDPOINTS = new Set<BinanceUsdMReadEndpoint>([
   BINANCE_USDM_READ_ENDPOINTS.ACCOUNT,
   BINANCE_USDM_READ_ENDPOINTS.OPEN_ORDERS,
@@ -99,10 +107,7 @@ function validateRequest(request: BinanceUsdMReadTransportRequest): void {
   }
 }
 
-/** Real-capable transport. Construction and import perform no I/O. */
-export function createBinanceUsdMReadTransport(
-  fetchImpl: BinanceUsdMFetch = globalThis.fetch.bind(globalThis),
-): BinanceUsdMReadTransport {
+function createReadTransport(fetchImpl: BinanceUsdMFetch): BinanceUsdMReadTransport {
   return Object.freeze({
     async get(request: BinanceUsdMReadTransportRequest): Promise<unknown> {
       validateRequest(request);
@@ -133,4 +138,27 @@ export function createBinanceUsdMReadTransport(
       }
     },
   });
+}
+
+/** Injectable transport for simulation and deterministic tests; it carries no production provenance. */
+export function createBinanceUsdMReadTransport(
+  fetchImpl: BinanceUsdMFetch,
+): BinanceUsdMReadTransport {
+  return createReadTransport(fetchImpl);
+}
+
+/**
+ * Closed production capability. Construction performs no I/O and accepts no caller-supplied transport.
+ * Membership is held out-of-band so structural lookalikes and caller booleans cannot forge it.
+ */
+export function createProductionBinanceUsdMReadTransport(): BinanceUsdMProductionReadTransport {
+  const transport = createReadTransport(globalThis.fetch.bind(globalThis));
+  PRODUCTION_TRANSPORTS.add(transport);
+  return transport as BinanceUsdMProductionReadTransport;
+}
+
+export function hasProductionBinanceUsdMReadTransportProvenance(
+  value: unknown,
+): value is BinanceUsdMProductionReadTransport {
+  return typeof value === 'object' && value !== null && PRODUCTION_TRANSPORTS.has(value);
 }

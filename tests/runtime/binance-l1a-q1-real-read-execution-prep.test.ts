@@ -22,12 +22,16 @@ import {
 } from '../../src/runtime/binance/BinanceUsdMAuthenticatedReadClient';
 import {
   runBinanceAuthenticatedReadQualification,
+  runBinanceAuthenticatedReadSimulation,
 } from '../../src/runtime/binance/BinanceAuthenticatedReadQualificationRunner';
 import {
   BINANCE_USDM_BASE_ORIGIN,
   BINANCE_USDM_READ_ENDPOINTS,
   createBinanceUsdMReadTransport,
+  createProductionBinanceUsdMReadTransport,
+  hasProductionBinanceUsdMReadTransportProvenance,
   type BinanceUsdMReadEndpoint,
+  type BinanceUsdMProductionReadTransport,
   type BinanceUsdMReadTransport,
   type BinanceUsdMReadTransportRequest,
 } from '../../src/runtime/binance/BinanceUsdMReadTransport';
@@ -188,8 +192,8 @@ async function simulatedRun(options: {
   const symbols = options.symbols ?? SYMBOLS;
   const fake = fakeTransport(symbols, options.overrides);
   let secretProviderCalls = 0;
-  const receipt = await runBinanceAuthenticatedReadQualification({
-    runId: 'q1-simulated-real-run',
+  const receipt = await runBinanceAuthenticatedReadSimulation({
+    runId: 'q1-offline-simulation-run',
     identity,
     requestedSymbols: symbols,
     q0Receipt: options.q0Receipt === undefined ? validQ0Receipt : options.q0Receipt,
@@ -282,7 +286,12 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
     const transport = createBinanceUsdMReadTransport(async () => ({
       ok: true, status: 200, async json() { return {}; },
     }));
+    const productionTransport = createProductionBinanceUsdMReadTransport();
     assert.deepEqual(Object.keys(transport), ['get']);
+    assert.deepEqual(Object.keys(productionTransport), ['get']);
+    assert.equal(hasProductionBinanceUsdMReadTransportProvenance(transport), false);
+    assert.equal(hasProductionBinanceUsdMReadTransportProvenance(fake.transport), false);
+    assert.equal(hasProductionBinanceUsdMReadTransportProvenance(productionTransport), true);
     assert.deepEqual(Object.keys(clientFor(fake.transport)).sort(), [
       'getAccount', 'getInstrumentRules', 'getMarkPrice',
       'getOpenOrders', 'getRecentFills', 'getServerTime',
@@ -396,13 +405,13 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
       request.endpoint === BINANCE_USDM_READ_ENDPOINTS.USER_TRADES).length, 3);
     assert.equal(observed.requests.filter((request) =>
       request.endpoint === BINANCE_USDM_READ_ENDPOINTS.EXCHANGE_INFO).length, 1);
-    assert.equal(observed.receipt.REAL_READ_VERIFIED, true);
+    assert.equal(observed.receipt.REAL_READ_VERIFIED, false);
   });
 
   it('12. more than three symbols rejects before credentials or transport', async () => {
     const fake = fakeTransport(['AUSDT', 'BUSDT', 'CUSDT', 'DUSDT']);
     let providerCalls = 0;
-    await assert.rejects(() => runBinanceAuthenticatedReadQualification({
+    await assert.rejects(() => runBinanceAuthenticatedReadSimulation({
       runId: 'too-many-symbols',
       identity,
       requestedSymbols: ['AUSDT', 'BUSDT', 'CUSDT', 'DUSDT'],
@@ -538,16 +547,18 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
     }
   });
 
-  it('20. complete fake REAL run can verify reads but grants no authority', async () => {
+  it('20. complete fake simulation verifies normalization but cannot claim real provenance', async () => {
     const observed = await simulatedRun();
     assert.equal(observed.secretProviderCalls, 1);
-    assert.equal(observed.receipt.QUALIFICATION_MODE, 'REAL_AUTHENTICATED_NETWORK');
+    assert.equal(observed.receipt.QUALIFICATION_MODE, 'OFFLINE_SIMULATION');
     assert.equal(observed.receipt.READ_CLIENT_SURFACE_EXACT, true);
     assert.equal(observed.receipt.MUTATION_SURFACE_PRESENT, false);
-    assert.equal(observed.receipt.AUTH_NETWORK_USED, true);
-    assert.equal(observed.receipt.REAL_CREDENTIAL_USED, true);
-    assert.equal(observed.receipt.PRODUCTION_CONNECTIVITY_VERIFIED, true);
-    assert.equal(observed.receipt.REAL_READ_VERIFIED, true);
+    assert.equal(observed.receipt.ACCOUNT_READ_AVAILABLE, true);
+    assert.equal(observed.receipt.INSTRUMENT_READS_AVAILABLE, true);
+    assert.equal(observed.receipt.AUTH_NETWORK_USED, false);
+    assert.equal(observed.receipt.REAL_CREDENTIAL_USED, false);
+    assert.equal(observed.receipt.PRODUCTION_CONNECTIVITY_VERIFIED, false);
+    assert.equal(observed.receipt.REAL_READ_VERIFIED, false);
     assert.equal(observed.receipt.LIVE_READY, false);
     assert.equal(observed.receipt.EXECUTION_AUTHORITY_GRANTED, false);
     assert.equal(observed.receipt.TESTNET_AUTHORITY_GRANTED, false);
@@ -603,7 +614,7 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
   it('25. invalid explicit identity fails before secret or transport access', async () => {
     const fake = fakeTransport(['SOLUSDT']);
     let providerCalls = 0;
-    await assert.rejects(() => runBinanceAuthenticatedReadQualification({
+    await assert.rejects(() => runBinanceAuthenticatedReadSimulation({
       runId: 'invalid-identity',
       identity: { exchange: 'binance', accountId: '' },
       requestedSymbols: ['SOLUSDT'],
@@ -697,5 +708,57 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
     assert.equal(observed.requests.length, 1);
     assert.equal(observed.requests[0].apiKey, undefined);
     assert.equal(observed.receipt.REAL_READ_VERIFIED, false);
+  });
+
+  it('32. a structural fake and caller boolean cannot enter factual real-network mode', async () => {
+    const fake = fakeTransport(['SOLUSDT']);
+    let providerCalls = 0;
+    const forgedInput = {
+      runId: 'forged-real-provenance',
+      identity,
+      requestedSymbols: ['SOLUSDT'],
+      q0Receipt: validQ0Receipt,
+      secretProvider: {
+        async getReadCredentials() {
+          providerCalls += 1;
+          return fakeCredentials;
+        },
+      },
+      transport: fake.transport as BinanceUsdMProductionReadTransport,
+      now: () => NOW,
+      isReal: true,
+    };
+    const receipt = await runBinanceAuthenticatedReadQualification(forgedInput);
+    assert.equal(providerCalls, 0);
+    assert.equal(fake.requests.length, 0);
+    assert.equal(receipt.QUALIFICATION_MODE, 'REAL_AUTHENTICATED_NETWORK');
+    assert.equal(receipt.AUTH_NETWORK_USED, false);
+    assert.equal(receipt.REAL_CREDENTIAL_USED, false);
+    assert.equal(receipt.PRODUCTION_CONNECTIVITY_VERIFIED, false);
+    assert.equal(receipt.REAL_READ_VERIFIED, false);
+  });
+
+  it('33. a production capability cannot be misrouted through simulation', async () => {
+    let providerCalls = 0;
+    const receipt = await runBinanceAuthenticatedReadSimulation({
+      runId: 'production-transport-in-simulation',
+      identity,
+      requestedSymbols: ['SOLUSDT'],
+      q0Receipt: validQ0Receipt,
+      secretProvider: {
+        async getReadCredentials() {
+          providerCalls += 1;
+          return fakeCredentials;
+        },
+      },
+      transport: createProductionBinanceUsdMReadTransport(),
+      now: () => NOW,
+    });
+    assert.equal(providerCalls, 0);
+    assert.equal(receipt.QUALIFICATION_MODE, 'OFFLINE_SIMULATION');
+    assert.equal(receipt.AUTH_NETWORK_USED, false);
+    assert.equal(receipt.REAL_CREDENTIAL_USED, false);
+    assert.equal(receipt.PRODUCTION_CONNECTIVITY_VERIFIED, false);
+    assert.equal(receipt.REAL_READ_VERIFIED, false);
   });
 });
