@@ -553,4 +553,53 @@ describe('Binance L1A Q1 authenticated-read qualification prep', () => {
     assert.equal(observed.CHECKS.INSTRUMENT_FRESHNESS_FRESH, false);
     assert.equal(observed.REAL_READ_VERIFIED, false);
   });
+
+  it('49. REAL_AUTHENTICATED_NETWORK label alone cannot verify a real read', () => {
+    const request = createBinanceAuthenticatedReadQualificationRequest({
+      qualificationMode: 'REAL_AUTHENTICATED_NETWORK',
+      runId: 'q1-real-mode-label-only',
+      identity,
+      requestedSymbols: SYMBOLS,
+    });
+
+    const labelOnly = receipt({ request });
+    assert.equal(labelOnly.QUALIFICATION_MODE, 'REAL_AUTHENTICATED_NETWORK');
+    assert.equal(labelOnly.CHECKS.REQUEST_SHAPE_EXACT, true);
+    assert.equal(labelOnly.CHECKS.MODE_EVIDENCE_CONSISTENT, false);
+    assert.equal(Object.entries(labelOnly.CHECKS)
+      .filter(([name]) => name !== 'MODE_EVIDENCE_CONSISTENT')
+      .every(([, passed]) => passed), true);
+    assert.equal(labelOnly.AUTH_NETWORK_USED, false);
+    assert.equal(labelOnly.REAL_CREDENTIAL_USED, false);
+    assert.equal(labelOnly.PRODUCTION_CONNECTIVITY_VERIFIED, false);
+    assert.equal(labelOnly.REAL_READ_VERIFIED, false);
+    assert.equal(labelOnly.LIVE_READY, false);
+    assert.equal(labelOnly.EXECUTION_AUTHORITY_GRANTED, false);
+    assert.equal(labelOnly.TESTNET_AUTHORITY_GRANTED, false);
+    assert.equal(labelOnly.REAL_ORDER_AUTHORITY_GRANTED, false);
+
+    const missingAuthNetwork = receipt({
+      request,
+      authNetworkUsed: false,
+      realCredentialUsed: true,
+      productionConnectivityVerified: true,
+    });
+    assert.equal(missingAuthNetwork.CHECKS.MODE_EVIDENCE_CONSISTENT, false);
+    assert.equal(Object.entries(missingAuthNetwork.CHECKS)
+      .filter(([name]) => name !== 'MODE_EVIDENCE_CONSISTENT')
+      .every(([, passed]) => passed), true);
+    assert.equal(missingAuthNetwork.REAL_READ_VERIFIED, false);
+
+    const missingRealCredential = receipt({
+      request,
+      authNetworkUsed: true,
+      realCredentialUsed: false,
+      productionConnectivityVerified: true,
+    });
+    assert.equal(missingRealCredential.CHECKS.MODE_EVIDENCE_CONSISTENT, false);
+    assert.equal(Object.entries(missingRealCredential.CHECKS)
+      .filter(([name]) => name !== 'MODE_EVIDENCE_CONSISTENT')
+      .every(([, passed]) => passed), true);
+    assert.equal(missingRealCredential.REAL_READ_VERIFIED, false);
+  });
 });
