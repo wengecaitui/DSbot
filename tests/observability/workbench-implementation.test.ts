@@ -300,4 +300,31 @@ describe('UI-U0/U1 trusted terminal presentation contract', () => {
     assert.match(stylesSource, /\.trading-watchlist \.availability-notice\s*\{[^}]*flex-direction:\s*column;/s);
     assert.match(stylesSource, /\.trading-watchlist \.availability-notice p\s*\{[^}]*text-align:\s*left;/s);
   });
+
+  it('presents Binance facts only as a separate exchange-observation layer', () => {
+    assert.match(appSource, /Binance exchange observations/);
+    assert.match(appSource, /EXCHANGE OBSERVATION/);
+    assert.match(appSource, /not canonical/);
+    assert.match(appSource, /No reconciliation between these exchange observations and canonical Runtime positions or OMS orders is established by U2/);
+    assert.doesNotMatch(appSource, /BinanceOfflineQualificationReceipt/);
+  });
+
+  it('keeps Binance capability dimensions independent and write authority locked', () => {
+    const binanceCapability = appSource.match(/\{ capability: 'Binance authenticated read'.*?\},/s)?.[0] ?? '';
+    assert.match(binanceCapability, /implemented: 'YES'/);
+    assert.match(binanceCapability, /configured: binanceRead\.data/);
+    assert.match(binanceCapability, /connected: binanceRead\.data/);
+    assert.match(binanceCapability, /readVerified: 'UNKNOWN'/);
+    assert.match(binanceCapability, /writeRouted: 'LOCKED'/);
+    assert.match(binanceCapability, /activated: 'NOT_ACTIVATED'/);
+    assert.doesNotMatch(binanceCapability, /readVerified:.*connected/);
+  });
+
+  it('renders missing Binance observations without inventing flat or zero', () => {
+    assert.match(appSource, /value\.account\.data\?\.accountState \?\? 'UNAVAILABLE'/);
+    assert.match(appSource, /facts\?\.markPrice/);
+    assert.match(appSource, /facts \? `\$\{formatNumber\(facts\.tickSize/);
+    assert.match(appSource, /The Binance read projection failed; connected, flat and zero are not inferred/);
+    assert.doesNotMatch(appSource, /Account state[^\n]+value=(?:"|\{)\s*(?:FLAT|0)/);
+  });
 });

@@ -158,3 +158,69 @@ export interface PolicySnapshot {
 export interface DataSnapshot {
   sources: Array<{ sourceId: string; source: string; status: string; lastUpdatedAt: number | null; version: number | null }>;
 }
+
+export interface BinanceReadStatusProjection {
+  implemented: true;
+  configured: boolean;
+  connected: boolean;
+  lastObservedAt: number | null;
+  reason: string | null;
+  realClientDefaultWired: false;
+  realCredentialDiscovery: false;
+  readVerified: false;
+  writeRouted: false;
+  activated: false;
+}
+
+export interface BinanceAccountTruthSnapshot {
+  accountState: 'FLAT' | 'OPEN';
+  balances: Array<{ asset: string; walletBalance: number; availableBalance: number }>;
+  positions: Array<{
+    symbol: string; quantity: number; side: 'LONG' | 'SHORT' | 'FLAT'; entryPrice: number;
+    markPrice: number | null; unrealizedPnl: number; marginMode: 'CROSS' | 'ISOLATED';
+    leverage: number; updatedAt: number | null;
+  }>;
+  openOrders: Array<{
+    orderId: string; clientOrderId: string; symbol: string; side: 'BUY' | 'SELL';
+    positionSide: 'BOTH' | 'LONG' | 'SHORT' | null; type: string; status: string;
+    price: number; originalQuantity: number; executedQuantity: number;
+    reduceOnly: boolean | null; updatedAt: number | null;
+  }>;
+  recentFills: Array<{
+    fillId: string; orderId: string; symbol: string; side: 'BUY' | 'SELL'; price: number;
+    quantity: number; quoteQuantity: number; commission: number; commissionAsset: string; executedAt: number;
+  }>;
+  serverTime: number;
+  accountUpdateTime: number;
+  observedAt: number;
+  freshness: { status: Freshness; ageMs: number | null; staleAfterMs: number };
+  source: 'BINANCE_FUTURES_API';
+  schemaVersion: 'BINANCE_L1A_V1';
+  sequence: string | null;
+}
+
+export interface BinanceInstrumentFactsSnapshot {
+  symbol: string;
+  markPrice: number;
+  tickSize: number;
+  stepSize: number;
+  minQty: number;
+  minNotional: number;
+  contractStatus: string;
+  serverTime: number;
+  markPriceTime: number | null;
+  observedAt: number;
+  freshness: { status: Freshness; ageMs: number | null; staleAfterMs: number };
+  source: 'BINANCE_FUTURES_API';
+  schemaVersion: 'BINANCE_L1A_V1';
+}
+
+export interface BinanceReadSnapshot {
+  status: BinanceReadStatusProjection;
+  account: ReadEnvelope<BinanceAccountTruthSnapshot>;
+  instruments: ReadEnvelope<Array<{
+    requestedSymbol: string;
+    observation: ReadEnvelope<BinanceInstrumentFactsSnapshot>;
+  }>>;
+  canonicalReconciliationEstablished: false;
+}

@@ -216,6 +216,11 @@ tbody tr:last-child td { border-bottom: 0; }
 .observation-lanes > div { padding: 10px; border-left: 2px solid var(--cyan); background: rgba(86,200,232,.035); }
 .observation-lanes span { display: block; margin-bottom: 6px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
 .observation-lanes p, .boundary-copy { margin: 7px 0 0; color: var(--dim); font-size: 9px; line-height: 1.55; }
+.exchange-observation-grid { display: grid; grid-template-columns: 1fr; gap: 11px; }
+.exchange-observation-summary { margin-bottom: 16px; }
+.observation-subhead { margin: 18px 0 8px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+.entry-unsafe { display: block; margin-top: 5px; color: var(--amber); font-size: 8px; font-weight: 700; white-space: nowrap; }
+.binance-read-status .metric { min-height: 82px; }
 
 .research-pipeline { margin-bottom: 12px; }
 .research-grid, .operations-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }

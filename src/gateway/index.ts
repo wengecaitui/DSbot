@@ -619,6 +619,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     }),
     hermes: () => hermesCoordinator.getSnapshot(),
     productionSpine: productionRuntimeOwner.authoritativeSpine,
+    binanceAuthenticatedRead: () => productionRuntimeOwner.binanceAuthenticatedRead,
     recovery: productionRuntimeOwner.read.recovery,
     projectControlCenter: operationsEvidenceBridge.read.projectControlCenter,
     activity: operationsEvidenceBridge.read.activity,

@@ -11,11 +11,21 @@ export function createWorkbenchRouter(adapter: WorkbenchReadAdapter): Router {
     res.json(reader());
   };
 
+  const sendAsync = (reader: () => Promise<unknown>) => async (_req: Request, res: Response): Promise<void> => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      res.json(await reader());
+    } catch {
+      res.status(503).json({ error: 'workbench_read_unavailable' });
+    }
+  };
+
   router.get('/overview', send(adapter.overview));
   router.get('/runtime', send(adapter.runtime));
   router.get('/market', send(adapter.market));
   router.get('/trading', send(adapter.trading));
   router.get('/account', send(adapter.account));
+  router.get('/binance-read', sendAsync(adapter.binanceRead));
   router.get('/safety', send(adapter.safety));
   router.get('/research', send(adapter.research));
   router.get('/activity', send(adapter.activity));
