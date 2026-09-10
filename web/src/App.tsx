@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { workbenchQueries } from './api/queries';
-import type { Availability, Freshness, ReadEnvelope } from './api/types';
+import type { Availability, BinanceReadSnapshot, Freshness, ReadEnvelope } from './api/types';
 import {
   AvailabilityNotice,
   CapabilityMatrix,
@@ -83,6 +83,46 @@ function PageHeading({ eyebrow, title, detail, status }: { eyebrow: string; titl
   return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p>{detail}</p></div>{status && <StatusBadge value={status} />}</div>;
 }
 
+function BinanceReadStatus({ value }: { value: BinanceReadSnapshot }) {
+  return <div className="metric-grid binance-read-status">
+    <Metric label="Implemented" value={<StatusBadge value="YES" />} meta="read projection only" />
+    <Metric label="Configured" value={<StatusBadge value={value.status.configured ? 'CONFIGURED' : 'NOT_CONFIGURED'} />} />
+    <Metric label="Connected" value={<StatusBadge value={value.status.connected ? 'CONNECTED' : 'NOT_CONNECTED'} />} />
+    <Metric label="Read verified" value={<StatusBadge value="NOT_VERIFIED" />} meta="separate future qualification" />
+    <Metric label="Account availability" value={<StatusBadge value={value.account.availability} />} />
+    <Metric label="Freshness" value={<StatusBadge value={value.account.freshness} />} />
+    <Metric label="Last observation" value={formatTime(value.status.lastObservedAt)} meta={value.status.reason ?? 'no reported failure'} />
+    <Metric label="Account state" value={value.account.data?.accountState ?? 'UNAVAILABLE'} meta="exchange observation only" />
+  </div>;
+}
+
+function BinanceAccountObservation({ value }: { value: BinanceReadSnapshot }) {
+  return <EnvelopeFrame envelope={value.account}>{account => <>
+    <div className="fact-register exchange-observation-summary">
+      <div><span>Account state</span><b>{account.accountState}</b><StatusBadge value={account.freshness.status} /></div>
+      <div><span>Balances</span><b>{account.balances.length}</b><small>factual rows</small></div>
+      <div><span>Positions</span><b>{account.positions.length}</b><small>exchange observations</small></div>
+      <div><span>Open orders / fills</span><b>{account.openOrders.length} / {account.recentFills.length}</b><small>not OMS authority</small></div>
+    </div>
+    <h3 className="observation-subhead">Exchange positions</h3>
+    {account.positions.length ? <div className="table-wrap"><table><thead><tr><th>Symbol</th><th>Side</th><th>Quantity</th><th>Entry</th><th>Mark</th><th>Margin / leverage</th></tr></thead><tbody>{account.positions.map(position => <tr key={position.symbol}><td><b>{position.symbol}</b></td><td>{position.side}</td><td>{formatNumber(position.quantity, 8)}</td><td>{formatNumber(position.entryPrice)}</td><td>{formatNumber(position.markPrice)}</td><td>{position.marginMode} / {position.leverage}x</td></tr>)}</tbody></table></div>
+      : <EmptyState title={account.accountState === 'FLAT' ? 'Factual FLAT exchange account' : 'No exchange position rows'} detail="This is an authenticated exchange observation, not a canonical reconciled Runtime position." />}
+    <h3 className="observation-subhead">Exchange open orders</h3>
+    {account.openOrders.length ? <div className="table-wrap"><table><thead><tr><th>Order</th><th>Symbol</th><th>Side</th><th>Status</th><th>Price</th><th>Executed / original</th></tr></thead><tbody>{account.openOrders.map(order => <tr key={order.orderId}><td className="mono">{order.orderId}</td><td>{order.symbol}</td><td>{order.side}</td><td><StatusBadge value={order.status} /></td><td>{formatNumber(order.price)}</td><td>{formatNumber(order.executedQuantity, 8)} / {formatNumber(order.originalQuantity, 8)}</td></tr>)}</tbody></table></div>
+      : <EmptyState title="No factual exchange open orders" detail="An empty list comes only from an AVAILABLE Binance account snapshot; it does not replace OMS state." />}
+    <h3 className="observation-subhead">Recent exchange fills</h3>
+    {account.recentFills.length ? <div className="table-wrap"><table><thead><tr><th>Fill</th><th>Symbol</th><th>Side</th><th>Price</th><th>Quantity</th><th>Observed execution time</th></tr></thead><tbody>{account.recentFills.map(fill => <tr key={fill.fillId}><td className="mono">{fill.fillId}</td><td>{fill.symbol}</td><td>{fill.side}</td><td>{formatNumber(fill.price)}</td><td>{formatNumber(fill.quantity, 8)}</td><td>{formatTime(fill.executedAt)}</td></tr>)}</tbody></table></div>
+      : <EmptyState title="No factual recent fills" detail="No fill rows are inferred from OMS or canonical accounting." />}
+  </>}</EnvelopeFrame>;
+}
+
+function BinanceInstrumentObservations({ value }: { value: BinanceReadSnapshot }) {
+  return <EnvelopeFrame envelope={value.instruments}>{instruments => <div className="table-wrap"><table><thead><tr><th>Symbol</th><th>Availability</th><th>Mark</th><th>Tick / step</th><th>Minimums</th><th>Contract</th><th>Freshness</th></tr></thead><tbody>{instruments.map(({ requestedSymbol, observation }) => {
+    const facts = observation.data;
+    return <tr key={requestedSymbol}><td><b>{requestedSymbol}</b></td><td><StatusBadge value={observation.availability} /></td><td>{formatNumber(facts?.markPrice)}</td><td>{facts ? `${formatNumber(facts.tickSize, 8)} / ${formatNumber(facts.stepSize, 8)}` : 'UNAVAILABLE'}</td><td>{facts ? `${formatNumber(facts.minQty, 8)} / ${formatNumber(facts.minNotional)}` : 'UNAVAILABLE'}</td><td>{facts?.contractStatus ?? 'UNAVAILABLE'}</td><td><StatusBadge value={observation.freshness} />{observation.freshness === 'STALE' && <small className="entry-unsafe">ENTRY UNSAFE</small>}</td></tr>;
+  })}</tbody></table></div>}</EnvelopeFrame>;
+}
+
 function PersistentStatus() {
   const query = useQuery(workbenchQueries.status());
   const runtimeQuery = useQuery(workbenchQueries.runtime());
@@ -103,6 +143,7 @@ function PersistentStatus() {
 function OverviewPage() {
   const query = useQuery(workbenchQueries.overview());
   const operations = useQuery(workbenchQueries.operations());
+  const binanceRead = useQuery(workbenchQueries.binanceRead());
   if (query.isError) return <QueryFailure message={query.error.message} />;
   if (!query.data) return <LoadingState label="the Overview read model" />;
   const view = query.data;
@@ -164,6 +205,9 @@ function OverviewPage() {
           {value.riskBlockers.map(blocker => <p key={blocker} className="blocker">{blocker}</p>)}
         </div>}</EnvelopeFrame>
       </Panel>
+      <Panel title="Binance Read" eyebrow="Exchange observation · not canonical" className="panel-wide" action={<StatusBadge value={binanceRead.data?.freshness ?? 'UNKNOWN'} />}>
+        {binanceRead.isError ? <EmptyState title="UNAVAILABLE" detail="Binance authenticated-read projection failed; no connection or account state is inferred." /> : binanceRead.data ? <EnvelopeFrame envelope={binanceRead.data}>{value => <BinanceReadStatus value={value} />}</EnvelopeFrame> : <LoadingState label="Binance exchange observations" />}
+      </Panel>
       <Panel title="Recent activity" eyebrow="Observed evidence" className="panel-wide">
         <EnvelopeFrame envelope={view.activity}>{activity => activity.events.length ? <EventTable events={activity.events.slice(-8)} /> : <EmptyState title="No recent events" detail="No canonical observability event source has emitted evidence." />}</EnvelopeFrame>
       </Panel>
@@ -192,6 +236,7 @@ function TradingPage() {
   const account = useQuery(workbenchQueries.account());
   const market = useQuery(workbenchQueries.market());
   const safety = useQuery(workbenchQueries.safety());
+  const binanceRead = useQuery(workbenchQueries.binanceRead());
   if (trading.isError || account.isError) return <QueryFailure message={(trading.error ?? account.error)?.message ?? 'Trading read failed'} />;
   const latest = market.data?.data?.instruments[0];
   return <><PageHeading eyebrow="Terminal / Execution Observability" title="Trading state without an order ticket" detail="Market context, risk observations, OMS state and account facts share one read-only surface. No control here can submit, cancel or modify an order." status={trading.data?.freshness} />
@@ -221,6 +266,11 @@ function TradingPage() {
         {account.data && <EnvelopeFrame envelope={account.data}>{data => data.accounting ? <div className="metric-grid"><Metric label="Cash" value={formatMoney(data.accounting.cashUsd)} /><Metric label="Equity" value={formatMoney(data.accounting.equityUsd)} meta={data.accounting.valuationStatus} /><Metric label="Realized PnL" value={formatMoney(data.accounting.realizedPnlUsd)} /><Metric label="Unrealized PnL" value={formatMoney(data.accounting.unrealizedPnlUsd)} /><Metric label="Net exposure" value={formatMoney(data.accounting.netExposureUsd)} /><Metric label="Fees" value={formatMoney(data.accounting.totalFeesUsd)} /><Metric label="Slippage" value={formatMoney(data.accounting.slippage.totalObservedSlippageUsd)} meta={data.accounting.slippage.status} /><Metric label="Closed trades" value={data.tradeLifecycle?.closedTrades ?? 'UNAVAILABLE'} /></div> : <EmptyState title="Accounting unavailable" detail="No canonical RuntimeAccounting projection is mounted." />}</EnvelopeFrame>}
       </Panel>
     </div>
+    <SectionHeader index="EX" title="Binance exchange observations" detail="Authenticated-read facts remain separate from canonical RuntimeAccounting, KernelPositionStateStore, OmsOrderStore and reconciliation authority." />
+    {binanceRead.isError ? <Panel title="Binance observations" eyebrow="EXCHANGE OBSERVATION"><EmptyState title="UNAVAILABLE" detail="The Binance read projection failed; connected, flat and zero are not inferred." /></Panel> : binanceRead.data ? <EnvelopeFrame envelope={binanceRead.data}>{value => <div className="exchange-observation-grid">
+      <Panel title="Account, positions, orders & fills" eyebrow="EXCHANGE OBSERVATION" className="panel-wide"><BinanceAccountObservation value={value} /></Panel>
+      <Panel title="Instrument mark & rules" eyebrow="EXCHANGE OBSERVATION" className="panel-wide"><BinanceInstrumentObservations value={value} /><p className="boundary-copy">No reconciliation between these exchange observations and canonical Runtime positions or OMS orders is established by U2.</p></Panel>
+    </div>}</EnvelopeFrame> : <LoadingState label="Binance exchange observations" />}
   </>;
 }
 
@@ -289,11 +339,13 @@ function OperationsPage() {
   const query = useQuery(workbenchQueries.operations());
   const runtime = useQuery(workbenchQueries.runtime());
   const safety = useQuery(workbenchQueries.safety());
+  const binanceRead = useQuery(workbenchQueries.binanceRead());
   if (query.isError) return <QueryFailure message={query.error.message} />;
   const data = query.data?.data;
   const capabilityRows: CapabilityRow[] = [
     { capability: 'Workbench read API', implemented: 'YES', configured: data ? 'OBSERVED' : 'UNKNOWN', connected: data ? 'OBSERVED' : 'UNKNOWN', readVerified: 'UNKNOWN', writeRouted: 'LOCKED', activated: 'NOT_ACTIVATED' },
     { capability: 'Hermes coordination', implemented: data?.hermes ? 'OBSERVED' : 'UNKNOWN', configured: 'UNKNOWN', connected: data?.hermes ? 'OBSERVED' : 'UNKNOWN', readVerified: 'UNKNOWN', writeRouted: 'LOCKED', activated: 'NOT_ACTIVATED' },
+    { capability: 'Binance authenticated read', implemented: 'YES', configured: binanceRead.data?.data ? (binanceRead.data.data.status.configured ? 'YES' : 'NO') : 'UNKNOWN', connected: binanceRead.data?.data ? (binanceRead.data.data.status.connected ? 'YES' : 'NO') : 'UNKNOWN', readVerified: 'UNKNOWN', writeRouted: 'LOCKED', activated: 'NOT_ACTIVATED' },
     { capability: 'Trading authority', implemented: 'UNKNOWN', configured: runtime.data?.data?.mode ? 'OBSERVED' : 'UNKNOWN', connected: 'UNKNOWN', readVerified: 'UNKNOWN', writeRouted: 'LOCKED', activated: 'NOT_ACTIVATED' },
   ];
   return <><PageHeading eyebrow="Control / Production Readiness Evidence" title="Evidence is not authority" detail="Observed, verified and authorized are independent states. CI success cannot stand in for Phase 10 verification, and Phase 10 cannot activate Live." status={query.data?.freshness} />
@@ -317,6 +369,9 @@ function OperationsPage() {
     <Panel title="Capability state" eyebrow="Missing evidence → UNKNOWN / UNAVAILABLE" className="panel-wide terminal-panel"><CapabilityMatrix rows={capabilityRows} /></Panel>
     <SectionHeader index="03" title="Runtime observations" detail="Operational telemetry is preserved as observation, not transformed into authorization." />
     <div className="operations-grid">
+      <Panel title="Binance authenticated read" eyebrow="Exchange observation evidence">
+        {binanceRead.isError ? <EmptyState title="UNAVAILABLE" detail="No authenticated-read status is inferred from route availability." /> : binanceRead.data ? <EnvelopeFrame envelope={binanceRead.data}>{value => <BinanceReadStatus value={value} />}</EnvelopeFrame> : <LoadingState label="Binance read evidence" />}
+      </Panel>
       <Panel title="Hermes" eyebrow="Coordinator observation">
         {data?.hermes ? <div className="metric-grid"><Metric label="State" value={<StatusBadge value={data.hermes.state} />} /><Metric label="Health" value={<StatusBadge value={data.hermes.health} />} /><Metric label="Circuit" value={<StatusBadge value={data.hermes.circuitState} />} /><Metric label="Generation" value={data.hermes.generation} /></div> : <EmptyState title="UNAVAILABLE" detail="No coordinator snapshot was provided." />}
       </Panel>

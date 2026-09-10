@@ -19,6 +19,10 @@ import type { ObservableAgentEvent } from './contracts';
 import type { OperationsEvidenceBridgeStatus } from './OperationsEvidenceReadBridge';
 import type { ProjectControlCenterSnapshot } from './project-control-center';
 import type { PositionResolution } from '../types/position-state';
+import type {
+  BinanceAccountTruthSnapshot,
+  BinanceInstrumentFactsSnapshot,
+} from '../runtime/binance/BinanceAuthenticatedReadFoundation';
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -50,6 +54,7 @@ export const WORKBENCH_V1_READ_RESOURCES = deepFreeze([
   { resource: 'market', snapshot: 'MarketOverviewSnapshot', update: 'periodic-refresh' },
   { resource: 'trading', snapshot: 'TradingOverviewSnapshot', update: 'request-response' },
   { resource: 'account', snapshot: 'AccountOverviewSnapshot', update: 'request-response' },
+  { resource: 'binance-read', snapshot: 'BinanceReadOverviewSnapshot', update: 'request-response' },
   { resource: 'safety', snapshot: 'SafetyOverviewSnapshot', update: 'periodic-refresh' },
   { resource: 'research', snapshot: 'ResearchOverviewSnapshot', update: 'request-response' },
   { resource: 'operations', snapshot: 'OperationsOverviewSnapshot', update: 'event-stream' },
@@ -77,6 +82,8 @@ export const WORKBENCH_V1_AUTHORITY_MAP = deepFreeze([
   { fact: 'protective-plans', authority: 'PositionPlanStore' },
   { fact: 'accounting', authority: 'RuntimeAccounting' },
   { fact: 'trade-lifecycle', authority: 'TradeLifecycle' },
+  { fact: 'binance-account-observation', authority: 'BinanceAccountTruthPort' },
+  { fact: 'binance-instrument-observation', authority: 'BinanceInstrumentFactsPort' },
   { fact: 'recovery', authority: 'RecoveryManager' },
   { fact: 'reconciliation', authority: 'ReconciliationReport' },
   { fact: 'live-ready', authority: 'ProductionSpine safety gate' },
@@ -152,6 +159,37 @@ export interface AccountOverviewSnapshot {
   readonly accounting: RuntimeAccountingSnapshot | null;
   /** Passed through from the canonical TradeLifecycle projection. */
   readonly tradeLifecycle: TradeLifecycle | null;
+}
+
+export interface BinanceReadStatusProjection {
+  readonly implemented: true;
+  readonly configured: boolean;
+  readonly connected: boolean;
+  readonly lastObservedAt: number | null;
+  readonly reason: string | null;
+  readonly realClientDefaultWired: false;
+  readonly realCredentialDiscovery: false;
+  readonly readVerified: false;
+  readonly writeRouted: false;
+  readonly activated: false;
+}
+
+export interface BinanceInstrumentReadObservation {
+  readonly requestedSymbol: string;
+  readonly observation: ReadOnlySnapshot<BinanceInstrumentFactsSnapshot>;
+}
+
+export type BinanceAccountReadObservation = Omit<BinanceAccountTruthSnapshot, 'identity'>;
+
+/**
+ * Exchange observations remain separate from canonical accounting, positions,
+ * OMS orders, and reconciliation authority.
+ */
+export interface BinanceReadOverviewSnapshot {
+  readonly status: BinanceReadStatusProjection;
+  readonly account: ReadOnlySnapshot<BinanceAccountReadObservation>;
+  readonly instruments: ReadOnlySnapshot<readonly BinanceInstrumentReadObservation[]>;
+  readonly canonicalReconciliationEstablished: false;
 }
 
 export interface LiveReadinessDisplay {

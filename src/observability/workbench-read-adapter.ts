@@ -3,6 +3,12 @@ import type { CoordinatorSnapshot } from '../hermes/types';
 import type { ProductionSpine } from '../position/ProductionSpine';
 import type { RecoveryResult } from '../recovery/RecoveryManager';
 import type { VersionedPolicySnapshot } from '../types/policy-snapshot';
+import type {
+  BinanceAccountTruthSnapshot,
+  BinanceAuthenticatedReadFoundation,
+  BinanceInstrumentFactsSnapshot,
+  BinanceReadResult,
+} from '../runtime/binance/BinanceAuthenticatedReadFoundation';
 import type { ObservableAgentEvent } from './contracts';
 import type { OperationsEvidenceBridgeStatus } from './OperationsEvidenceReadBridge';
 import type { ProjectControlCenterSnapshot } from './project-control-center';
@@ -11,6 +17,9 @@ import {
   WORKBENCH_V1_ROUTES,
   type AccountOverviewSnapshot,
   type ActivityOverviewSnapshot,
+  type BinanceAccountReadObservation,
+  type BinanceInstrumentReadObservation,
+  type BinanceReadOverviewSnapshot,
   type MarketOverviewSnapshot,
   type OperationsOverviewSnapshot,
   type PersistentTerminalStatusSnapshot,
@@ -65,6 +74,8 @@ export interface WorkbenchReadAdapterOptions {
   readonly projectControlCenter?: () => ProjectControlCenterSnapshot | null;
   readonly activity?: () => readonly ObservableAgentEvent[];
   readonly operationsEvidenceStatus?: () => OperationsEvidenceBridgeStatus;
+  /** Existing internal L1A read-only foundation. The adapter never creates a client. */
+  readonly binanceAuthenticatedRead?: () => BinanceAuthenticatedReadFoundation | null;
 }
 
 export interface WorkbenchReadAdapter {
@@ -73,6 +84,7 @@ export interface WorkbenchReadAdapter {
   market(): ReadOnlySnapshot<MarketOverviewSnapshot>;
   trading(): ReadOnlySnapshot<TradingOverviewSnapshot>;
   account(): ReadOnlySnapshot<AccountOverviewSnapshot>;
+  binanceRead(): Promise<ReadOnlySnapshot<BinanceReadOverviewSnapshot>>;
   safety(): ReadOnlySnapshot<SafetyOverviewSnapshot>;
   research(): ReadOnlySnapshot<ResearchOverviewSnapshot>;
   activity(): ReadOnlySnapshot<ActivityOverviewSnapshot>;
@@ -120,6 +132,73 @@ function marketFreshness(markets: readonly MarketSnapshot[]): SnapshotFreshness 
 
 function spineOrNull(options: WorkbenchReadAdapterOptions): ProductionSpine | null {
   return options.productionSpine?.() ?? null;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  }
+  return value;
+}
+
+type ProjectableBinanceSnapshot = {
+  readonly freshness: { readonly status: SnapshotFreshness };
+  readonly source: string;
+} & (
+  | { readonly accountUpdateTime: number }
+  | { readonly markPriceTime: number | null }
+);
+
+function mapBinanceResult<T extends ProjectableBinanceSnapshot>(
+  capturedAt: number,
+  fallbackSource: string,
+  observed: BinanceReadResult<T>,
+): ReadOnlySnapshot<T> {
+  if (observed.availability === 'AVAILABLE' && observed.value !== null) {
+    const value = structuredClone(observed.value);
+    const lastUpdatedAt = 'accountUpdateTime' in value ? value.accountUpdateTime : value.markPriceTime;
+    return deepFreeze({
+      availability: 'AVAILABLE',
+      freshness: value.freshness.status,
+      provenance: provenance(capturedAt, value.source, null, null, lastUpdatedAt),
+      data: value,
+    });
+  }
+  return deepFreeze({
+    availability: observed.availability === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'UNKNOWN',
+    freshness: 'UNKNOWN',
+    provenance: provenance(capturedAt, fallbackSource),
+    data: null,
+    reason: observed.reason ?? 'BINANCE_READ_RESULT_INVALID',
+  });
+}
+
+function withoutAccountIdentity(snapshot: BinanceAccountTruthSnapshot): BinanceAccountReadObservation {
+  const {
+    accountState, balances, positions, openOrders, recentFills, serverTime,
+    accountUpdateTime, observedAt, freshness, source, schemaVersion, sequence,
+  } = structuredClone(snapshot);
+  return {
+    accountState, balances, positions, openOrders, recentFills, serverTime,
+    accountUpdateTime, observedAt, freshness, source, schemaVersion, sequence,
+  };
+}
+
+function binanceSymbols(options: WorkbenchReadAdapterOptions): readonly string[] | null {
+  const spine = spineOrNull(options);
+  if (!spine) return null;
+  return Object.freeze([...new Set(
+    spine.marketStore.getAllSnapshots()
+      .filter((snapshot) => snapshot.exchange === 'binance')
+      .map((snapshot) => snapshot.symbol),
+  )].sort((left, right) => left.localeCompare(right)));
+}
+
+function combinedFreshness(snapshots: readonly ReadOnlySnapshot<unknown>[]): SnapshotFreshness {
+  if (snapshots.some((snapshot) => snapshot.freshness === 'STALE')) return 'STALE';
+  if (snapshots.length > 0 && snapshots.every((snapshot) => snapshot.freshness === 'FRESH')) return 'FRESH';
+  return 'UNKNOWN';
 }
 
 function readPositions(spine: ProductionSpine, markets: readonly MarketSnapshot[]): PositionOverviewRecord[] {
@@ -226,6 +305,118 @@ export function createWorkbenchReadAdapter(options: WorkbenchReadAdapterOptions)
       data: { accounting, tradeLifecycle },
       ...(accounting.valuationStatus === 'COMPLETE' ? {} : { reason: 'canonical runtime accounting is incomplete' }),
     };
+  }
+
+  async function binanceRead(): Promise<ReadOnlySnapshot<BinanceReadOverviewSnapshot>> {
+    const capturedAt = capture();
+    let foundation: BinanceAuthenticatedReadFoundation | null;
+    try {
+      foundation = options.binanceAuthenticatedRead?.() ?? null;
+    } catch {
+      return unavailable(capturedAt, 'Binance authenticated-read projection', 'BINANCE_READ_FOUNDATION_UNAVAILABLE');
+    }
+    if (!foundation) {
+      return unavailable(capturedAt, 'Binance authenticated-read projection', 'BINANCE_READ_FOUNDATION_UNAVAILABLE');
+    }
+
+    let accountResult: ReadOnlySnapshot<BinanceAccountReadObservation>;
+    try {
+      const observed = await foundation.accountTruth.read();
+      accountResult = mapBinanceResult(capturedAt, 'BinanceAccountTruthPort', {
+        availability: observed.availability,
+        value: observed.value === null ? null : withoutAccountIdentity(observed.value),
+        reason: observed.reason,
+      });
+    } catch {
+      accountResult = deepFreeze({
+        availability: 'UNKNOWN', freshness: 'UNKNOWN',
+        provenance: provenance(capturedAt, 'BinanceAccountTruthPort'), data: null,
+        reason: 'BINANCE_ACCOUNT_READ_FAILED',
+      });
+    }
+
+    const symbols = binanceSymbols(options);
+    let instrumentResult: ReadOnlySnapshot<readonly BinanceInstrumentReadObservation[]>;
+    if (!symbols || symbols.length === 0) {
+      instrumentResult = unavailable(
+        capturedAt,
+        'KernelMarketStateStore+BinanceInstrumentFactsPort',
+        'CANONICAL_BINANCE_SYMBOL_SOURCE_UNAVAILABLE',
+      );
+    } else {
+      const observations: BinanceInstrumentReadObservation[] = [];
+      for (const symbol of symbols) {
+        let observation: ReadOnlySnapshot<BinanceInstrumentFactsSnapshot>;
+        try {
+          observation = mapBinanceResult(
+            capturedAt,
+            'BinanceInstrumentFactsPort',
+            await foundation.instrumentFacts.read(symbol),
+          );
+        } catch {
+          observation = deepFreeze({
+            availability: 'UNKNOWN', freshness: 'UNKNOWN',
+            provenance: provenance(capturedAt, 'BinanceInstrumentFactsPort'), data: null,
+            reason: 'BINANCE_INSTRUMENT_READ_FAILED',
+          });
+        }
+        observations.push(deepFreeze({ requestedSymbol: symbol, observation }));
+      }
+      const observationsFreshness = combinedFreshness(observations.map((item) => item.observation));
+      const allAvailable = observations.every((item) => item.observation.availability === 'AVAILABLE');
+      instrumentResult = deepFreeze({
+        availability: allAvailable ? 'AVAILABLE' : 'INCOMPLETE',
+        freshness: observationsFreshness,
+        provenance: provenance(
+          capturedAt,
+          'KernelMarketStateStore+BinanceInstrumentFactsPort',
+          null,
+          null,
+          maxFinite(observations.map((item) => item.observation.provenance.lastUpdatedAt)),
+        ),
+        data: observations,
+        ...(allAvailable ? {} : { reason: 'one or more Binance instrument observations are unavailable' }),
+      });
+    }
+
+    let rawStatus;
+    try {
+      rawStatus = foundation.status();
+    } catch {
+      return unavailable(capturedAt, 'Binance authenticated-read projection', 'BINANCE_READ_STATUS_UNAVAILABLE');
+    }
+    const status = deepFreeze({
+      implemented: true as const,
+      configured: rawStatus.configured,
+      connected: rawStatus.connected,
+      lastObservedAt: rawStatus.lastObservedAt,
+      reason: rawStatus.reason,
+      realClientDefaultWired: rawStatus.realClientDefaultWired,
+      realCredentialDiscovery: rawStatus.realCredentialDiscovery,
+      readVerified: false as const,
+      writeRouted: false as const,
+      activated: false as const,
+    });
+    const freshness = combinedFreshness([accountResult, instrumentResult]);
+    const complete = accountResult.availability === 'AVAILABLE' && instrumentResult.availability === 'AVAILABLE';
+    return deepFreeze({
+      availability: complete ? 'AVAILABLE' : 'INCOMPLETE',
+      freshness,
+      provenance: provenance(
+        capturedAt,
+        'BinanceAccountTruthPort+BinanceInstrumentFactsPort',
+        null,
+        null,
+        rawStatus.lastObservedAt,
+      ),
+      data: {
+        status,
+        account: accountResult,
+        instruments: instrumentResult,
+        canonicalReconciliationEstablished: false as const,
+      },
+      ...(complete ? {} : { reason: 'Binance exchange observations are incomplete or unavailable' }),
+    });
   }
 
   function safety(capturedAt = capture()): ReadOnlySnapshot<SafetyOverviewSnapshot> {
@@ -387,6 +578,7 @@ export function createWorkbenchReadAdapter(options: WorkbenchReadAdapterOptions)
     market,
     trading,
     account,
+    binanceRead,
     safety,
     research,
     activity,

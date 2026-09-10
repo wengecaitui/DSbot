@@ -1,5 +1,6 @@
 import type {
   AccountingSnapshot,
+  BinanceReadSnapshot,
   DataSnapshot,
   MarketSnapshot,
   OperationsSnapshot,
@@ -63,6 +64,7 @@ export const workbenchApi = {
   market: () => read<ReadEnvelope<{ instruments: MarketSnapshot[]; regime: { label: string; evidenceId: string } | null }>>('market'),
   trading: () => read<ReadEnvelope<{ positions: PositionRecord[]; orders: OrderSnapshot[]; protectivePlans: Array<{ planId: string; symbol: string; status: string }> }>>('trading'),
   account: () => read<ReadEnvelope<{ accounting: AccountingSnapshot | null; tradeLifecycle: LifecycleSnapshot | null }>>('account'),
+  binanceRead: () => read<ReadEnvelope<BinanceReadSnapshot>>('binance-read'),
   safety: () => read<ReadEnvelope<SafetySnapshot>>('safety'),
   research: () => read<ReadEnvelope<ResearchSnapshot>>('research'),
   operations: () => read<ReadEnvelope<OperationsSnapshot>>('operations'),
