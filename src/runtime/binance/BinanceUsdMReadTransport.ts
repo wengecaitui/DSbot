@@ -38,10 +38,17 @@ export interface BinanceUsdMProductionReadTransport extends BinanceUsdMReadTrans
 export type BinanceUsdMFetch = (
   input: string | URL,
   init: RequestInit,
-) => Promise<Pick<Response, 'ok' | 'status' | 'json'>>;
+) => Promise<Pick<Response, 'ok' | 'status' | 'json' | 'text'>>;
+
+export const MAX_BINANCE_ERROR_BODY_CHARACTERS = 4_096 as const;
+export const MIN_BINANCE_NUMERIC_ERROR_CODE = -999_999 as const;
 
 export class BinanceUsdMReadTransportError extends Error {
-  constructor(readonly code: string, readonly status: number | null = null) {
+  constructor(
+    readonly code: string,
+    readonly status: number | null = null,
+    readonly binanceCode: number | null = null,
+  ) {
     super(code);
     this.name = 'BinanceUsdMReadTransportError';
   }
@@ -60,6 +67,30 @@ function validQueryParameter(value: unknown): value is BinanceUsdMQueryParameter
     && typeof (value as BinanceUsdMQueryParameter).name === 'string'
     && (value as BinanceUsdMQueryParameter).name.length > 0
     && typeof (value as BinanceUsdMQueryParameter).value === 'string';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sanitizedBinanceCode(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value)
+    && value < 0 && value >= MIN_BINANCE_NUMERIC_ERROR_CODE
+    ? value
+    : null;
+}
+
+async function extractBinanceCode(
+  response: Pick<Response, 'text'>,
+): Promise<number | null> {
+  try {
+    const body = await response.text();
+    if (typeof body !== 'string' || body.length > MAX_BINANCE_ERROR_BODY_CHARACTERS) return null;
+    const parsed: unknown = JSON.parse(body);
+    return isRecord(parsed) ? sanitizedBinanceCode(parsed.code) : null;
+  } catch {
+    return null;
+  }
 }
 
 function validateRequest(request: BinanceUsdMReadTransportRequest): void {
@@ -118,7 +149,7 @@ function createReadTransport(fetchImpl: BinanceUsdMFetch): BinanceUsdMReadTransp
       const headers = request.apiKey === undefined
         ? undefined
         : Object.freeze({ 'X-MBX-APIKEY': request.apiKey });
-      let response: Pick<Response, 'ok' | 'status' | 'json'>;
+      let response: Pick<Response, 'ok' | 'status' | 'json' | 'text'>;
       try {
         response = await fetchImpl(url, Object.freeze({
           method: 'GET',
@@ -129,12 +160,17 @@ function createReadTransport(fetchImpl: BinanceUsdMFetch): BinanceUsdMReadTransp
         throw new BinanceUsdMReadTransportError('BINANCE_USDM_READ_NETWORK_FAILED');
       }
       if (!response.ok) {
-        throw new BinanceUsdMReadTransportError('BINANCE_USDM_READ_HTTP_FAILED', response.status);
+        const binanceCode = await extractBinanceCode(response);
+        throw new BinanceUsdMReadTransportError(
+          'BINANCE_USDM_READ_HTTP_FAILED', response.status, binanceCode,
+        );
       }
       try {
         return await response.json();
       } catch {
-        throw new BinanceUsdMReadTransportError('BINANCE_USDM_READ_RESPONSE_INVALID');
+        throw new BinanceUsdMReadTransportError(
+          'BINANCE_USDM_READ_RESPONSE_INVALID', response.status, null,
+        );
       }
     },
   });

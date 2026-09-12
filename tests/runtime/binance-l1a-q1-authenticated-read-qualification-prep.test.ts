@@ -602,4 +602,36 @@ describe('Binance L1A Q1 authenticated-read qualification prep', () => {
       .every(([, passed]) => passed), true);
     assert.equal(missingRealCredential.REAL_READ_VERIFIED, false);
   });
+
+  it('50. receipt preserves only the bounded HTTP diagnostic tuple', () => {
+    const observed = receipt({
+      transportClassification: 'UNEXPECTED_FAILURE',
+      transportErrorCode: 'BINANCE_USDM_READ_HTTP_FAILED',
+      transportHttpStatus: 401,
+      transportBinanceCode: -2015,
+      unexpectedErrorCodes: ['BINANCE_Q1_TRANSPORT_FAILED'],
+    });
+    assert.equal(observed.TRANSPORT_ERROR_CODE, 'BINANCE_USDM_READ_HTTP_FAILED');
+    assert.equal(observed.HTTP_STATUS, 401);
+    assert.equal(observed.BINANCE_ERROR_CODE, -2015);
+    assert.equal(observed.CHECKS.NO_UNEXPECTED_TRANSPORT_ERROR, false);
+    assert.equal(observed.REAL_READ_VERIFIED, false);
+    assert.deepEqual(
+      Object.keys(observed).filter((key) => /MESSAGE|RAW|URL|QUERY|HEADER/.test(key)),
+      [],
+    );
+  });
+
+  it('51. malformed transport diagnostics fail closed and are not reflected', () => {
+    const observed = receipt({
+      transportErrorCode: 'BINANCE_USDM_READ_HTTP_FAILED',
+      transportHttpStatus: 42,
+      transportBinanceCode: 2015,
+    });
+    assert.equal(observed.TRANSPORT_ERROR_CODE, null);
+    assert.equal(observed.HTTP_STATUS, null);
+    assert.equal(observed.BINANCE_ERROR_CODE, null);
+    assert.equal(observed.CHECKS.NO_UNEXPECTED_TRANSPORT_ERROR, false);
+    assert.equal(observed.REAL_READ_VERIFIED, false);
+  });
 });

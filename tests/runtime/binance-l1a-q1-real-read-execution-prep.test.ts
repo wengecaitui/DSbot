@@ -27,6 +27,7 @@ import {
 import {
   BINANCE_USDM_BASE_ORIGIN,
   BINANCE_USDM_READ_ENDPOINTS,
+  BinanceUsdMReadTransportError,
   createBinanceUsdMReadTransport,
   createProductionBinanceUsdMReadTransport,
   hasProductionBinanceUsdMReadTransportProvenance,
@@ -96,6 +97,17 @@ interface RecordedRequest {
 
 function queryValue(request: RecordedRequest, name: string): string | null {
   return request.query.find((entry) => entry.name === name)?.value ?? null;
+}
+
+async function captureTransportError(promise: Promise<unknown>): Promise<BinanceUsdMReadTransportError> {
+  let captured: unknown = null;
+  try {
+    await promise;
+  } catch (error) {
+    captured = error;
+  }
+  assert.ok(captured instanceof BinanceUsdMReadTransportError);
+  return captured;
 }
 
 function accountPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -214,7 +226,11 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
     const calls: Array<{ readonly url: URL; readonly init: RequestInit }> = [];
     const transport = createBinanceUsdMReadTransport(async (input, init) => {
       calls.push({ url: new URL(String(input)), init });
-      return { ok: true, status: 200, async json() { return {}; } };
+      return {
+        ok: true, status: 200,
+        async json() { return {}; },
+        async text() { return '{}'; },
+      };
     });
     const signedQuery = [
       { name: 'recvWindow', value: '5000' },
@@ -284,7 +300,9 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
   it('2. transport and client expose no non-GET or mutation method', () => {
     const fake = fakeTransport();
     const transport = createBinanceUsdMReadTransport(async () => ({
-      ok: true, status: 200, async json() { return {}; },
+      ok: true, status: 200,
+      async json() { return {}; },
+      async text() { return '{}'; },
     }));
     const productionTransport = createProductionBinanceUsdMReadTransport();
     assert.deepEqual(Object.keys(transport), ['get']);
@@ -689,7 +707,11 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
       let calls = 0;
       const transport = createBinanceUsdMReadTransport(async () => {
         calls += 1;
-        return { ok: false, status, async json() { return { retryAfter: 1 }; } };
+        return {
+          ok: false, status,
+          async json() { return { retryAfter: 1 }; },
+          async text() { return JSON.stringify({ retryAfter: 1 }); },
+        };
       });
       await assert.rejects(
         () => transport.get({ endpoint: BINANCE_USDM_READ_ENDPOINTS.SERVER_TIME, query: [] }),
@@ -760,5 +782,173 @@ describe('Binance L1A Q1 real authenticated-read execution prep', () => {
     assert.equal(receipt.REAL_CREDENTIAL_USED, false);
     assert.equal(receipt.PRODUCTION_CONNECTIVITY_VERIFIED, false);
     assert.equal(receipt.REAL_READ_VERIFIED, false);
+  });
+
+  it('34. fetch rejection preserves only the sanitized network-failure class', async () => {
+    const sensitive = 'fixture-undici-host-detail';
+    const transport = createBinanceUsdMReadTransport(async () => {
+      throw new Error(sensitive);
+    });
+    const error = await captureTransportError(transport.get({
+      endpoint: BINANCE_USDM_READ_ENDPOINTS.SERVER_TIME,
+      query: [],
+    }));
+    assert.equal(error.code, 'BINANCE_USDM_READ_NETWORK_FAILED');
+    assert.equal(error.status, null);
+    assert.equal(error.binanceCode, null);
+    assert.doesNotMatch(error.message, new RegExp(sensitive));
+    assert.doesNotMatch(JSON.stringify(error), new RegExp(sensitive));
+  });
+
+  it('35. non-2xx parsing preserves status and only a bounded numeric Binance code', async () => {
+    const cases = [
+      { status: 401, body: JSON.stringify({ code: -2015, msg: 'fixture-sensitive-message' }),
+        binanceCode: -2015, sensitive: 'fixture-sensitive-message' },
+      { status: 400, body: JSON.stringify({ code: -1021, msg: 'fixture timestamp text' }),
+        binanceCode: -1021, sensitive: 'fixture timestamp text' },
+      { status: 451, body: 'fixture-non-json-body', binanceCode: null,
+        sensitive: 'fixture-non-json-body' },
+      { status: 500, body: JSON.stringify({ code: 'not-numeric', msg: 'fixture-server-message' }),
+        binanceCode: null, sensitive: 'fixture-server-message' },
+    ] as const;
+    for (const fixture of cases) {
+      const transport = createBinanceUsdMReadTransport(async () => ({
+        ok: false,
+        status: fixture.status,
+        async json() { throw new Error('non-2xx must use bounded text parsing'); },
+        async text() { return fixture.body; },
+      }));
+      const error = await captureTransportError(transport.get({
+        endpoint: BINANCE_USDM_READ_ENDPOINTS.SERVER_TIME,
+        query: [],
+      }));
+      assert.equal(error.code, 'BINANCE_USDM_READ_HTTP_FAILED');
+      assert.equal(error.status, fixture.status);
+      assert.equal(error.binanceCode, fixture.binanceCode);
+      const serialized = JSON.stringify(error);
+      assert.doesNotMatch(serialized, new RegExp(fixture.sensitive));
+      assert.doesNotMatch(serialized, /msg|rawBody|requestUrl|headers|signature/i);
+    }
+  });
+
+  it('36. malformed JSON on HTTP 200 remains a sanitized response failure', async () => {
+    const sensitive = 'fixture-malformed-success-body';
+    const transport = createBinanceUsdMReadTransport(async () => ({
+      ok: true,
+      status: 200,
+      async json() { throw new Error(sensitive); },
+      async text() { throw new Error('success path must not read text'); },
+    }));
+    const error = await captureTransportError(transport.get({
+      endpoint: BINANCE_USDM_READ_ENDPOINTS.SERVER_TIME,
+      query: [],
+    }));
+    assert.equal(error.code, 'BINANCE_USDM_READ_RESPONSE_INVALID');
+    assert.equal(error.status, 200);
+    assert.equal(error.binanceCode, null);
+    assert.doesNotMatch(JSON.stringify(error), new RegExp(sensitive));
+  });
+
+  it('37. valid HTTP 200 JSON response is unchanged', async () => {
+    const transport = createBinanceUsdMReadTransport(async () => ({
+      ok: true,
+      status: 200,
+      async json() { return { serverTime: NOW }; },
+      async text() { throw new Error('success path must not read text'); },
+    }));
+    assert.deepEqual(await transport.get({
+      endpoint: BINANCE_USDM_READ_ENDPOINTS.SERVER_TIME,
+      query: [],
+    }), { serverTime: NOW });
+  });
+
+  it('38. runner receipt distinguishes 401/-2015 and 400/-1021 without raw messages', async () => {
+    const cases = [
+      { status: 401, binanceCode: -2015, message: 'fixture-sensitive-message' },
+      { status: 400, binanceCode: -1021, message: 'fixture timestamp text' },
+    ] as const;
+    for (const fixture of cases) {
+      const transport = createBinanceUsdMReadTransport(async (input) => {
+        const url = new URL(String(input));
+        const endpoint = url.pathname as BinanceUsdMReadEndpoint;
+        if (endpoint === BINANCE_USDM_READ_ENDPOINTS.ACCOUNT) {
+          const body = JSON.stringify({ code: fixture.binanceCode, msg: fixture.message });
+          return {
+            ok: false,
+            status: fixture.status,
+            async json() { throw new Error('non-2xx must use text'); },
+            async text() { return body; },
+          };
+        }
+        const request: RecordedRequest = {
+          endpoint,
+          query: [...url.searchParams.entries()].map(([name, value]) => ({ name, value })),
+        };
+        const payload = defaultPayload(endpoint, ['SOLUSDT'], request);
+        return {
+          ok: true,
+          status: 200,
+          async json() { return payload; },
+          async text() { return JSON.stringify(payload); },
+        };
+      });
+      const receipt = await runBinanceAuthenticatedReadSimulation({
+        runId: `http-${fixture.status}-diagnostic`,
+        identity,
+        requestedSymbols: ['SOLUSDT'],
+        q0Receipt: validQ0Receipt,
+        secretProvider: { async getReadCredentials() { return fakeCredentials; } },
+        transport,
+        now: () => NOW,
+      });
+      assert.equal(receipt.TRANSPORT_ERROR_CODE, 'BINANCE_USDM_READ_HTTP_FAILED');
+      assert.equal(receipt.HTTP_STATUS, fixture.status);
+      assert.equal(receipt.BINANCE_ERROR_CODE, fixture.binanceCode);
+      assert.equal(receipt.AUTH_NETWORK_USED, false);
+      assert.equal(receipt.REAL_CREDENTIAL_USED, false);
+      assert.equal(receipt.PRODUCTION_CONNECTIVITY_VERIFIED, false);
+      assert.equal(receipt.REAL_READ_VERIFIED, false);
+      const serialized = JSON.stringify(receipt);
+      assert.doesNotMatch(serialized, new RegExp(fixture.message));
+      assert.doesNotMatch(serialized, new RegExp(fakeCredentials.apiKey));
+      assert.doesNotMatch(serialized, new RegExp(fakeCredentials.secretKey));
+    }
+  });
+
+  it('39. runner receipt distinguishes network and invalid-success-response failures', async () => {
+    const cases = [
+      {
+        expectedCode: 'BINANCE_USDM_READ_NETWORK_FAILED',
+        expectedStatus: null,
+        fetch: async () => { throw new Error('fixture-network-detail'); },
+      },
+      {
+        expectedCode: 'BINANCE_USDM_READ_RESPONSE_INVALID',
+        expectedStatus: 200,
+        fetch: async () => ({
+          ok: true,
+          status: 200,
+          async json() { throw new Error('fixture-invalid-json-detail'); },
+          async text() { throw new Error('success path must not read text'); },
+        }),
+      },
+    ] as const;
+    for (const fixture of cases) {
+      const receipt = await runBinanceAuthenticatedReadSimulation({
+        runId: `transport-${fixture.expectedCode.toLowerCase()}`,
+        identity,
+        requestedSymbols: ['SOLUSDT'],
+        q0Receipt: validQ0Receipt,
+        secretProvider: { async getReadCredentials() { return fakeCredentials; } },
+        transport: createBinanceUsdMReadTransport(fixture.fetch),
+        now: () => NOW,
+      });
+      assert.equal(receipt.TRANSPORT_ERROR_CODE, fixture.expectedCode);
+      assert.equal(receipt.HTTP_STATUS, fixture.expectedStatus);
+      assert.equal(receipt.BINANCE_ERROR_CODE, null);
+      assert.equal(receipt.AUTH_NETWORK_USED, false);
+      assert.equal(receipt.REAL_READ_VERIFIED, false);
+      assert.doesNotMatch(JSON.stringify(receipt), /fixture-network-detail|fixture-invalid-json-detail/);
+    }
   });
 });
