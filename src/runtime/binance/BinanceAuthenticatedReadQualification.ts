@@ -60,6 +60,11 @@ export type BinanceQualificationTransportClassification =
   | 'EXPECTED_FAILURE'
   | 'UNEXPECTED_FAILURE';
 
+export type BinanceQualificationTransportErrorCode =
+  | 'BINANCE_USDM_READ_NETWORK_FAILED'
+  | 'BINANCE_USDM_READ_HTTP_FAILED'
+  | 'BINANCE_USDM_READ_RESPONSE_INVALID';
+
 export interface BinanceAuthenticatedReadQualificationEvidence {
   readonly request: BinanceAuthenticatedReadQualificationRequest;
   readonly readClientMethodNames: readonly string[];
@@ -68,6 +73,9 @@ export interface BinanceAuthenticatedReadQualificationEvidence {
   readonly accountResult: BinanceReadResult<BinanceAccountTruthSnapshot>;
   readonly instrumentResults: readonly BinanceQualificationInstrumentEvidence[];
   readonly transportClassification: BinanceQualificationTransportClassification;
+  readonly transportErrorCode?: BinanceQualificationTransportErrorCode | null;
+  readonly transportHttpStatus?: number | null;
+  readonly transportBinanceCode?: number | null;
   readonly invocationCounts: BinanceQualificationInvocationCounts;
   readonly unexpectedErrorCodes: readonly string[];
   readonly mutationAttemptCount: number;
@@ -128,6 +136,9 @@ export interface BinanceAuthenticatedReadQualificationReceipt {
   readonly IDENTITY_BOUND: boolean;
   readonly IDENTITY: BinanceReadIdentity | null;
   readonly REQUESTED_SYMBOLS: readonly string[];
+  readonly TRANSPORT_ERROR_CODE: BinanceQualificationTransportErrorCode | null;
+  readonly HTTP_STATUS: number | null;
+  readonly BINANCE_ERROR_CODE: number | null;
   readonly AUTH_NETWORK_USED: boolean;
   readonly REAL_CREDENTIAL_USED: boolean;
   readonly REAL_CREDENTIAL_DISCOVERY: false;
@@ -396,6 +407,40 @@ function errorCodesValid(value: unknown): value is readonly string[] {
     && value.every((code) => typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(code));
 }
 
+interface SanitizedTransportDiagnostic {
+  readonly valid: boolean;
+  readonly errorCode: BinanceQualificationTransportErrorCode | null;
+  readonly httpStatus: number | null;
+  readonly binanceCode: number | null;
+}
+
+function transportDiagnosticFrom(
+  evidence: BinanceAuthenticatedReadQualificationEvidence,
+): SanitizedTransportDiagnostic {
+  const errorCode = evidence.transportErrorCode ?? null;
+  const httpStatus = evidence.transportHttpStatus ?? null;
+  const binanceCode = evidence.transportBinanceCode ?? null;
+  const statusValid = httpStatus === null
+    || (Number.isSafeInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599);
+  const binanceCodeValid = binanceCode === null
+    || (Number.isSafeInteger(binanceCode) && binanceCode < 0 && binanceCode >= -999_999);
+  const shapeValid = errorCode === null
+    ? httpStatus === null && binanceCode === null
+    : errorCode === 'BINANCE_USDM_READ_NETWORK_FAILED'
+      ? httpStatus === null && binanceCode === null
+      : errorCode === 'BINANCE_USDM_READ_HTTP_FAILED'
+        ? httpStatus !== null && statusValid && binanceCodeValid
+        : errorCode === 'BINANCE_USDM_READ_RESPONSE_INVALID'
+          ? httpStatus !== null && httpStatus >= 200 && httpStatus <= 299 && binanceCode === null
+          : false;
+  return Object.freeze({
+    valid: statusValid && binanceCodeValid && shapeValid,
+    errorCode: shapeValid ? errorCode : null,
+    httpStatus: shapeValid ? httpStatus : null,
+    binanceCode: shapeValid ? binanceCode : null,
+  });
+}
+
 function containsSensitiveMaterial(value: unknown, seen = new Set<object>()): boolean {
   if (typeof value === 'string') {
     return /\bBearer\s+|api[_-]?key\s*[:=]|secret[_-]?key\s*[:=]|authorization\s*[:=]|cookie\s*[:=]/i.test(value);
@@ -494,7 +539,10 @@ export function evaluateBinanceAuthenticatedReadQualification(
     : evidence.authNetworkUsed === false
       && evidence.realCredentialUsed === false
       && evidence.productionConnectivityVerified === false;
+  const transportDiagnostic = transportDiagnosticFrom(evidence);
   const noUnexpectedTransportError = evidence.transportClassification === 'NO_ERROR'
+    && transportDiagnostic.valid
+    && transportDiagnostic.errorCode === null
     && errorCodesValid(evidence.unexpectedErrorCodes)
     && evidence.unexpectedErrorCodes.length === 0;
   const noSecretMaterial = containsSensitiveMaterial(evidence) === false;
@@ -597,6 +645,9 @@ export function evaluateBinanceAuthenticatedReadQualification(
     IDENTITY_BOUND: checks.IDENTITY_EXPLICIT && checks.ACCOUNT_IDENTITY_MATCH,
     IDENTITY: identity ? Object.freeze({ exchange: 'binance', accountId: identity.accountId }) : null,
     REQUESTED_SYMBOLS: Object.freeze([...requestedSymbols]),
+    TRANSPORT_ERROR_CODE: transportDiagnostic.errorCode,
+    HTTP_STATUS: transportDiagnostic.httpStatus,
+    BINANCE_ERROR_CODE: transportDiagnostic.binanceCode,
     AUTH_NETWORK_USED: authNetworkUsed,
     REAL_CREDENTIAL_USED: realCredentialUsed,
     REAL_CREDENTIAL_DISCOVERY: false,

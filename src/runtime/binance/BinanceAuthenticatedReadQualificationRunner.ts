@@ -14,6 +14,7 @@ import {
   evaluateBinanceAuthenticatedReadQualification,
   type BinanceAuthenticatedReadQualificationReceipt,
   type BinanceQualificationInstrumentEvidence,
+  type BinanceQualificationTransportErrorCode,
 } from './BinanceAuthenticatedReadQualification';
 import {
   BINANCE_L1A_Q0_SCHEMA_VERSION,
@@ -26,6 +27,7 @@ import {
 } from './BinanceUsdMAuthenticatedReadClient';
 import {
   BINANCE_USDM_READ_ENDPOINTS,
+  BinanceUsdMReadTransportError,
   hasProductionBinanceUsdMReadTransportProvenance,
   type BinanceUsdMReadEndpoint,
   type BinanceUsdMProductionReadTransport,
@@ -64,6 +66,25 @@ interface InternalRunnerInput extends BinanceAuthenticatedReadRunnerInput {
   readonly transport: BinanceUsdMReadTransport;
 }
 
+interface TransportDiagnostic {
+  readonly errorCode: BinanceQualificationTransportErrorCode;
+  readonly httpStatus: number | null;
+  readonly binanceCode: number | null;
+}
+
+interface ObservedTransportDiagnostic extends TransportDiagnostic {
+  readonly endpoint: BinanceUsdMReadEndpoint;
+}
+
+const TRANSPORT_DIAGNOSTIC_ENDPOINT_ORDER = Object.freeze([
+  BINANCE_USDM_READ_ENDPOINTS.SERVER_TIME,
+  BINANCE_USDM_READ_ENDPOINTS.ACCOUNT,
+  BINANCE_USDM_READ_ENDPOINTS.OPEN_ORDERS,
+  BINANCE_USDM_READ_ENDPOINTS.USER_TRADES,
+  BINANCE_USDM_READ_ENDPOINTS.MARK_PRICE,
+  BINANCE_USDM_READ_ENDPOINTS.EXCHANGE_INFO,
+] as const);
+
 function timestamp(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
@@ -92,6 +113,50 @@ function q0PreconditionSatisfied(receipt: BinanceOfflineQualificationReceipt | n
     && receipt.READY_FOR_REAL_READ_QUALIFICATION === true;
 }
 
+function safeTransportDiagnostic(error: unknown): TransportDiagnostic | null {
+  if (!(error instanceof BinanceUsdMReadTransportError)) return null;
+  if (error.code === 'BINANCE_USDM_READ_NETWORK_FAILED'
+      && error.status === null && error.binanceCode === null) {
+    return Object.freeze({ errorCode: error.code, httpStatus: null, binanceCode: null });
+  }
+  if (error.code === 'BINANCE_USDM_READ_HTTP_FAILED'
+      && Number.isSafeInteger(error.status) && error.status! >= 100 && error.status! <= 599
+      && (error.binanceCode === null || (Number.isSafeInteger(error.binanceCode)
+        && error.binanceCode < 0 && error.binanceCode >= -999_999))) {
+    return Object.freeze({
+      errorCode: error.code,
+      httpStatus: error.status,
+      binanceCode: error.binanceCode,
+    });
+  }
+  if (error.code === 'BINANCE_USDM_READ_RESPONSE_INVALID'
+      && Number.isSafeInteger(error.status) && error.status! >= 200 && error.status! <= 299
+      && error.binanceCode === null) {
+    return Object.freeze({ errorCode: error.code, httpStatus: error.status, binanceCode: null });
+  }
+  return null;
+}
+
+function preferredTransportDiagnostic(
+  diagnostics: readonly ObservedTransportDiagnostic[],
+): TransportDiagnostic | null {
+  const selected = [...diagnostics].sort((left, right) => {
+    const endpointOrder = TRANSPORT_DIAGNOSTIC_ENDPOINT_ORDER.indexOf(left.endpoint)
+      - TRANSPORT_DIAGNOSTIC_ENDPOINT_ORDER.indexOf(right.endpoint);
+    if (endpointOrder !== 0) return endpointOrder;
+    const codeOrder = left.errorCode.localeCompare(right.errorCode);
+    if (codeOrder !== 0) return codeOrder;
+    const statusOrder = (left.httpStatus ?? -1) - (right.httpStatus ?? -1);
+    if (statusOrder !== 0) return statusOrder;
+    return (left.binanceCode ?? 0) - (right.binanceCode ?? 0);
+  })[0];
+  return selected === undefined ? null : Object.freeze({
+    errorCode: selected.errorCode,
+    httpStatus: selected.httpStatus,
+    binanceCode: selected.binanceCode,
+  });
+}
+
 function failureStatus(reason: BinanceReadFailureReason): BinanceAuthenticatedReadStatus {
   return Object.freeze({
     configured: false,
@@ -114,6 +179,7 @@ function failureReceipt(
   reason: BinanceReadFailureReason,
   transportFailure: boolean,
   errorCode: string | null,
+  transportDiagnostic: TransportDiagnostic | null = null,
 ): BinanceAuthenticatedReadQualificationReceipt {
   const status = failureStatus(reason);
   return evaluateBinanceAuthenticatedReadQualification({
@@ -127,6 +193,9 @@ function failureReceipt(
       result: failedResult<BinanceInstrumentFactsSnapshot>(reason),
     }))),
     transportClassification: transportFailure ? 'UNEXPECTED_FAILURE' : 'EXPECTED_FAILURE',
+    transportErrorCode: transportDiagnostic?.errorCode ?? null,
+    transportHttpStatus: transportDiagnostic?.httpStatus ?? null,
+    transportBinanceCode: transportDiagnostic?.binanceCode ?? null,
     invocationCounts: Object.freeze({
       accountTruthReadCount: 0,
       instrumentFactsReadCounts: Object.freeze(request.REQUESTED_SYMBOLS.map((symbol) => Object.freeze({
@@ -237,6 +306,7 @@ async function runQualification(
   }
 
   const endpointCounts = new Map<BinanceUsdMReadEndpoint, number>();
+  const transportDiagnostics: ObservedTransportDiagnostic[] = [];
   let transportFailed = false;
   let authenticatedRequestCount = 0;
   const observedTransport: BinanceUsdMReadTransport = Object.freeze({
@@ -248,8 +318,15 @@ async function runQualification(
       if (transportRequest.apiKey !== undefined) authenticatedRequestCount += 1;
       try {
         return await transport.get(transportRequest);
-      } catch {
+      } catch (error) {
         transportFailed = true;
+        const diagnostic = safeTransportDiagnostic(error);
+        if (diagnostic !== null) {
+          transportDiagnostics.push(Object.freeze({
+            endpoint: transportRequest.endpoint,
+            ...diagnostic,
+          }));
+        }
         throw new Error('BINANCE_Q1_SANITIZED_TRANSPORT_FAILURE');
       }
     },
@@ -280,6 +357,7 @@ async function runQualification(
       'BINANCE_READ_TRANSPORT_FAILED',
       true,
       'BINANCE_Q1_TIME_PREFLIGHT_FAILED',
+      preferredTransportDiagnostic(transportDiagnostics),
     );
   }
 
@@ -340,6 +418,7 @@ async function runQualification(
     && accountResult.value !== null
     && accountResult.reason === null
     && allInstrumentsAvailable;
+  const transportDiagnostic = preferredTransportDiagnostic(transportDiagnostics);
 
   return evaluateBinanceAuthenticatedReadQualification({
     request,
@@ -349,6 +428,9 @@ async function runQualification(
     accountResult,
     instrumentResults,
     transportClassification: transportFailed ? 'UNEXPECTED_FAILURE' : 'NO_ERROR',
+    transportErrorCode: transportDiagnostic?.errorCode ?? null,
+    transportHttpStatus: transportDiagnostic?.httpStatus ?? null,
+    transportBinanceCode: transportDiagnostic?.binanceCode ?? null,
     invocationCounts: Object.freeze({
       accountTruthReadCount: 1,
       instrumentFactsReadCounts: Object.freeze(request.REQUESTED_SYMBOLS.map((symbol) => Object.freeze({
