@@ -28,13 +28,21 @@ import { signBitgetV2Request } from './BitgetV2Signer';
 export const BITGET_L0_SIGNED_HTTP_METHOD = 'GET' as const;
 export const MAX_BITGET_CREDENTIAL_CHARACTERS = 512 as const;
 
+/**
+ * Hard ceiling for every Bitget REST response body, fixed in source. It is deliberately not a
+ * parameter: callers cannot raise it, disable it, or replace it with `Infinity`, and no remote value
+ * can influence it.
+ */
+export const MAX_BITGET_RESPONSE_BYTES = 1_048_576 as const;
+
 /** Sanitized error taxonomy. `BITGET_READ_REQUEST_INVALID` is the local pre-fetch fail-closed code. */
 export type BitgetReadTransportErrorCode =
   | 'BITGET_READ_REQUEST_INVALID'
   | 'BITGET_READ_NETWORK_FAILED'
   | 'BITGET_READ_HTTP_FAILED'
   | 'BITGET_READ_API_REJECTED'
-  | 'BITGET_READ_RESPONSE_INVALID';
+  | 'BITGET_READ_RESPONSE_INVALID'
+  | 'BITGET_READ_RESPONSE_TOO_LARGE';
 
 /**
  * Public transport error. It can carry a code, the HTTP status and the exchange's numeric code
@@ -51,10 +59,27 @@ export class BitgetReadTransportError extends Error {
   }
 }
 
+export interface BitgetReadableBody {
+  getReader(): {
+    read(): Promise<{ done: boolean; value?: Uint8Array }>;
+    cancel?(reason?: unknown): Promise<void> | void;
+  };
+}
+
+/** Response surface the transport is willing to consume; everything beyond `text` is optional. */
+export interface BitgetReadResponse {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly headers?: { get(name: string): string | null } | null;
+  readonly body?: BitgetReadableBody | null;
+  text(): Promise<string>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
+}
+
 export type BitgetReadFetch = (
   input: string,
   init: RequestInit,
-) => Promise<Pick<Response, 'ok' | 'status' | 'text'>>;
+) => Promise<BitgetReadResponse>;
 
 declare const BITGET_L0_PRODUCTION_TRANSPORT: unique symbol;
 
@@ -96,14 +121,94 @@ function validCredential(value: unknown): value is BitgetReadCredential {
   });
 }
 
-async function extractBitgetCode(response: Pick<Response, 'text'>): Promise<string | null> {
+function responseTooLarge(status: number): BitgetReadTransportError {
+  return new BitgetReadTransportError('BITGET_READ_RESPONSE_TOO_LARGE', status, null);
+}
+
+/** `Content-Length` is a cheap early hint only - it is never treated as the authority. */
+function declaredLengthExceedsLimit(response: BitgetReadResponse): boolean {
+  const headers = response.headers;
+  const getter = headers?.get;
+  if (headers === null || headers === undefined || typeof getter !== 'function') return false;
+  let raw: unknown;
   try {
-    const body = await response.text();
-    if (typeof body !== 'string' || body.length > MAX_BITGET_ERROR_BODY_CHARACTERS) return null;
+    raw = getter.call(headers, 'content-length');
+  } catch {
+    return false;
+  }
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!/^[0-9]{1,20}$/.test(trimmed)) return false;
+  const declared = Number(trimmed);
+  return Number.isSafeInteger(declared) && declared > MAX_BITGET_RESPONSE_BYTES;
+}
+
+function concatenateChunks(chunks: readonly Uint8Array[], total: number): Uint8Array {
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+/**
+ * Bounded response ingestion. Every path enforces MAX_BITGET_RESPONSE_BYTES on real UTF-8 bytes and
+ * fails closed with BITGET_READ_RESPONSE_TOO_LARGE; the offending body is never retained, returned,
+ * logged or attached to the error.
+ *
+ * Order: declaration precheck -> streamed byte accounting -> arrayBuffer -> legacy text shape.
+ */
+async function readBoundedResponseText(response: BitgetReadResponse): Promise<string> {
+  if (declaredLengthExceedsLimit(response)) throw responseTooLarge(response.status);
+  const body = response.body;
+  const reader = body === null || body === undefined || typeof body.getReader !== 'function'
+    ? null
+    : body.getReader();
+  if (reader !== null) {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(0);
+      total += chunk.byteLength;
+      if (total > MAX_BITGET_RESPONSE_BYTES) {
+        try {
+          await reader.cancel?.();
+        } catch {
+          // The reader is already unusable; the size verdict stands.
+        }
+        throw responseTooLarge(response.status);
+      }
+      chunks.push(chunk);
+    }
+    return new TextDecoder().decode(concatenateChunks(chunks, total));
+  }
+  if (typeof response.arrayBuffer === 'function') {
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > MAX_BITGET_RESPONSE_BYTES) throw responseTooLarge(response.status);
+    return new TextDecoder().decode(new Uint8Array(buffer));
+  }
+  // Legacy injected response shape with no stream: bytes are measured once materialized, so this is
+  // a bounded check rather than a bounded read. Every real `Response` takes a path above.
+  const text = await response.text();
+  if (Buffer.byteLength(text, 'utf8') > MAX_BITGET_RESPONSE_BYTES) {
+    throw responseTooLarge(response.status);
+  }
+  return text;
+}
+
+async function extractBitgetCode(response: BitgetReadResponse): Promise<string | null> {
+  try {
+    const body = await readBoundedResponseText(response);
+    if (body.length > MAX_BITGET_ERROR_BODY_CHARACTERS) return null;
     const parsed: unknown = JSON.parse(body);
     if (!isRecord(parsed) || typeof parsed.code !== 'string') return null;
     return BITGET_READ_API_CODE_PATTERN.test(parsed.code) ? parsed.code : null;
-  } catch {
+  } catch (error) {
+    if (error instanceof BitgetReadTransportError) throw error;
     return null;
   }
 }
@@ -189,7 +294,7 @@ function createReadTransport(fetchImpl: BitgetReadFetch): BitgetReadTransport {
       const headers = authenticatedHeaders(validated);
       counters.total += 1;
       counters.byEndpoint.set(validated.endpoint, (counters.byEndpoint.get(validated.endpoint) ?? 0) + 1);
-      let response: Pick<Response, 'ok' | 'status' | 'text'>;
+      let response: BitgetReadResponse;
       try {
         response = await fetchImpl(url, Object.freeze({
           method: BITGET_L0_SIGNED_HTTP_METHOD,
@@ -206,8 +311,9 @@ function createReadTransport(fetchImpl: BitgetReadFetch): BitgetReadTransport {
       }
       let text: string;
       try {
-        text = await response.text();
-      } catch {
+        text = await readBoundedResponseText(response);
+      } catch (error) {
+        if (error instanceof BitgetReadTransportError) throw error;
         throw new BitgetReadTransportError('BITGET_READ_RESPONSE_INVALID', response.status, null);
       }
       let parsed: unknown;

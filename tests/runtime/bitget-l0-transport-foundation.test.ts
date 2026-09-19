@@ -25,11 +25,13 @@ import {
 } from '../../src/runtime/bitget/BitgetV2Signer';
 import {
   BitgetReadTransportError,
+  MAX_BITGET_RESPONSE_BYTES,
   createBitgetReadTransport,
   createProductionBitgetReadTransport,
   getBitgetReadRequestCount,
   hasProductionBitgetReadTransportProvenance,
   type BitgetReadFetch,
+  type BitgetReadResponse,
 } from '../../src/runtime/bitget/BitgetReadTransport';
 
 const FIXTURE_API_KEY_DO_NOT_LEAK = 'FIXTURE_API_KEY_DO_NOT_LEAK';
@@ -532,5 +534,222 @@ describe('Bitget L0 transport foundation', () => {
       );
     }
     assert.equal(BITGET_READ_ENDPOINTS_REQUIRING_L1A_VERIFICATION.length > 0, true);
+  });
+});
+
+const MAX = MAX_BITGET_RESPONSE_BYTES;
+const MAX_STATUS = 200;
+
+function envelopeOfExactBytes(targetBytes: number): string {
+  const prefix = '{"code":"00000","msg":"","requestTime":1,"data":{"pad":"';
+  const suffix = '"}}';
+  const padBytes = targetBytes - Buffer.byteLength(prefix, 'utf8') - Buffer.byteLength(suffix, 'utf8');
+  return `${prefix}${'x'.repeat(padBytes)}${suffix}`;
+}
+
+function streamedResponse(
+  payload: string | Uint8Array[],
+  options: {
+    status?: number;
+    contentLength?: string | null;
+    onRead?: () => void;
+    onCancel?: () => void;
+    arrayBufferInsteadOfStream?: boolean;
+  } = {},
+): BitgetReadResponse {
+  const chunks = Array.isArray(payload) ? payload : [new TextEncoder().encode(payload)];
+  const status = options.status ?? 200;
+  let index = 0;
+  const response = {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: options.contentLength === null || options.contentLength === undefined
+      ? null
+      : { get: (name: string) => (name.toLowerCase() === 'content-length' ? options.contentLength ?? null : null) },
+    body: options.arrayBufferInsteadOfStream
+      ? null
+      : {
+        getReader: () => ({
+          read: async () => {
+            options.onRead?.();
+            if (index >= chunks.length) return { done: true as const };
+            const value = chunks[index];
+            index += 1;
+            return { done: false as const, value };
+          },
+          cancel: async () => { options.onCancel?.(); },
+        }),
+      },
+    async text() {
+      throw new Error('streamed responses must not be read through text()');
+    },
+    ...(options.arrayBufferInsteadOfStream
+      ? { async arrayBuffer() { return concatenated(chunks).buffer; } }
+      : {}),
+  };
+  return response as unknown as BitgetReadResponse;
+}
+
+function concatenated(chunks: readonly Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+function textOnlyResponse(body: string, status = 200): BitgetReadResponse {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async text() { return body; },
+  } as unknown as BitgetReadResponse;
+}
+
+async function oversizedError(status: number, response: BitgetReadResponse): Promise<BitgetReadTransportError> {
+  const transport = createBitgetReadTransport(async () => response);
+  const caught = await transport
+    .get({ endpoint: BITGET_READ_ENDPOINTS.SERVER_TIME, query: [] })
+    .then(() => null, (error: unknown) => error);
+  assert.ok(caught instanceof BitgetReadTransportError);
+  assert.equal(caught.code, 'BITGET_READ_RESPONSE_TOO_LARGE');
+  assert.equal(caught.httpStatus, status);
+  assert.equal(caught.bitgetCode, null);
+  return caught;
+}
+
+describe('Bitget L0 response size bound', () => {
+  it('29. the byte ceiling is a fixed runtime constant', () => {
+    assert.equal(MAX, 1_048_576);
+    assert.equal(typeof MAX_BITGET_RESPONSE_BYTES, 'number');
+    // The transport factory takes only the fetch implementation: the limit is not caller-settable.
+    assert.equal(createBitgetReadTransport.length, 1);
+    assert.equal(createProductionBitgetReadTransport.length, 0);
+  });
+
+  it('30. A - a body of exactly MAX bytes is not rejected as oversized', async () => {
+    const body = envelopeOfExactBytes(MAX);
+    assert.equal(Buffer.byteLength(body, 'utf8'), MAX);
+    const transport = createBitgetReadTransport(async () => streamedResponse(body));
+    const data = await transport.get({ endpoint: BITGET_READ_ENDPOINTS.SERVER_TIME, query: [] });
+    assert.equal(typeof data, 'object');
+  });
+
+  it('31. B - MAX + 1 byte fails closed with RESPONSE_TOO_LARGE', async () => {
+    const body = envelopeOfExactBytes(MAX + 1);
+    assert.equal(Buffer.byteLength(body, 'utf8'), MAX + 1);
+    await oversizedError(MAX_STATUS, streamedResponse(body));
+  });
+
+  it('32. C - a declared Content-Length above MAX fails before the body is read', async () => {
+    let reads = 0;
+    const error = await oversizedError(MAX_STATUS, streamedResponse('{"code":"00000","data":[]}', {
+      contentLength: String(MAX + 1),
+      onRead: () => { reads += 1; },
+    }));
+    assert.equal(reads, 0, 'no stream read may happen once the declaration exceeds the ceiling');
+    assert.equal(error.httpStatus, MAX_STATUS);
+  });
+
+  it('33. D - a dishonest Content-Length below MAX still fails on real bytes', async () => {
+    const body = envelopeOfExactBytes(MAX + 512);
+    await oversizedError(MAX_STATUS, streamedResponse(body, { contentLength: '1024' }));
+  });
+
+  it('34. E - a missing Content-Length is bounded by the stream', async () => {
+    await oversizedError(MAX_STATUS, streamedResponse(envelopeOfExactBytes(MAX + 1), { contentLength: null }));
+  });
+
+  it('35. F - chunked bodies are bounded across chunks and the reader is cancelled', async () => {
+    const chunk = new TextEncoder().encode('x'.repeat(262_144));
+    let cancelled = false;
+    const error = await oversizedError(MAX_STATUS, streamedResponse(
+      [chunk, chunk, chunk, chunk, chunk], // 5 x 256 KiB = 1.25 MiB
+      { onCancel: () => { cancelled = true; } },
+    ));
+    assert.equal(cancelled, true, 'overflow must cancel the remaining stream');
+    assert.equal(error.bitgetCode, null);
+  });
+
+  it('36. G - the bound counts UTF-8 bytes, not JavaScript characters', async () => {
+    const multibyte = '中'.repeat(400_000); // 400k characters, 1.2 MiB of UTF-8
+    assert.equal(multibyte.length, 400_000);
+    assert.ok(multibyte.length < MAX, 'character count alone would look acceptable');
+    assert.ok(Buffer.byteLength(multibyte, 'utf8') > MAX);
+    await oversizedError(MAX_STATUS, streamedResponse(multibyte));
+    // Same content through the legacy text() shape must also fail: the check is byte-based there too.
+    await oversizedError(MAX_STATUS, textOnlyResponse(multibyte));
+  });
+
+  it('37. H - oversized bodies never leak their raw message or fixtures', async () => {
+    const payload = `${'y'.repeat(MAX + 64)}${FIXTURE_RAW_EXCHANGE_MESSAGE_DO_NOT_LEAK}`;
+    const error = await oversizedError(MAX_STATUS, streamedResponse(payload));
+    assertNoLeak(serializedError(error));
+    const nonOk = await oversizedError(503, streamedResponse(
+      JSON.stringify({ code: '40012', msg: FIXTURE_RAW_EXCHANGE_MESSAGE_DO_NOT_LEAK, pad: 'z'.repeat(MAX) }),
+      { status: 503 },
+    ));
+    assertNoLeak(serializedError(nonOk));
+    assertNoLeak(nonOk);
+  });
+
+  it('38. oversized 2xx, 4xx and 5xx are all bounded, and TOO_LARGE outranks other classes', async () => {
+    await oversizedError(200, streamedResponse(envelopeOfExactBytes(MAX + 1)));
+    await oversizedError(400, streamedResponse(envelopeOfExactBytes(MAX + 1), { status: 400 }));
+    await oversizedError(500, streamedResponse('{not json'.repeat(200_000), { status: 500 }));
+    await oversizedError(200, streamedResponse('<html>'.repeat(200_000)));
+  });
+
+  it('39. the arrayBuffer fallback is byte-bounded as well', async () => {
+    await oversizedError(MAX_STATUS, streamedResponse(envelopeOfExactBytes(MAX + 1), {
+      arrayBufferInsteadOfStream: true,
+    }));
+    const fine = await createBitgetReadTransport(async () => streamedResponse(
+      envelopeOfExactBytes(MAX),
+      { arrayBufferInsteadOfStream: true },
+    )).get({ endpoint: BITGET_READ_ENDPOINTS.SERVER_TIME, query: [] });
+    assert.equal(typeof fine, 'object');
+  });
+
+  it('40. bounded ingestion does not relax envelope validation for in-limit bodies', async () => {
+    const cases: Array<[string, string, string]> = [
+      ['empty body', '', 'BITGET_READ_RESPONSE_INVALID'],
+      ['truncated JSON', '{"code":"00000","data":', 'BITGET_READ_RESPONSE_INVALID'],
+      ['missing code', '{"msg":"x","data":[]}', 'BITGET_READ_RESPONSE_INVALID'],
+      ['non-00000 code', '{"code":"40012","msg":"x","data":[]}', 'BITGET_READ_API_REJECTED'],
+    ];
+    for (const [label, body, expected] of cases) {
+      const transport = createBitgetReadTransport(async () => streamedResponse(body));
+      const caught = await transport
+        .get({ endpoint: BITGET_READ_ENDPOINTS.SERVER_TIME, query: [] })
+        .then(() => null, (error: unknown) => error);
+      assert.ok(caught instanceof BitgetReadTransportError, label);
+      assert.equal(caught.code, expected, label);
+      assertNoLeak(serializedError(caught));
+    }
+    // A large but in-limit body still parses normally.
+    const big = JSON.stringify({ code: '00000', msg: 'ok', requestTime: 1, data: { pad: 'q'.repeat(200_000) } });
+    assert.ok(Buffer.byteLength(big, 'utf8') < MAX);
+    const data = await createBitgetReadTransport(async () => streamedResponse(big))
+      .get({ endpoint: BITGET_READ_ENDPOINTS.SERVER_TIME, query: [] });
+    assert.equal((data as { pad: string }).pad.length, 200_000);
+  });
+
+  it('41. the existing error-body diagnostic cap still applies below the byte ceiling', async () => {
+    const transport = createBitgetReadTransport(async () => streamedResponse(
+      JSON.stringify({ code: '40012', msg: FIXTURE_RAW_EXCHANGE_MESSAGE_DO_NOT_LEAK, pad: 'k'.repeat(5_000) }),
+      { status: 400 },
+    ));
+    const caught = await transport
+      .get({ endpoint: BITGET_READ_ENDPOINTS.SERVER_TIME, query: [] })
+      .then(() => null, (error: unknown) => error);
+    assert.ok(caught instanceof BitgetReadTransportError);
+    assert.equal(caught.code, 'BITGET_READ_HTTP_FAILED');
+    assert.equal(caught.httpStatus, 400);
+    assert.equal(caught.bitgetCode, null, 'codes beyond the diagnostic cap are not extracted');
+    assertNoLeak(serializedError(caught));
   });
 });
