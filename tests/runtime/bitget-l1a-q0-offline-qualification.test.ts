@@ -40,7 +40,7 @@ describe('Bitget L1A Q0 offline qualification', () => {
     const receipt = await run();
     const failed = Object.entries(receipt.CHECKS).filter(([, ok]) => ok !== true).map(([name]) => name);
     assert.deepEqual(failed, [], `failing checks: ${failed.join(', ')}`);
-    assert.equal(Object.keys(receipt.CHECKS).length >= 28, true);
+    assert.equal(Object.keys(receipt.CHECKS).length >= 36, true);
   });
 
   it('2. the receipt is an offline simulation that claims no real read or connectivity', async () => {
@@ -70,8 +70,16 @@ describe('Bitget L1A Q0 offline qualification', () => {
     assert.equal(receipt.FEE_DETAIL_ENTRIES, 1);
     assert.equal(receipt.ACCOUNT_FRESHNESS, 'FRESH');
     assert.equal(receipt.MARK_PRICE_FRESHNESS, 'FRESH');
-    assert.equal(receipt.QUANTITY_STEP, 0.001);
+    assert.equal(receipt.MIN_QTY, 0.001);
+    assert.equal(receipt.QUANTITY_MULTIPLE, 0.01);
+    assert.equal(receipt.QUANTITY_MULTIPLE_BASIS, 'SIZE_MULTIPLIER');
+    assert.equal(receipt.QUANTITY_PRECISION, 3);
+    assert.equal(receipt.QUANTITY_PRECISION_BASIS, 'VOLUME_PLACE');
+    assert.notEqual(receipt.QUANTITY_MULTIPLE, 0.001, 'precision unit must not be the multiple');
+    assert.notEqual(receipt.QUANTITY_MULTIPLE, 1 / 10 ** (receipt.QUANTITY_PRECISION ?? 0));
     assert.equal(receipt.PRICE_STEP, 0.01);
+    assert.equal(receipt.PRICE_STEP_BASIS, 'PRICE_END_STEP_AT_PRICE_PLACE');
+    assert.equal(receipt.PRICE_PRECISION, 2);
   });
 
   it('4. request budgets are declared and respected', async () => {
@@ -104,15 +112,33 @@ describe('Bitget L1A Q0 offline qualification', () => {
     assert.equal(cases.STALE_MARK_PRICE, 'MARK_PRICE_STALE');
     assert.equal(cases.UNKNOWN_MARK_PRICE_TIMESTAMP, 'MARK_PRICE_UNKNOWN');
     assert.equal(cases.UNDERIVABLE_CONTRACT_RULES, 'MARKET_RULES_UNKNOWN');
+    assert.equal(cases.MISSING_SIZE_MULTIPLIER, 'MARKET_RULES_UNKNOWN');
+    assert.equal(cases.MISSING_VOLUME_PLACE, 'MARKET_RULES_UNKNOWN');
+    assert.equal(cases.ZERO_SIZE_MULTIPLIER, 'MARKET_RULES_UNKNOWN');
     assert.equal(cases.CLOCK_SKEW, 'BITGET_CLOCK_SKEW_INVALID');
     assert.equal(cases.NETWORK_FAILURE, 'BITGET_READ_TRANSPORT_FAILED');
     assert.equal(cases.EXCHANGE_REJECTION, 'BITGET_READ_API_REJECTED');
     const reasons = bitgetOfflineQualificationFailedReasons(receipt);
-    assert.equal(reasons.length >= 13, true);
+    assert.equal(reasons.length >= 16, true);
     const serialized = JSON.stringify(cases);
     for (const fixture of [FIXTURE_BITGET_API_KEY, FIXTURE_BITGET_SECRET, FIXTURE_BITGET_PASSPHRASE]) {
       assert.equal(serialized.includes(fixture), false);
     }
+  });
+
+  it('6b. the distinguishing fixtures prove precision is not the quantity multiple', async () => {
+    const receipt = await run();
+    assert.equal(receipt.CHECKS.QUANTITY_MULTIPLE_IS_SIZE_MULTIPLIER, true);
+    assert.equal(receipt.CHECKS.QUANTITY_PRECISION_IS_VOLUME_PLACE, true);
+    assert.equal(receipt.CHECKS.QUANTITY_MULTIPLE_IS_NOT_PRECISION_UNIT, true);
+    assert.equal(receipt.CHECKS.PRICE_STEP_IS_END_STEP_AT_PRICE_PLACE, true);
+    assert.equal(receipt.CHECKS.DISTINGUISHING_PRICE_STEP_DERIVED, true);
+    assert.equal(receipt.CHECKS.MISSING_SIZE_MULTIPLIER_FAILS_CLOSED, true);
+    assert.equal(receipt.CHECKS.MISSING_VOLUME_PLACE_FAILS_CLOSED, true);
+    assert.equal(receipt.CHECKS.ZERO_SIZE_MULTIPLIER_FAILS_CLOSED, true);
+    const serialized = JSON.stringify(receipt);
+    assert.equal(serialized.includes('VOLUME_PLACE_PRECISION'), false);
+    assert.equal(serialized.includes('quantityStep'), false);
   });
 
   it('7. the secret and signature leak scan is clean', async () => {

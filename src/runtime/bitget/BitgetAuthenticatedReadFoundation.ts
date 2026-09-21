@@ -130,21 +130,35 @@ export interface BitgetCanonicalAccountTruth {
   readonly accountStateBasis: 'FACTUAL_POSITIONS_RESPONSE';
 }
 
-export type BitgetQuantityStepBasis = 'VOLUME_PLACE_PRECISION' | 'UNKNOWN';
-export type BitgetPriceStepBasis = 'PRICE_END_STEP_AT_PRICE_PLACE' | 'UNKNOWN';
+/**
+ * Quantity semantics (verified contract facts):
+ *   sizeMultiplier = quantity multiplier  -> a valid order quantity must be > minTradeNum and an
+ *                    exact multiple of this value. It is NOT a precision unit.
+ *   volumePlace    = decimal places of the quantity (precision only). It is NOT a quantity multiple.
+ * The two are separate constraints and must never be collapsed into one field.
+ */
+export type BitgetQuantityMultipleBasis = 'SIZE_MULTIPLIER';
+export type BitgetQuantityPrecisionBasis = 'VOLUME_PLACE';
+export type BitgetPriceStepBasis = 'PRICE_END_STEP_AT_PRICE_PLACE';
 
 export interface BitgetCanonicalContractRule {
   readonly symbol: string;
   readonly status: string;
   readonly openable: boolean;
   readonly openableReason: BitgetReadFailureReason | null;
+  /** Minimum quantity (minTradeNum). A floor, not a multiple and not a precision. */
   readonly minQty: number;
   readonly minNotional: number;
-  readonly quantityStep: number | null;
-  readonly quantityStepBasis: BitgetQuantityStepBasis;
-  readonly priceStep: number | null;
+  /** Valid order quantity multiple, parsed from sizeMultiplier. */
+  readonly quantityMultiple: number;
+  readonly quantityMultipleBasis: BitgetQuantityMultipleBasis;
+  /** Maximum quantity decimal precision, parsed from volumePlace. */
+  readonly quantityPrecision: number;
+  readonly quantityPrecisionBasis: BitgetQuantityPrecisionBasis;
+  readonly priceStep: number;
   readonly priceStepBasis: BitgetPriceStepBasis;
-  readonly sizeMultiplier: number;
+  /** Price decimal places, parsed from pricePlace. */
+  readonly pricePrecision: number;
   readonly minLeverage: number;
   readonly maxLeverage: number;
 }
@@ -157,8 +171,10 @@ export interface BitgetCanonicalInstrumentFacts {
   readonly priceTimestamp: number | null;
   readonly minQty: number;
   readonly minNotional: number;
-  readonly quantityStep: number | null;
-  readonly priceStep: number | null;
+  readonly quantityMultiple: number;
+  readonly quantityPrecision: number;
+  readonly priceStep: number;
+  readonly pricePrecision: number;
   readonly contractStatus: string;
   readonly contractOpenable: boolean;
   readonly minLeverage: number;
@@ -414,17 +430,22 @@ export function normalizeBitgetSymbolPrice(payload: unknown, symbol: string): Bi
 }
 
 /**
- * Contract rule derivation.
+ * Contract rule normalization.
  *
- * `priceStep` is derived from the documented pair (priceEndStep integer at pricePlace decimals):
- * step = priceEndStep / 10^pricePlace. `quantityStep` is derived from the documented quantity
- * precision field volumePlace (step = 1 / 10^volumePlace) and is labelled with its basis rather than
- * silently relabelled; `sizeMultiplier` is passed through verbatim for later accounting. When a
- * required field is absent or inconsistent the derivation fails closed as MARKET_RULES_UNKNOWN.
+ * PRICE (verified): priceEndStep is the step coefficient at pricePlace decimals, so
+ *   priceStep = priceEndStep / 10^pricePlace
+ * e.g. pricePlace=1, priceEndStep=5 -> 0.5 ; pricePlace=2, priceEndStep=1 -> 0.01.
+ * pricePrecision is reported separately as pricePlace.
  *
- * NOTE: the field-semantics pairing above follows the checked-in Bitget reference client and the
- * phase mandate. The official documentation could not be re-fetched from this host (see the phase
- * report), so these derivations are reported as mandate/reference-sourced, not doc-verified.
+ * QUANTITY (verified): sizeMultiplier and volumePlace are two different constraints and are kept
+ * apart deliberately:
+ *   quantityMultiple  = sizeMultiplier  -> a valid order quantity must be a multiple of this
+ *   quantityPrecision = volumePlace     -> decimal places of the quantity
+ * volumePlace is NEVER converted into an order-quantity multiple, and no unproven relation such as
+ * sizeMultiplier == 10^-volumePlace is asserted anywhere.
+ *
+ * Any missing/invalid required field fails closed as MARKET_RULES_UNKNOWN rather than substituting a
+ * derived value.
  */
 export function normalizeBitgetContractRule(raw: unknown): BitgetCanonicalContractRule {
   return tagged('MARKET_RULES_UNKNOWN', () => {
@@ -434,12 +455,12 @@ export function normalizeBitgetContractRule(raw: unknown): BitgetCanonicalContra
     const pricePlace = integer(raw.pricePlace, { min: 0 });
     const priceEndStep = integer(raw.priceEndStep, { min: 1 });
     const volumePlace = integer(raw.volumePlace, { min: 0 });
+    // Defensive range guard only: not a relation between fields.
     if (pricePlace > 12 || volumePlace > 12) malformed('MARKET_RULES_UNKNOWN');
     const priceStep = priceEndStep / 10 ** pricePlace;
-    const quantityStep = 1 / 10 ** volumePlace;
-    if (!Number.isFinite(priceStep) || priceStep <= 0 || !Number.isFinite(quantityStep) || quantityStep <= 0) {
-      malformed('MARKET_RULES_UNKNOWN');
-    }
+    if (!Number.isFinite(priceStep) || priceStep <= 0) malformed('MARKET_RULES_UNKNOWN');
+    // The quantity multiple is the venue's own field, never a value derived from volumePlace.
+    const quantityMultiple = decimal(raw.sizeMultiplier, { positive: true });
     const minLeverage = decimal(raw.minLever, { positive: true });
     const maxLeverage = decimal(raw.maxLever, { positive: true });
     if (minLeverage > maxLeverage) malformed('MARKET_RULES_UNKNOWN');
@@ -451,11 +472,13 @@ export function normalizeBitgetContractRule(raw: unknown): BitgetCanonicalContra
       openableReason: openable ? null : 'CONTRACT_NOT_OPENABLE',
       minQty: decimal(raw.minTradeNum, { positive: true }),
       minNotional: decimal(raw.minTradeUSDT, { positive: true }),
-      quantityStep,
-      quantityStepBasis: 'VOLUME_PLACE_PRECISION' as const,
+      quantityMultiple,
+      quantityMultipleBasis: 'SIZE_MULTIPLIER' as const,
+      quantityPrecision: volumePlace,
+      quantityPrecisionBasis: 'VOLUME_PLACE' as const,
       priceStep,
       priceStepBasis: 'PRICE_END_STEP_AT_PRICE_PLACE' as const,
-      sizeMultiplier: decimal(raw.sizeMultiplier, { positive: true }),
+      pricePrecision: pricePlace,
       minLeverage,
       maxLeverage,
     });
@@ -488,7 +511,13 @@ export function evaluateBitgetNewEntryReadiness(input: {
     } else if (!facts.contractOpenable) {
       blockers.push('CONTRACT_NOT_OPENABLE');
     }
-    if (facts.quantityStep === null || facts.priceStep === null) blockers.push('MARKET_RULES_UNKNOWN');
+    // Incomplete quantity/price rules must never permit a new entry.
+    const positiveRules = [facts.minQty, facts.quantityMultiple, facts.priceStep];
+    const precisionRules = [facts.quantityPrecision, facts.pricePrecision];
+    if (positiveRules.some((value) => !Number.isFinite(value) || value <= 0)
+      || precisionRules.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+      blockers.push('MARKET_RULES_UNKNOWN');
+    }
     if (facts.freshness === 'UNKNOWN') blockers.push('MARK_PRICE_UNKNOWN');
     else if (facts.freshness === 'STALE') blockers.push('MARK_PRICE_STALE');
   }
@@ -638,8 +667,10 @@ export function createBitgetAuthenticatedReadFoundation(
         priceTimestamp: prices.priceTimestamp,
         minQty: rule.minQty,
         minNotional: rule.minNotional,
-        quantityStep: rule.quantityStep,
+        quantityMultiple: rule.quantityMultiple,
+        quantityPrecision: rule.quantityPrecision,
         priceStep: rule.priceStep,
+        pricePrecision: rule.pricePrecision,
         contractStatus: rule.status,
         contractOpenable: rule.openable,
         minLeverage: rule.minLeverage,

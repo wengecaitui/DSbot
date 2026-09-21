@@ -77,9 +77,11 @@ const fillPayload = [{
     { feeCoin: 'BGB', totalFee: '0.01', totalDeductionFee: '0.005', deduction: true },
   ],
 }];
+// Distinguishing fixture: sizeMultiplier (0.01) is deliberately NOT 10^-volumePlace (0.001), so a
+// precision unit can never be mistaken for the order-quantity multiple.
 const contractPayload = [{
   symbol: 'ETHUSDT', symbolStatus: 'normal', minTradeNum: '0.001', minTradeUSDT: '5',
-  pricePlace: '2', priceEndStep: '1', volumePlace: '3', sizeMultiplier: '0.001',
+  pricePlace: '2', priceEndStep: '1', volumePlace: '3', sizeMultiplier: '0.01',
   minLever: '1', maxLever: '125',
 }];
 const pricePayload = [{
@@ -238,14 +240,14 @@ describe('Bitget L1A endpoint contract', () => {
     ]);
   });
 
-  it('9. an unknown endpoint is rejected before fetch', async () => {
+  it('5. an unknown endpoint is rejected before fetch', async () => {
     const { transport, captured } = makeTransport();
     const error = await errorOf(transport.get({ endpoint: '/api/v2/mix/order/place-order' as never, query: [] }));
     assert.equal(error?.code, 'BITGET_READ_REQUEST_INVALID');
     assert.equal(captured.length, 0);
   });
 
-  it('10. every private endpoint requires an injected credential', async () => {
+  it('6. every private endpoint requires an injected credential', async () => {
     const { transport, captured } = makeTransport();
     for (const endpoint of [BITGET_READ_ENDPOINTS.ACCOUNTS, BITGET_READ_ENDPOINTS.POSITIONS, BITGET_READ_ENDPOINTS.PENDING_ORDERS, BITGET_READ_ENDPOINTS.FILLS]) {
       const error = await errorOf(transport.get({
@@ -260,7 +262,7 @@ describe('Bitget L1A endpoint contract', () => {
     assert.equal(captured.length, 0);
   });
 
-  it('11. public endpoints send no auth headers and private ones do', async () => {
+  it('7. public endpoints send no auth headers and private ones do', async () => {
     const { transport, captured } = makeTransport();
     await transport.get({ endpoint: BITGET_READ_ENDPOINTS.SERVER_TIME, query: [] });
     await transport.get({
@@ -276,7 +278,7 @@ describe('Bitget L1A endpoint contract', () => {
 });
 
 describe('Bitget L1A account truth', () => {
-  it('12. a valid snapshot is normalized into canonical facts', async () => {
+  it('8. a valid snapshot is normalized into canonical facts', async () => {
     const { foundation } = makeFoundation();
     const result = await foundation.accountTruth();
     assert.equal(result.availability, 'AVAILABLE');
@@ -302,7 +304,7 @@ describe('Bitget L1A account truth', () => {
     assert.equal(truth.recentFills[0]?.orderId, '7000');
   });
 
-  it('13. a factually successful empty positions response is FLAT', async () => {
+  it('9. a factually successful empty positions response is FLAT', async () => {
     const { foundation } = makeFoundation({ positions: [] });
     const result = await foundation.accountTruth();
     assert.equal(result.availability, 'AVAILABLE');
@@ -310,7 +312,7 @@ describe('Bitget L1A account truth', () => {
     assert.deepEqual(result.value?.positions, []);
   });
 
-  it('14. missing positions cannot become FLAT', async () => {
+  it('10. missing positions cannot become FLAT', async () => {
     const { foundation } = makeFoundation({ reject: [BITGET_READ_ENDPOINTS.POSITIONS] });
     const result = await foundation.accountTruth();
     assert.notEqual(result.availability, 'AVAILABLE');
@@ -318,7 +320,7 @@ describe('Bitget L1A account truth', () => {
     assert.notEqual(result.reason, null);
   });
 
-  it('15. malformed positions cannot become FLAT', async () => {
+  it('11. malformed positions cannot become FLAT', async () => {
     const { foundation } = makeFoundation({ positions: { total: '1.5' } });
     const result = await foundation.accountTruth();
     assert.equal(result.availability, 'UNAVAILABLE');
@@ -326,21 +328,21 @@ describe('Bitget L1A account truth', () => {
     assert.equal(result.reason, 'POSITION_TRUTH_MALFORMED');
   });
 
-  it('16. malformed balances fail closed and never become zero', async () => {
+  it('12. malformed balances fail closed and never become zero', async () => {
     const { foundation } = makeFoundation({ accounts: [{ marginCoin: 'USDT', accountEquity: 'NaN', available: '1', locked: '0', unrealizedPL: '0' }] });
     const result = await foundation.accountTruth();
     assert.equal(result.reason, 'ACCOUNT_TRUTH_MALFORMED');
     assert.equal(result.value, null);
   });
 
-  it('17. pending orders and fills malformation fail closed separately', async () => {
+  it('13. pending orders and fills malformation fail closed separately', async () => {
     const orders = await makeFoundation({ pendingOrders: [{ orderId: '1' }] }).foundation.accountTruth();
     assert.equal(orders.reason, 'OPEN_ORDERS_MALFORMED');
     const fills = await makeFoundation({ fills: [{ tradeId: '1' }] }).foundation.accountTruth();
     assert.equal(fills.reason, 'FILLS_MALFORMED');
   });
 
-  it('18. fee detail is preserved entry-by-entry', async () => {
+  it('14. fee detail is preserved entry-by-entry', async () => {
     const fill = normalizeBitgetFill(fillPayload[0]);
     assert.equal(fill.feeDetail.length, 2);
     assert.deepEqual(fill.feeDetail[0], {
@@ -351,14 +353,14 @@ describe('Bitget L1A account truth', () => {
     });
   });
 
-  it('19. hedge long/short and crossed/isolated are normalized', () => {
+  it('15. hedge long/short and crossed/isolated are normalized', () => {
     assert.equal(normalizeBitgetPosition({ ...positionPayload[0], holdSide: 'short' }).holdSide, 'SHORT');
     assert.equal(normalizeBitgetPosition({ ...positionPayload[0], marginMode: 'isolated' }).marginMode, 'ISOLATED');
     assert.equal(normalizeBitgetPosition({ ...positionPayload[0], marginMode: 'cross' }).marginMode, 'CROSS');
     assert.throws(() => normalizeBitgetPosition({ ...positionPayload[0], holdSide: 'net' }));
   });
 
-  it('20. invalid numeric facts are rejected instead of coerced', () => {
+  it('16. invalid numeric facts are rejected instead of coerced', () => {
     assert.throws(() => normalizeBitgetPosition({ ...positionPayload[0], total: '-1' }), 'negative quantity');
     assert.throws(() => normalizeBitgetPosition({ ...positionPayload[0], leverage: '0' }), 'zero leverage');
     assert.throws(() => normalizeBitgetPosition({ ...positionPayload[0], leverage: 'abc' }), 'NaN leverage');
@@ -369,14 +371,14 @@ describe('Bitget L1A account truth', () => {
     assert.throws(() => normalizeBitgetOpenOrder({ ...orderPayload[0], cTime: 'not-a-time' }), 'invalid cTime');
   });
 
-  it('21. stale and future account timestamps are never fresh', async () => {
+  it('17. stale and future account timestamps are never fresh', async () => {
     const stale = await makeFoundation({}, { now: () => BASE_MS + ACCOUNT_FRESHNESS_WINDOW_MS + 1 }).foundation.accountTruth();
     assert.equal(stale.value?.freshness, 'STALE');
     const future = await makeFoundation({}, { now: () => BASE_MS - 1 }).foundation.accountTruth();
     assert.equal(future.value?.freshness, 'UNKNOWN');
   });
 
-  it('22. an unconfigured foundation fails closed without making any request', async () => {
+  it('18. an unconfigured foundation fails closed without making any request', async () => {
     const { foundation, captured } = makeFoundation({}, { credential: null });
     const result = await foundation.accountTruth();
     assert.equal(result.availability, 'UNAVAILABLE');
@@ -389,7 +391,7 @@ describe('Bitget L1A account truth', () => {
     assert.equal(status.realCredentialDiscovery, false);
   });
 
-  it('23. the account snapshot stays within the five-request budget', async () => {
+  it('19. the account snapshot stays within the five-request budget', async () => {
     const { foundation, captured } = makeFoundation();
     await foundation.accountTruth();
     assert.equal(captured.length, 5);
@@ -402,7 +404,7 @@ describe('Bitget L1A account truth', () => {
     ]);
   });
 
-  it('24. a transport failure is reported, never retried', async () => {
+  it('20. a transport failure is reported, never retried', async () => {
     const { foundation, captured } = makeFoundation({ networkFailure: true });
     const result = await foundation.accountTruth();
     assert.equal(result.availability, 'UNKNOWN');
@@ -410,7 +412,7 @@ describe('Bitget L1A account truth', () => {
     assert.equal(captured.length, 1, 'exactly one attempt');
   });
 
-  it('25. the client surface exposes no mutation method', () => {
+  it('21. the client surface exposes no mutation method', () => {
     const { transport } = makeTransport();
     const client = createBitgetAuthenticatedReadClient({
       transport,
@@ -427,7 +429,7 @@ describe('Bitget L1A account truth', () => {
     assert.equal(BITGET_L1A_FILL_LIMIT, 50);
   });
 
-  it('26. private client reads sign with the injected clock and observed offset', async () => {
+  it('22. private client reads sign with the injected clock and observed offset', async () => {
     const { transport, captured } = makeTransport({ serverTime: { serverTime: String(BASE_MS + 5_000) } });
     let tick = BASE_MS;
     const client = createBitgetAuthenticatedReadClient({
@@ -444,33 +446,104 @@ describe('Bitget L1A account truth', () => {
 });
 
 describe('Bitget L1A instrument facts', () => {
-  it('27. contract rules are derived deterministically from the documented fields', () => {
+  it('23. quantity multiple and precision are separate facts; price step is endStep/10^place', () => {
     const rule = normalizeBitgetContractRule(contractPayload[0]);
-    assert.equal(rule.minQty, 0.001);
-    assert.equal(rule.minNotional, 5);
-    assert.equal(rule.quantityStep, 0.001);
-    assert.equal(rule.quantityStepBasis, 'VOLUME_PLACE_PRECISION');
+    // Quantity: the venue's multiplier is the multiple; volumePlace is only precision.
+    assert.equal(rule.quantityMultiple, 0.01);
+    assert.equal(rule.quantityMultipleBasis, 'SIZE_MULTIPLIER');
+    assert.equal(rule.quantityPrecision, 3);
+    assert.equal(rule.quantityPrecisionBasis, 'VOLUME_PLACE');
+    assert.notEqual(rule.quantityMultiple, 0.001, 'the precision unit must never become the multiple');
+    assert.notEqual(rule.quantityMultiple, 1 / 10 ** rule.quantityPrecision);
+    // The old ambiguous field must be gone from the canonical rule.
+    assert.equal('quantityStep' in rule, false);
+    assert.equal('quantityStepBasis' in rule, false);
+    assert.equal('sizeMultiplier' in rule, false, 'one explicit quantity-multiple fact only');
+    // Price: priceEndStep is the step coefficient at pricePlace decimals.
     assert.equal(rule.priceStep, 0.01);
     assert.equal(rule.priceStepBasis, 'PRICE_END_STEP_AT_PRICE_PLACE');
-    assert.equal(rule.sizeMultiplier, 0.001);
+    assert.equal(rule.pricePrecision, 2);
+    // Minimums stay verbatim.
+    assert.equal(rule.minQty, 0.001);
+    assert.equal(rule.minNotional, 5);
     assert.equal(rule.minLeverage, 1);
     assert.equal(rule.maxLeverage, 125);
     assert.equal(rule.status, 'normal');
     assert.equal(rule.openable, true);
     assert.equal(rule.openableReason, null);
-    assert.equal(normalizeBitgetContractRule({ ...contractPayload[0], pricePlace: '0', priceEndStep: '5' }).priceStep, 5);
-    assert.equal(normalizeBitgetContractRule({ ...contractPayload[0], volumePlace: '0' }).quantityStep, 1);
   });
 
-  it('28. underivable contract rules fail closed', () => {
+  it('24. quantity and price rules are normalized without inventing relations', () => {
+    // pricePlace=1, priceEndStep=5 -> 0.5 (NOT 5, NOT 0.1)
+    const priceDistinguishing = normalizeBitgetContractRule({ ...contractPayload[0], pricePlace: '1', priceEndStep: '5' });
+    assert.equal(priceDistinguishing.priceStep, 0.5);
+    assert.equal(priceDistinguishing.pricePrecision, 1);
+    const priceUnitStep = normalizeBitgetContractRule({ ...contractPayload[0], pricePlace: '0', priceEndStep: '5' });
+    assert.equal(priceUnitStep.priceStep, 5);
+    assert.equal(priceUnitStep.pricePrecision, 0);
+    // volumePlace=0 is precision 0, and the multiple still comes from sizeMultiplier only.
+    const zeroPrecision = normalizeBitgetContractRule({ ...contractPayload[0], volumePlace: '0' });
+    assert.equal(zeroPrecision.quantityPrecision, 0);
+    assert.equal(zeroPrecision.quantityMultiple, 0.01);
+    // A sizeMultiplier that is NOT a power of ten still survives unchanged.
+    const oddMultiple = normalizeBitgetContractRule({ ...contractPayload[0], sizeMultiplier: '0.3' });
+    assert.equal(oddMultiple.quantityMultiple, 0.3);
+    assert.equal(oddMultiple.quantityPrecision, 3);
+  });
+
+  it('25. invalid quantity rules fail closed and never fall back to a derived multiple', () => {
+    const invalidMultipliers: readonly Record<string, unknown>[] = [
+      { ...contractPayload[0], sizeMultiplier: undefined },
+      { ...contractPayload[0], sizeMultiplier: '' },
+      { ...contractPayload[0], sizeMultiplier: '0' },
+      { ...contractPayload[0], sizeMultiplier: '-1' },
+      { ...contractPayload[0], sizeMultiplier: 'NaN' },
+      { ...contractPayload[0], sizeMultiplier: 'Infinity' },
+      { ...contractPayload[0], sizeMultiplier: 'not-a-number' },
+    ];
+    for (const payload of invalidMultipliers) {
+      assert.throws(
+        () => normalizeBitgetContractRule(payload),
+        (error: unknown) => (error as { reason?: string }).reason === 'MARKET_RULES_UNKNOWN',
+        `sizeMultiplier=${String(payload.sizeMultiplier)}`,
+      );
+    }
+    const invalidPrecisions: readonly Record<string, unknown>[] = [
+      { ...contractPayload[0], volumePlace: undefined },
+      { ...contractPayload[0], volumePlace: '-1' },
+      { ...contractPayload[0], volumePlace: '1.5' },
+      { ...contractPayload[0], volumePlace: 'NaN' },
+      { ...contractPayload[0], volumePlace: 'not-a-number' },
+    ];
+    for (const payload of invalidPrecisions) {
+      assert.throws(
+        () => normalizeBitgetContractRule(payload),
+        (error: unknown) => (error as { reason?: string }).reason === 'MARKET_RULES_UNKNOWN',
+        `volumePlace=${String(payload.volumePlace)}`,
+      );
+    }
     assert.throws(() => normalizeBitgetContractRule({ ...contractPayload[0], priceEndStep: '0' }));
-    assert.throws(() => normalizeBitgetContractRule({ ...contractPayload[0], volumePlace: '-1' }));
+    assert.throws(() => normalizeBitgetContractRule({ ...contractPayload[0], priceEndStep: undefined }));
     assert.throws(() => normalizeBitgetContractRule({ ...contractPayload[0], pricePlace: '99' }));
+    assert.throws(() => normalizeBitgetContractRule({ ...contractPayload[0], pricePlace: '-1' }));
     assert.throws(() => normalizeBitgetContractRule({ ...contractPayload[0], minLever: '150', maxLever: '100' }));
     assert.throws(() => normalizeBitgetContractRule({ ...contractPayload[0], minTradeNum: '' }));
+    assert.throws(() => normalizeBitgetContractRule({ ...contractPayload[0], minTradeUSDT: '-5' }));
   });
 
-  it('29. a valid instrument snapshot carries prices, rules and freshness', async () => {
+  it('26. the precision unit can never be re-adopted as the quantity multiple (blind-spot guard)', () => {
+    const rule = normalizeBitgetContractRule(contractPayload[0]);
+    assert.equal(rule.quantityPrecision, 3);
+    assert.equal(rule.quantityMultiple, 0.01);
+    assert.notEqual(rule.quantityMultiple, 0.001);
+    assert.notEqual(rule.quantityMultiple, 10 ** -rule.quantityPrecision);
+    assert.deepEqual(
+      Object.keys(rule).filter((key) => /quantity/i.test(key)).sort(),
+      ['quantityMultiple', 'quantityMultipleBasis', 'quantityPrecision', 'quantityPrecisionBasis'],
+    );
+  });
+
+  it('27. a valid instrument snapshot carries prices, rules and freshness', async () => {
     const { foundation, captured } = makeFoundation();
     const result = await foundation.instrumentFacts('ETHUSDT');
     assert.equal(result.availability, 'AVAILABLE');
@@ -486,12 +559,32 @@ describe('Bitget L1A instrument facts', () => {
     assert.equal(facts.contractOpenable, true);
     assert.equal(facts.minQty, 0.001);
     assert.equal(facts.minNotional, 5);
-    assert.equal(facts.quantityStep, 0.001);
+    assert.equal(facts.quantityMultiple, 0.01);
+    assert.equal(facts.quantityPrecision, 3);
+    assert.notEqual(facts.quantityMultiple, 10 ** -facts.quantityPrecision);
     assert.equal(facts.priceStep, 0.01);
+    assert.equal(facts.pricePrecision, 2);
     assert.equal(captured.length, 3, 'server time + contracts + symbol price');
   });
 
-  it('30. an unknown symbol fails closed', async () => {
+  it('28. incomplete quantity rules block a new entry', async () => {
+    const accountTruth = await makeFoundation().foundation.accountTruth();
+    for (const broken of [
+      { ...contractPayload[0], sizeMultiplier: undefined },
+      { ...contractPayload[0], sizeMultiplier: '0' },
+      { ...contractPayload[0], volumePlace: undefined },
+      { ...contractPayload[0], minTradeNum: undefined },
+    ]) {
+      const facts = await makeFoundation({ contracts: [broken] }).foundation.instrumentFacts('ETHUSDT');
+      assert.equal(facts.availability, 'UNAVAILABLE');
+      assert.equal(facts.reason, 'MARKET_RULES_UNKNOWN');
+      const readiness = evaluateBitgetNewEntryReadiness({ accountTruth, instrumentFacts: facts });
+      assert.equal(readiness.safeToOpen, false);
+      assert.equal(readiness.blockers.includes('MARKET_RULES_UNKNOWN'), true);
+    }
+  });
+
+  it('29. an unknown symbol fails closed', async () => {
     const { foundation } = makeFoundation({ contracts: [{ ...contractPayload[0], symbol: 'BTCUSDT' }] });
     const result = await foundation.instrumentFacts('ETHUSDT');
     assert.equal(result.availability, 'UNKNOWN');
@@ -499,14 +592,14 @@ describe('Bitget L1A instrument facts', () => {
     assert.equal(result.value, null);
   });
 
-  it('31. a malformed symbol price fails closed', async () => {
+  it('30. a malformed symbol price fails closed', async () => {
     const { foundation } = makeFoundation({ symbolPrice: [{ symbol: 'ETHUSDT', price: 'x', indexPrice: '1', markPrice: '1' }] });
     const result = await foundation.instrumentFacts('ETHUSDT');
     assert.equal(result.availability, 'UNAVAILABLE');
     assert.equal(result.reason, 'INSTRUMENT_FACTS_MALFORMED');
   });
 
-  it('32. a missing or future price timestamp is never fresh', async () => {
+  it('31. a missing or future price timestamp is never fresh', async () => {
     const missing = normalizeBitgetSymbolPrice({ symbol: 'ETHUSDT', price: '1', indexPrice: '1', markPrice: '1' }, 'ETHUSDT');
     assert.equal(missing.priceTimestamp, null);
     const { foundation } = makeFoundation({ symbolPrice: [{ symbol: 'ETHUSDT', price: '1', indexPrice: '1', markPrice: '1' }] });
@@ -518,7 +611,7 @@ describe('Bitget L1A instrument facts', () => {
     assert.equal(stale.value?.freshness, 'STALE');
   });
 
-  it('33. only explicitly safe contract statuses may open, everything else is blocked', async () => {
+  it('32. only explicitly safe contract statuses may open, everything else is blocked', async () => {
     const { foundation } = makeFoundation();
     const accountTruth = await foundation.accountTruth();
     for (const status of ['maintain', 'limit_open', 'restrictedAPI', 'off', 'listed', 'something-new']) {
@@ -533,7 +626,7 @@ describe('Bitget L1A instrument facts', () => {
     assert.equal(evaluateBitgetNewEntryReadiness({ accountTruth, instrumentFacts: healthy }).safeToOpen, true);
   });
 
-  it('34. stale or unknown mark price blocks opening, but never gates close/reduce', async () => {
+  it('33. stale or unknown mark price blocks opening, but never gates close/reduce', async () => {
     const accountTruth = await makeFoundation().foundation.accountTruth();
     const stale = await makeFoundation({}, { now: () => BASE_MS + MARK_PRICE_FRESHNESS_WINDOW_MS + 1 }).foundation.instrumentFacts('ETHUSDT');
     const staleReadiness = evaluateBitgetNewEntryReadiness({ accountTruth, instrumentFacts: stale });
@@ -549,7 +642,7 @@ describe('Bitget L1A instrument facts', () => {
     assert.equal(unknownReadiness.closeOrReduceBlockedByEntryFreshness, false);
   });
 
-  it('35. an unavailable account truth blocks opening as UNKNOWN, not as FLAT', async () => {
+  it('34. an unavailable account truth blocks opening as UNKNOWN, not as FLAT', async () => {
     const unavailableAccount = await makeFoundation({ positions: { bad: true } }).foundation.accountTruth();
     const facts = await makeFoundation().foundation.instrumentFacts('ETHUSDT');
     const readiness = evaluateBitgetNewEntryReadiness({ accountTruth: unavailableAccount, instrumentFacts: facts });
@@ -560,7 +653,7 @@ describe('Bitget L1A instrument facts', () => {
 });
 
 describe('Bitget L1A clock and timestamp boundary', () => {
-  it('36. a valid server time observation yields the offset', () => {
+  it('35. a valid server time observation yields the offset', () => {
     const observation = observeBitgetServerTime({
       serverTimeMs: BASE_MS + 1_200, requestStartedMs: BASE_MS - 100, responseReceivedMs: BASE_MS,
     });
@@ -569,7 +662,7 @@ describe('Bitget L1A clock and timestamp boundary', () => {
     assert.equal(observation.serverTimeMs, BASE_MS + 1_200);
   });
 
-  it('37. invalid server time, absurd offsets and slow round trips fail closed', () => {
+  it('36. invalid server time, absurd offsets and slow round trips fail closed', () => {
     assert.throws(() => observeBitgetServerTime({ serverTimeMs: 'nope', requestStartedMs: BASE_MS, responseReceivedMs: BASE_MS }), /BITGET_SERVER_TIME_INVALID/);
     assert.throws(() => observeBitgetServerTime({ serverTimeMs: -1, requestStartedMs: BASE_MS, responseReceivedMs: BASE_MS }), /BITGET_SERVER_TIME_INVALID/);
     assert.throws(() => observeBitgetServerTime({ serverTimeMs: BASE_MS + 1.5, requestStartedMs: BASE_MS, responseReceivedMs: BASE_MS }), /BITGET_SERVER_TIME_INVALID/);
@@ -581,7 +674,7 @@ describe('Bitget L1A clock and timestamp boundary', () => {
     }), /BITGET_SERVER_TIME_INVALID/);
   });
 
-  it('38. timestamps are deterministic and come from the injected clock only', () => {
+  it('37. timestamps are deterministic and come from the injected clock only', () => {
     const clock = createBitgetReadClock(() => BASE_MS);
     assert.equal(signedBitgetTimestamp(clock, 0), String(BASE_MS));
     assert.equal(signedBitgetTimestamp(clock, 0), signedBitgetTimestamp(clock, 0));
@@ -596,7 +689,7 @@ describe('Bitget L1A clock and timestamp boundary', () => {
     assert.equal(MAX_BITGET_SERVER_TIME_SKEW_MS, 30_000);
   });
 
-  it('39. the signed header and the signature preimage use one identical timestamp', async () => {
+  it('38. the signed header and the signature preimage use one identical timestamp', async () => {
     const { transport, captured } = makeTransport();
     const client = createBitgetAuthenticatedReadClient({
       transport, credential, clock: createBitgetReadClock(() => BASE_MS),
@@ -611,7 +704,7 @@ describe('Bitget L1A clock and timestamp boundary', () => {
     assert.equal(captured[0]?.headers?.['ACCESS-SIGN'], expected);
   });
 
-  it('40. clock and transport failures surface as their own reasons', async () => {
+  it('39. clock and transport failures surface as their own reasons', async () => {
     const skew = await makeFoundation({ serverTime: { serverTime: String(BASE_MS + MAX_BITGET_SERVER_TIME_SKEW_MS + 5_000) } }).foundation.accountTruth();
     assert.equal(skew.reason, 'BITGET_CLOCK_SKEW_INVALID');
     const invalid = await makeFoundation({ serverTime: { serverTime: 'not-a-time' } }).foundation.accountTruth();
@@ -622,7 +715,7 @@ describe('Bitget L1A clock and timestamp boundary', () => {
 });
 
 describe('Bitget L1A security boundary', () => {
-  it('41. no fixture credential, signature or raw exchange message reaches a serialized result', async () => {
+  it('40. no fixture credential, signature or raw exchange message reaches a serialized result', async () => {
     const { foundation } = makeFoundation();
     const accountTruth = await foundation.accountTruth();
     const facts = await foundation.instrumentFacts('ETHUSDT');
@@ -633,7 +726,7 @@ describe('Bitget L1A security boundary', () => {
     assertNoFixtureLeak(foundation.status());
   });
 
-  it('42. errors carry only sanitized reasons', async () => {
+  it('41. errors carry only sanitized reasons', async () => {
     const rejected = await makeFoundation({ reject: [BITGET_READ_ENDPOINTS.ACCOUNTS] }).foundation.accountTruth();
     assertNoFixtureLeak(rejected);
     const network = await makeFoundation({ networkFailure: true }).foundation.accountTruth();
@@ -650,7 +743,7 @@ describe('Bitget L1A security boundary', () => {
     assertNoFixtureLeak(captured[0]?.url);
   });
 
-  it('43. the foundation never wires a real client and never discovers credentials', async () => {
+  it('42. the foundation never wires a real client and never discovers credentials', async () => {
     const { foundation } = makeFoundation();
     await foundation.accountTruth();
     const status = foundation.status();
@@ -661,7 +754,7 @@ describe('Bitget L1A security boundary', () => {
     assert.equal(status.reason, null);
   });
 
-  it('44. no runtime file references a production transport or an environment credential loader', async () => {
+  it('43. no runtime file references a production transport or an environment credential loader', async () => {
     const { readFileSync, readdirSync } = await import('node:fs');
     const dir = 'src/runtime/bitget';
     for (const file of readdirSync(dir)) {
@@ -678,7 +771,7 @@ describe('Bitget L1A security boundary', () => {
     }
   });
 
-  it('45. deferred read families are declared but not callable', async () => {
+  it('44. deferred read families are declared but not callable', async () => {
     const { transport, captured } = makeTransport();
     for (const deferred of BITGET_READ_ENDPOINTS_REQUIRING_L1A_VERIFICATION) {
       const error = await errorOf(transport.get({ endpoint: deferred as never, query: [] }));

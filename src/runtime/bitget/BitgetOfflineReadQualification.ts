@@ -54,9 +54,13 @@ export interface CapturedOfflineRequest {
   readonly headers: Record<string, string> | undefined;
 }
 
+/**
+ * Distinguishing contract fixture: sizeMultiplier (0.01) deliberately differs from 10^-volumePlace
+ * (0.001), so a precision unit can never masquerade as the order-quantity multiple.
+ */
 const defaultContracts: Record<string, unknown> = {
   symbol: 'ETHUSDT', symbolStatus: 'normal', minTradeNum: '0.001', minTradeUSDT: '5',
-  pricePlace: '2', priceEndStep: '1', volumePlace: '3', sizeMultiplier: '0.001',
+  pricePlace: '2', priceEndStep: '1', volumePlace: '3', sizeMultiplier: '0.01',
   minLever: '1', maxLever: '125',
 };
 
@@ -154,8 +158,14 @@ export interface BitgetOfflineQualificationReceipt {
   readonly FEE_DETAIL_ENTRIES: number | null;
   readonly ACCOUNT_FRESHNESS: string | null;
   readonly MARK_PRICE_FRESHNESS: string | null;
-  readonly QUANTITY_STEP: number | null;
+  readonly MIN_QTY: number | null;
+  readonly QUANTITY_MULTIPLE: number | null;
+  readonly QUANTITY_MULTIPLE_BASIS: 'SIZE_MULTIPLIER';
+  readonly QUANTITY_PRECISION: number | null;
+  readonly QUANTITY_PRECISION_BASIS: 'VOLUME_PLACE';
   readonly PRICE_STEP: number | null;
+  readonly PRICE_STEP_BASIS: 'PRICE_END_STEP_AT_PRICE_PLACE';
+  readonly PRICE_PRECISION: number | null;
   readonly ENTRY_READINESS: BitgetEntryReadiness | null;
   readonly CHECKS: Readonly<Record<string, boolean>>;
   readonly FAIL_CLOSED_CASES: Readonly<Record<string, string | null>>;
@@ -264,6 +274,22 @@ export async function runBitgetOfflineReadQualification(
     contracts: [{ ...defaultContracts, priceEndStep: '0' }],
   });
   const skippedRulesResult = await skippedRules.foundation.instrumentFacts(symbol);
+  const missingQuantityMultiple = scenario(request, {
+    contracts: [{ ...defaultContracts, sizeMultiplier: undefined }],
+  });
+  const missingQuantityMultipleResult = await missingQuantityMultiple.foundation.instrumentFacts(symbol);
+  const missingPrecision = scenario(request, {
+    contracts: [{ ...defaultContracts, volumePlace: undefined }],
+  });
+  const missingPrecisionResult = await missingPrecision.foundation.instrumentFacts(symbol);
+  const zeroMultiple = scenario(request, {
+    contracts: [{ ...defaultContracts, sizeMultiplier: '0' }],
+  });
+  const zeroMultipleResult = await zeroMultiple.foundation.instrumentFacts(symbol);
+  const distinguishingPrice = scenario(request, {
+    contracts: [{ ...defaultContracts, pricePlace: '1', priceEndStep: '5' }],
+  });
+  const distinguishingPriceFacts = await distinguishingPrice.foundation.instrumentFacts(symbol);
   const skew = scenario(request, { serverTime: { serverTime: '1799000900000' } });
   const skewResult = await skew.foundation.accountTruth();
   const unconfigured = scenario(request, {}, null);
@@ -285,6 +311,9 @@ export async function runBitgetOfflineReadQualification(
     STALE_MARK_PRICE: staleReadiness.safeToOpen ? null : (staleReadiness.blockers[0] ?? null),
     UNKNOWN_MARK_PRICE_TIMESTAMP: unknownPriceFacts.value?.freshness === 'UNKNOWN' ? 'MARK_PRICE_UNKNOWN' : null,
     UNDERIVABLE_CONTRACT_RULES: skippedRulesResult.reason,
+    MISSING_SIZE_MULTIPLIER: missingQuantityMultipleResult.reason,
+    MISSING_VOLUME_PLACE: missingPrecisionResult.reason,
+    ZERO_SIZE_MULTIPLIER: zeroMultipleResult.reason,
     CLOCK_SKEW: skewResult.reason,
     NETWORK_FAILURE: networkFailureResult.reason,
     EXCHANGE_REJECTION: rejectedEnvelopeResult.reason,
@@ -312,6 +341,17 @@ export async function runBitgetOfflineReadQualification(
     MALFORMED_OPEN_ORDERS_FAILS_CLOSED: malformedOrdersResult.reason === 'OPEN_ORDERS_MALFORMED',
     MISSING_SYMBOL_FAILS_CLOSED: missingSymbolResult.reason === 'MARKET_RULES_UNKNOWN',
     UNDERIVABLE_RULES_FAILS_CLOSED: skippedRulesResult.reason === 'MARKET_RULES_UNKNOWN',
+    MISSING_SIZE_MULTIPLIER_FAILS_CLOSED: missingQuantityMultipleResult.reason === 'MARKET_RULES_UNKNOWN',
+    MISSING_VOLUME_PLACE_FAILS_CLOSED: missingPrecisionResult.reason === 'MARKET_RULES_UNKNOWN',
+    ZERO_SIZE_MULTIPLIER_FAILS_CLOSED: zeroMultipleResult.reason === 'MARKET_RULES_UNKNOWN',
+    QUANTITY_MULTIPLE_IS_SIZE_MULTIPLIER: instrumentFacts.value?.quantityMultiple === 0.01,
+    QUANTITY_PRECISION_IS_VOLUME_PLACE: instrumentFacts.value?.quantityPrecision === 3,
+    QUANTITY_MULTIPLE_IS_NOT_PRECISION_UNIT: instrumentFacts.value !== null
+      && instrumentFacts.value.quantityMultiple !== 1 / 10 ** instrumentFacts.value.quantityPrecision,
+    PRICE_STEP_IS_END_STEP_AT_PRICE_PLACE: instrumentFacts.value?.priceStep === 0.01
+      && instrumentFacts.value?.pricePrecision === 2,
+    DISTINGUISHING_PRICE_STEP_DERIVED: distinguishingPriceFacts.value?.priceStep === 0.5
+      && distinguishingPriceFacts.value?.pricePrecision === 1,
     MAINTENANCE_BLOCKS_OPENING: maintainedReadiness.safeToOpen === false,
     STALE_MARK_BLOCKS_OPENING: staleReadiness.safeToOpen === false,
     UNKNOWN_MARK_TIMESTAMP_NOT_FRESH: unknownPriceFacts.value?.freshness === 'UNKNOWN',
@@ -358,8 +398,14 @@ export async function runBitgetOfflineReadQualification(
     FEE_DETAIL_ENTRIES: accountTruth.value === null ? null : feeEntryCount,
     ACCOUNT_FRESHNESS: accountTruth.value?.freshness ?? null,
     MARK_PRICE_FRESHNESS: instrumentFacts.value?.freshness ?? null,
-    QUANTITY_STEP: instrumentFacts.value?.quantityStep ?? null,
+    MIN_QTY: instrumentFacts.value?.minQty ?? null,
+    QUANTITY_MULTIPLE: instrumentFacts.value?.quantityMultiple ?? null,
+    QUANTITY_MULTIPLE_BASIS: 'SIZE_MULTIPLIER' as const,
+    QUANTITY_PRECISION: instrumentFacts.value?.quantityPrecision ?? null,
+    QUANTITY_PRECISION_BASIS: 'VOLUME_PLACE' as const,
     PRICE_STEP: instrumentFacts.value?.priceStep ?? null,
+    PRICE_STEP_BASIS: 'PRICE_END_STEP_AT_PRICE_PLACE' as const,
+    PRICE_PRECISION: instrumentFacts.value?.pricePrecision ?? null,
     ENTRY_READINESS: readiness,
     CHECKS: Object.freeze(checks),
     FAIL_CLOSED_CASES: Object.freeze(failClosed),
