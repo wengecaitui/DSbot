@@ -1,39 +1,56 @@
 /**
- * Bitget L0 read contracts.
+ * Bitget read contracts (L0 transport boundary + L1A read vocabulary).
  *
- * Closed vocabulary for the Bitget authenticated-read foundation: the single production origin,
- * the GET-only read endpoint allowlist and the deterministic canonical query serializer that both
- * the signature preimage and the emitted request URL are built from.
+ * The endpoint allowlist is the single source of truth for what the transport may call. Endpoints
+ * that are known to be drifted or unverified are declared separately and are NOT callable.
  *
  * Nothing in this module performs I/O, reads the environment or holds credentials.
+ *
+ * ENDPOINT PROVENANCE: the allowlist below follows the Architecture Gatekeeper's mandated
+ * current-contract set for Bitget Classic/USDT-FUTURES. This host cannot reach www.bitget.com or
+ * docs.bitget.com (connections fail) and the available text proxy returned only 404 templates, so
+ * the official documentation could NOT be independently re-fetched during this phase; the endpoint
+ * facts are therefore reported as mandate-sourced, not doc-verified. See the phase report.
  */
 
 export const BITGET_L0_PRODUCTION_ORIGIN = 'https://api.bitget.com' as const;
 
-export const PRODUCT_TYPE_USDT_FUTURES = 'USDT-FUTURES' as const;
+export const BITGET_L1A_PRODUCT_TYPE = 'USDT-FUTURES' as const;
+export const BITGET_L1A_MARGIN_COIN = 'USDT' as const;
+export const BITGET_L1A_INITIAL_SYMBOL = 'ETHUSDT' as const;
+export const BITGET_L1A_SCHEMA_VERSION = 'BITGET_L1A_V1' as const;
+/** Product-type alias kept for the L0 transport suite and older call sites. */
+export const PRODUCT_TYPE_USDT_FUTURES = BITGET_L1A_PRODUCT_TYPE;
 
-/**
- * Endpoint allowlist confirmed by existing repository facts (the audited Bitget reference client)
- * and the official Bitget V2 contract. Anything not confirmed is deliberately absent and must be
- * verified in L1A before it can be used; see BITGET_READ_ENDPOINTS_REQUIRING_L1A_VERIFICATION.
- */
+/** Callable GET read endpoints. Closed vocabulary: the transport rejects anything else. */
 export const BITGET_READ_ENDPOINTS = Object.freeze({
   SERVER_TIME: '/api/v2/public/time',
-  MIX_TICKERS: '/api/v2/mix/market/tickers',
-  MIX_ACCOUNTS: '/api/v2/mix/account/accounts',
-  MIX_POSITIONS: '/api/v2/mix/position/all',
+  CONTRACTS: '/api/v2/mix/market/contracts',
+  SYMBOL_PRICE: '/api/v2/mix/market/symbol-price',
+  ACCOUNTS: '/api/v2/mix/account/accounts',
+  POSITIONS: '/api/v2/mix/position/all-position',
+  PENDING_ORDERS: '/api/v2/mix/order/orders-pending',
+  FILLS: '/api/v2/mix/order/fills',
 } as const);
 
 export type BitgetReadEndpoint =
   typeof BITGET_READ_ENDPOINTS[keyof typeof BITGET_READ_ENDPOINTS];
 
-/** Candidate endpoint families deferred to L1A; NOT callable in L0. */
+/**
+ * Endpoints that must never be called from this codebase. `/api/v2/mix/position/all` was the
+ * previous (drifted) value and `/api/v2/mix/market/tickers` is the superseded market endpoint;
+ * they are retained here only so tests can prove they are rejected.
+ */
+export const BITGET_DRIFTED_ENDPOINTS = Object.freeze({
+  MIX_POSITION_ALL: '/api/v2/mix/position/all',
+  MIX_TICKERS: '/api/v2/mix/market/tickers',
+} as const);
+
+/** Read families that exist upstream but are not required by the L1A snapshot: NOT callable. */
 export const BITGET_READ_ENDPOINTS_REQUIRING_L1A_VERIFICATION: readonly string[] = Object.freeze([
-  '/api/v2/mix/market/contracts',
-  '/api/v2/mix/order/orders-pending',
-  '/api/v2/mix/order/fills',
   '/api/v2/mix/order/detail',
-  '/api/v2/mix/account/account',
+  '/api/v2/mix/order/history-orders',
+  '/api/v2/mix/position/history-position',
 ]);
 
 export type BitgetReadKind = 'PUBLIC_READ' | 'AUTHENTICATED_READ';
@@ -54,7 +71,7 @@ export interface BitgetReadTransportRequest {
   readonly endpoint: BitgetReadEndpoint;
   readonly query: readonly BitgetQueryParameter[];
   readonly credential?: BitgetReadCredential;
-  /** Explicitly injected millisecond timestamp string; L0 never reads a clock. */
+  /** Explicitly injected millisecond timestamp string; the client never reads a hidden clock. */
   readonly timestamp?: string;
 }
 
@@ -73,26 +90,41 @@ export const BITGET_READ_ENDPOINT_CONTRACTS: Readonly<Record<BitgetReadEndpoint,
     [BITGET_READ_ENDPOINTS.SERVER_TIME]: Object.freeze({
       kind: 'PUBLIC_READ' as const, required: Object.freeze([]), optional: Object.freeze([]),
     }),
-    [BITGET_READ_ENDPOINTS.MIX_TICKERS]: Object.freeze({
+    [BITGET_READ_ENDPOINTS.CONTRACTS]: Object.freeze({
       kind: 'PUBLIC_READ' as const,
       required: Object.freeze(['productType']),
       optional: Object.freeze(['symbol']),
     }),
-    [BITGET_READ_ENDPOINTS.MIX_ACCOUNTS]: Object.freeze({
+    [BITGET_READ_ENDPOINTS.SYMBOL_PRICE]: Object.freeze({
+      kind: 'PUBLIC_READ' as const,
+      required: Object.freeze(['productType', 'symbol']),
+      optional: Object.freeze([]),
+    }),
+    [BITGET_READ_ENDPOINTS.ACCOUNTS]: Object.freeze({
       kind: 'AUTHENTICATED_READ' as const,
       required: Object.freeze(['productType']),
       optional: Object.freeze(['marginCoin']),
     }),
-    [BITGET_READ_ENDPOINTS.MIX_POSITIONS]: Object.freeze({
+    [BITGET_READ_ENDPOINTS.POSITIONS]: Object.freeze({
       kind: 'AUTHENTICATED_READ' as const,
       required: Object.freeze(['productType']),
-      optional: Object.freeze(['symbol', 'marginCoin']),
+      optional: Object.freeze(['marginCoin']),
+    }),
+    [BITGET_READ_ENDPOINTS.PENDING_ORDERS]: Object.freeze({
+      kind: 'AUTHENTICATED_READ' as const,
+      required: Object.freeze(['productType']),
+      optional: Object.freeze(['symbol']),
+    }),
+    [BITGET_READ_ENDPOINTS.FILLS]: Object.freeze({
+      kind: 'AUTHENTICATED_READ' as const,
+      required: Object.freeze(['productType']),
+      optional: Object.freeze(['symbol', 'limit']),
     }),
   });
 
 const QUERY_NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]{0,31}$/;
 const SYMBOL_PATTERN = /^[A-Z0-9]{2,24}$/;
-const MARGIN_COIN_PATTERN = /^[A-Z0-9]{2,10}$/;
+const LIMIT_PATTERN = /^[0-9]{1,3}$/;
 
 export class BitgetReadContractError extends Error {
   constructor(readonly code: string) {
@@ -106,8 +138,8 @@ function fail(code: string): never {
 }
 
 /**
- * RFC 3986 percent encoding: encodeURIComponent leaves !'()* unescaped, which is not canonical
- * for a query component, so those are escaped explicitly.
+ * RFC 3986 percent encoding: encodeURIComponent leaves !'()* unescaped, which is not canonical for a
+ * query component, so those are escaped explicitly.
  */
 function encodeComponent(value: string): string {
   return encodeURIComponent(value).replace(
@@ -149,10 +181,11 @@ export function bitgetEndpointContract(endpoint: unknown): BitgetEndpointContrac
 
 /** Per-endpoint value validation. Unknown parameter names are rejected, not silently forwarded. */
 export function bitgetQueryValueValid(endpoint: BitgetReadEndpoint, name: string, value: string): boolean {
-  if (name === 'productType') return value === PRODUCT_TYPE_USDT_FUTURES;
-  if (name === 'symbol') return SYMBOL_PATTERN.test(value);
-  if (name === 'marginCoin') return MARGIN_COIN_PATTERN.test(value);
   void endpoint;
+  if (name === 'productType') return value === BITGET_L1A_PRODUCT_TYPE;
+  if (name === 'marginCoin') return value === BITGET_L1A_MARGIN_COIN;
+  if (name === 'symbol') return SYMBOL_PATTERN.test(value);
+  if (name === 'limit') return LIMIT_PATTERN.test(value) && Number(value) >= 1 && Number(value) <= 100;
   return false;
 }
 
@@ -160,3 +193,54 @@ export const BITGET_READ_TIMESTAMP_PATTERN: RegExp = /^[0-9]{1,20}$/;
 export const BITGET_READ_API_CODE_PATTERN: RegExp = /^[0-9]{1,8}$/;
 export const BITGET_READ_SUCCESS_CODE = '00000' as const;
 export const MAX_BITGET_ERROR_BODY_CHARACTERS = 4_096 as const;
+
+// ── L1A read result vocabulary ──────────────────────────────────────────────────────────────────
+
+export type BitgetReadAvailability = 'AVAILABLE' | 'UNKNOWN' | 'UNAVAILABLE';
+export type BitgetReadFreshness = 'FRESH' | 'STALE' | 'UNKNOWN';
+
+/** Fail-closed reason vocabulary. Never collapse these into a single generic failure. */
+export type BitgetReadFailureReason =
+  | 'BITGET_AUTH_READ_NOT_CONFIGURED'
+  | 'BITGET_READ_CREDENTIALS_UNAVAILABLE'
+  | 'BITGET_READ_CLIENT_UNAVAILABLE'
+  | 'BITGET_READ_TRANSPORT_FAILED'
+  | 'BITGET_READ_API_REJECTED'
+  | 'BITGET_SERVER_TIME_INVALID'
+  | 'BITGET_CLOCK_SKEW_INVALID'
+  | 'ACCOUNT_TRUTH_MISSING'
+  | 'ACCOUNT_TRUTH_MALFORMED'
+  | 'POSITION_TRUTH_MALFORMED'
+  | 'POSITION_TRUTH_UNKNOWN'
+  | 'OPEN_ORDERS_MALFORMED'
+  | 'FILLS_MALFORMED'
+  | 'MARK_PRICE_UNKNOWN'
+  | 'MARK_PRICE_STALE'
+  | 'MARKET_RULES_UNKNOWN'
+  | 'CONTRACT_NOT_OPENABLE'
+  | 'INSTRUMENT_FACTS_MALFORMED'
+  | 'OBSERVATION_TIME_INVALID'
+  | 'OBSERVATION_TIME_FUTURE';
+
+/**
+ * Result envelope. `UNKNOWN` lives here, never inside a factual value: an unavailable or malformed
+ * observation is `availability !== 'AVAILABLE'` with `value === null`, so it can never be mistaken
+ * for a factual FLAT/zero state.
+ */
+export interface BitgetReadResult<T> {
+  readonly availability: BitgetReadAvailability;
+  readonly value: T | null;
+  readonly reason: BitgetReadFailureReason | null;
+}
+
+export function availableBitget<T>(value: T): BitgetReadResult<T> {
+  return Object.freeze({ availability: 'AVAILABLE' as const, value, reason: null });
+}
+
+export function unavailableBitget<T>(reason: BitgetReadFailureReason): BitgetReadResult<T> {
+  return Object.freeze({ availability: 'UNAVAILABLE' as const, value: null, reason });
+}
+
+export function unknownBitget<T>(reason: BitgetReadFailureReason): BitgetReadResult<T> {
+  return Object.freeze({ availability: 'UNKNOWN' as const, value: null, reason });
+}

@@ -231,7 +231,7 @@ describe('Bitget L0 transport foundation', () => {
     const transport = createBitgetReadTransport(fetchImpl);
     await assert.rejects(
       () => transport.get({
-        endpoint: BITGET_READ_ENDPOINTS.MIX_ACCOUNTS,
+        endpoint: BITGET_READ_ENDPOINTS.ACCOUNTS,
         query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
         timestamp: FIXTURE_TIMESTAMP,
       }),
@@ -246,7 +246,7 @@ describe('Bitget L0 transport foundation', () => {
     const transport = createBitgetReadTransport(fetchImpl);
     await assert.rejects(
       () => transport.get({
-        endpoint: BITGET_READ_ENDPOINTS.MIX_ACCOUNTS,
+        endpoint: BITGET_READ_ENDPOINTS.ACCOUNTS,
         query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
         credential: { apiKey: FIXTURE_API_KEY_DO_NOT_LEAK, passphrase: FIXTURE_PASSPHRASE_DO_NOT_LEAK } as never,
         timestamp: FIXTURE_TIMESTAMP,
@@ -261,7 +261,7 @@ describe('Bitget L0 transport foundation', () => {
     const { fetchImpl, captured } = recordingFetch(() => jsonResponse(200, okEnvelope({})));
     const transport = createBitgetReadTransport(fetchImpl);
     const base = {
-      endpoint: BITGET_READ_ENDPOINTS.MIX_ACCOUNTS,
+      endpoint: BITGET_READ_ENDPOINTS.ACCOUNTS,
       query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
     };
     await assert.rejects(
@@ -290,7 +290,7 @@ describe('Bitget L0 transport foundation', () => {
     const { fetchImpl, captured } = recordingFetch(() => jsonResponse(200, okEnvelope([])));
     const transport = createBitgetReadTransport(fetchImpl);
     await transport.get({
-      endpoint: BITGET_READ_ENDPOINTS.MIX_POSITIONS,
+      endpoint: BITGET_READ_ENDPOINTS.POSITIONS,
       query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
       credential,
       timestamp: FIXTURE_TIMESTAMP,
@@ -306,7 +306,7 @@ describe('Bitget L0 transport foundation', () => {
     const { fetchImpl, captured } = recordingFetch(() => jsonResponse(200, okEnvelope([])));
     const transport = createBitgetReadTransport(fetchImpl);
     await transport.get({
-      endpoint: BITGET_READ_ENDPOINTS.MIX_POSITIONS,
+      endpoint: BITGET_READ_ENDPOINTS.POSITIONS,
       query: [
         { name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES },
         { name: 'marginCoin', value: 'USDT' },
@@ -316,13 +316,13 @@ describe('Bitget L0 transport foundation', () => {
     });
     const capturedUrl = captured[0]?.url ?? '';
     const expectedQuery = 'marginCoin=USDT&productType=USDT-FUTURES';
-    assert.equal(capturedUrl, `${BITGET_L0_PRODUCTION_ORIGIN}${BITGET_READ_ENDPOINTS.MIX_POSITIONS}?${expectedQuery}`);
+    assert.equal(capturedUrl, `${BITGET_L0_PRODUCTION_ORIGIN}${BITGET_READ_ENDPOINTS.POSITIONS}?${expectedQuery}`);
     assert.equal(capturedUrl.includes('ACCESS-SIGN'), false);
     assert.equal(capturedUrl.includes('signature'), false);
     // Signing uses exactly the emitted bytes: recomputed independently here.
     const headers = (captured[0]?.init.headers ?? {}) as Record<string, string>;
     const expected = createHmac('sha256', FIXTURE_SECRET_DO_NOT_LEAK)
-      .update(`${FIXTURE_TIMESTAMP}GET${BITGET_READ_ENDPOINTS.MIX_POSITIONS}?${expectedQuery}`, 'utf8')
+      .update(`${FIXTURE_TIMESTAMP}GET${BITGET_READ_ENDPOINTS.POSITIONS}?${expectedQuery}`, 'utf8')
       .digest('base64');
     assert.equal(headers['ACCESS-SIGN'], expected);
   });
@@ -364,7 +364,7 @@ describe('Bitget L0 transport foundation', () => {
     }));
     await assert.rejects(
       () => createBitgetReadTransport(fetchImpl).get({
-        endpoint: BITGET_READ_ENDPOINTS.MIX_ACCOUNTS,
+        endpoint: BITGET_READ_ENDPOINTS.ACCOUNTS,
         query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
         credential,
         timestamp: FIXTURE_TIMESTAMP,
@@ -416,7 +416,7 @@ describe('Bitget L0 transport foundation', () => {
     ]) {
       const { fetchImpl } = recordingFetch(responder);
       const error = await createBitgetReadTransport(fetchImpl).get({
-        endpoint: BITGET_READ_ENDPOINTS.MIX_POSITIONS,
+        endpoint: BITGET_READ_ENDPOINTS.POSITIONS,
         query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
         credential,
         timestamp: FIXTURE_TIMESTAMP,
@@ -430,7 +430,7 @@ describe('Bitget L0 transport foundation', () => {
   it('22. credential fixtures cannot reach a serialized error', async () => {
     const { fetchImpl } = recordingFetch(() => jsonResponse(403, { code: '40006', msg: 'denied' }));
     const error = await createBitgetReadTransport(fetchImpl).get({
-      endpoint: BITGET_READ_ENDPOINTS.MIX_ACCOUNTS,
+      endpoint: BITGET_READ_ENDPOINTS.ACCOUNTS,
       query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
       credential,
       timestamp: FIXTURE_TIMESTAMP,
@@ -467,7 +467,7 @@ describe('Bitget L0 transport foundation', () => {
     }));
     const transport = createBitgetReadTransport(fetchImpl);
     assert.deepEqual(await transport.get({
-      endpoint: BITGET_READ_ENDPOINTS.MIX_TICKERS,
+      endpoint: BITGET_READ_ENDPOINTS.CONTRACTS,
       query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }, { name: 'symbol', value: 'ETHUSDT' }],
     }), [payload]);
   });
@@ -480,7 +480,7 @@ describe('Bitget L0 transport foundation', () => {
     assert.deepEqual(getBitgetReadRequestCount(transportA), { total: 0, byEndpoint: {} });
     await transportA.get({ endpoint: BITGET_READ_ENDPOINTS.SERVER_TIME, query: [] });
     await transportA.get({
-      endpoint: BITGET_READ_ENDPOINTS.MIX_TICKERS,
+      endpoint: BITGET_READ_ENDPOINTS.CONTRACTS,
       query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
     });
     await assert.rejects(() => transportA.get({ endpoint: 'nope' as never, query: [] }));
@@ -488,7 +488,7 @@ describe('Bitget L0 transport foundation', () => {
       total: 2,
       byEndpoint: {
         [BITGET_READ_ENDPOINTS.SERVER_TIME]: 1,
-        [BITGET_READ_ENDPOINTS.MIX_TICKERS]: 1,
+        [BITGET_READ_ENDPOINTS.CONTRACTS]: 1,
       },
     });
     assert.deepEqual(getBitgetReadRequestCount(transportB), { total: 0, byEndpoint: {} });
@@ -499,13 +499,13 @@ describe('Bitget L0 transport foundation', () => {
     const { fetchImpl, captured } = recordingFetch(() => jsonResponse(200, okEnvelope([])));
     const transport = createBitgetReadTransport(fetchImpl);
     await transport.get({
-      endpoint: BITGET_READ_ENDPOINTS.MIX_TICKERS,
+      endpoint: BITGET_READ_ENDPOINTS.CONTRACTS,
       query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
     });
     const publicInit = captured[0]?.init as RequestInit;
     assert.equal(publicInit.headers, undefined);
     await transport.get({
-      endpoint: BITGET_READ_ENDPOINTS.MIX_ACCOUNTS,
+      endpoint: BITGET_READ_ENDPOINTS.ACCOUNTS,
       query: [{ name: 'productType', value: PRODUCT_TYPE_USDT_FUTURES }],
       credential,
       timestamp: FIXTURE_TIMESTAMP,
@@ -522,8 +522,10 @@ describe('Bitget L0 transport foundation', () => {
 
   it('28. endpoint allowlist is closed and unverified families stay deferred to L1A', () => {
     assert.deepEqual(Object.values(BITGET_READ_ENDPOINTS), [
-      '/api/v2/public/time', '/api/v2/mix/market/tickers',
-      '/api/v2/mix/account/accounts', '/api/v2/mix/position/all',
+      '/api/v2/public/time', '/api/v2/mix/market/contracts',
+      '/api/v2/mix/market/symbol-price', '/api/v2/mix/account/accounts',
+      '/api/v2/mix/position/all-position', '/api/v2/mix/order/orders-pending',
+      '/api/v2/mix/order/fills',
     ]);
     assert.equal(BITGET_L0_PRODUCTION_ORIGIN, 'https://api.bitget.com');
     for (const deferred of BITGET_READ_ENDPOINTS_REQUIRING_L1A_VERIFICATION) {
