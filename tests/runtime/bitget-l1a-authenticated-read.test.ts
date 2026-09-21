@@ -766,7 +766,9 @@ describe('Bitget L1A security boundary', () => {
         .split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
       assert.equal(/process\.env\s*\[/.test(source), false, `env lookup in ${file}`);
       assert.equal(/dotenv/.test(source), false, `dotenv in ${file}`);
-      if (file === 'BitgetReadTransport.ts') continue; // defines the closed production factory itself
+      // The transport module defines the closed production factory and the real-read runner is the
+      // single intended production consumer of it; every other runtime file must stay unwired.
+      if (file === 'BitgetReadTransport.ts' || file === 'BitgetRealReadExecutionRunner.ts') continue;
       assert.equal(/createProductionBitgetReadTransport\s*\(/.test(source), false, `production transport in ${file}`);
     }
   });
