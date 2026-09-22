@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
+  BITGET_REAL_READ_AUTHORIZATION_REQUIRED,
   BITGET_REAL_READ_MODES,
   BITGET_REAL_READ_SCHEMA_VERSION,
   MAX_BITGET_REAL_READ_GETS,
@@ -173,6 +174,18 @@ describe('Bitget L1A real read execution prep', () => {
       '/api/v2/mix/market/contracts': 1,
       '/api/v2/mix/market/symbol-price': 1,
     });
+    assert.deepEqual(value.REQUEST_SEQUENCE, [
+      BITGET_READ_ENDPOINTS.SERVER_TIME,
+      BITGET_READ_ENDPOINTS.SERVER_TIME,
+      BITGET_READ_ENDPOINTS.ACCOUNTS,
+      BITGET_READ_ENDPOINTS.POSITIONS,
+      BITGET_READ_ENDPOINTS.PENDING_ORDERS,
+      BITGET_READ_ENDPOINTS.FILLS,
+      BITGET_READ_ENDPOINTS.SERVER_TIME,
+      BITGET_READ_ENDPOINTS.CONTRACTS,
+      BITGET_READ_ENDPOINTS.SYMBOL_PRICE,
+    ]);
+    assert.equal(value.REQUEST_SEQUENCE.length, value.NETWORK_REQUEST_COUNT);
     assert.equal(value.ENTRY_READINESS?.safeToOpen, true);
     assertNoLeak(value);
   });
@@ -223,6 +236,41 @@ describe('Bitget L1A real read execution prep', () => {
     }
   });
 
+  it('6b. production provenance without explicit authorization fails before ambient fetch', async () => {
+    const original = globalThis.fetch;
+    try {
+      for (const authorization of [undefined, false] as const) {
+        const fake = fixtureFetch({});
+        (globalThis as { fetch: unknown }).fetch = fake.fetchImpl;
+        const runner = createBitgetRealReadRunner({
+          credential,
+          identity,
+          now: () => BASE_MS,
+          runId: `unauthorized-${String(authorization)}`,
+          ...(authorization === undefined ? {} : { realReadAuthorized: authorization }),
+        });
+        const value = await runner.run();
+        assert.equal(runner.productionTransportProvenance(), true);
+        assert.equal(runner.requestCount(), 0);
+        assert.equal(fake.captured.length, 0, 'ambient fetch must remain uncalled');
+        assert.equal(value.FAILURE_REASON, BITGET_REAL_READ_AUTHORIZATION_REQUIRED);
+        assert.equal(value.MODE, BITGET_REAL_READ_MODES.OFFLINE_SIMULATION);
+        assert.equal(value.NETWORK_REQUEST_COUNT, 0);
+        assert.deepEqual(value.REQUEST_SEQUENCE, []);
+        assert.equal(value.SERVER_TIME_PREFLIGHT_PERFORMED, false);
+        assert.equal(value.ACCOUNT_TRUTH_AVAILABLE, false);
+        assert.equal(value.INSTRUMENT_FACTS_AVAILABLE, false);
+        assert.equal(value.PRODUCTION_CONNECTIVITY_VERIFIED, false);
+        assert.equal(value.REAL_READ_VERIFIED, false);
+        assert.equal(value.EXECUTION_AUTHORITY, false);
+        assert.equal(value.LIVE_READY, false);
+        assertNoLeak(value);
+      }
+    } finally {
+      (globalThis as { fetch: unknown }).fetch = original;
+    }
+  });
+
   it('7. no injected credential means zero requests and a sanitized reason', async () => {
     const { receipt, captured } = run({}, { credential: null });
     const value = await receipt();
@@ -241,11 +289,13 @@ describe('Bitget L1A real read execution prep', () => {
     assert.equal(invalid.FAILURE_REASON, 'BITGET_SERVER_TIME_INVALID');
     assert.equal(invalid.SERVER_TIME_OBSERVED, false);
     assert.equal(invalid.NETWORK_REQUEST_COUNT, 1, 'preflight only');
+    assert.deepEqual(invalid.REQUEST_SEQUENCE, [BITGET_READ_ENDPOINTS.SERVER_TIME]);
     assert.equal(invalid.ACCOUNT_TRUTH_AVAILABLE, false);
 
     const skewed = await run({ serverTime: { serverTime: String(BASE_MS + 90_000) } }).receipt();
     assert.equal(skewed.FAILURE_REASON, 'BITGET_CLOCK_SKEW_INVALID');
     assert.equal(skewed.NETWORK_REQUEST_COUNT, 1);
+    assert.deepEqual(skewed.REQUEST_SEQUENCE, [BITGET_READ_ENDPOINTS.SERVER_TIME]);
     assert.equal(skewed.DIAGNOSTICS[0]?.reason, 'BITGET_CLOCK_SKEW_INVALID');
   });
 
@@ -254,6 +304,7 @@ describe('Bitget L1A real read execution prep', () => {
     const value = await receipt();
     assert.equal(value.FAILURE_REASON, 'BITGET_READ_TRANSPORT_FAILED');
     assert.equal(value.NETWORK_REQUEST_COUNT, 1);
+    assert.deepEqual(value.REQUEST_SEQUENCE, [BITGET_READ_ENDPOINTS.SERVER_TIME]);
     assert.equal(value.DIAGNOSTICS.length, 1);
     const diagnostic = value.DIAGNOSTICS[0];
     assert.equal(diagnostic?.phase, 'SERVER_TIME_PREFLIGHT');
@@ -280,6 +331,12 @@ describe('Bitget L1A real read execution prep', () => {
     assert.equal(value.INSTRUMENT_FACTS_AVAILABLE, false);
     assert.equal(value.ACCOUNT_STATE, null, 'malformed positions must never become FLAT');
     assert.equal(value.NETWORK_REQUEST_COUNT, 4, 'preflight + foundation server-time + accounts + positions');
+    assert.deepEqual(value.REQUEST_SEQUENCE, [
+      BITGET_READ_ENDPOINTS.SERVER_TIME,
+      BITGET_READ_ENDPOINTS.SERVER_TIME,
+      BITGET_READ_ENDPOINTS.ACCOUNTS,
+      BITGET_READ_ENDPOINTS.POSITIONS,
+    ]);
     assert.equal(value.REQUEST_COUNT_BY_ENDPOINT['/api/v2/mix/market/contracts'] ?? 0, 0);
     assert.equal(value.DIAGNOSTICS[0]?.reason, 'POSITION_TRUTH_MALFORMED');
   });
@@ -338,5 +395,17 @@ describe('Bitget L1A real read execution prep', () => {
     assert.equal(captured.some((request) => request.url.includes('symbol=BTCUSDT')), true);
     assert.equal(value.INSTRUMENT_FACTS_AVAILABLE, false, 'contracts fixture has no BTCUSDT entry');
     assert.equal(value.FAILURE_REASON, 'MARKET_RULES_UNKNOWN');
+    assert.equal(value.NETWORK_REQUEST_COUNT, 8);
+    assert.deepEqual(value.REQUEST_SEQUENCE, [
+      BITGET_READ_ENDPOINTS.SERVER_TIME,
+      BITGET_READ_ENDPOINTS.SERVER_TIME,
+      BITGET_READ_ENDPOINTS.ACCOUNTS,
+      BITGET_READ_ENDPOINTS.POSITIONS,
+      BITGET_READ_ENDPOINTS.PENDING_ORDERS,
+      BITGET_READ_ENDPOINTS.FILLS,
+      BITGET_READ_ENDPOINTS.SERVER_TIME,
+      BITGET_READ_ENDPOINTS.CONTRACTS,
+    ]);
+    assert.equal(value.REQUEST_COUNT_BY_ENDPOINT[BITGET_READ_ENDPOINTS.SYMBOL_PRICE] ?? 0, 0);
   });
 });

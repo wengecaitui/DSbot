@@ -91,6 +91,7 @@ export interface BitgetProductionReadTransport extends BitgetReadTransport {
 interface BitgetRequestCounters {
   total: number;
   byEndpoint: Map<string, number>;
+  sequence: BitgetReadEndpoint[];
 }
 
 interface ValidatedRequest {
@@ -283,7 +284,11 @@ function authenticatedHeaders(
 }
 
 function createReadTransport(fetchImpl: BitgetReadFetch): BitgetReadTransport {
-  const counters: BitgetRequestCounters = { total: 0, byEndpoint: new Map<string, number>() };
+  const counters: BitgetRequestCounters = {
+    total: 0,
+    byEndpoint: new Map<string, number>(),
+    sequence: [],
+  };
   const transport = {
     async get(request: BitgetReadTransportRequest): Promise<unknown> {
       const validated = validateRequest(request);
@@ -294,6 +299,7 @@ function createReadTransport(fetchImpl: BitgetReadFetch): BitgetReadTransport {
       const headers = authenticatedHeaders(validated);
       counters.total += 1;
       counters.byEndpoint.set(validated.endpoint, (counters.byEndpoint.get(validated.endpoint) ?? 0) + 1);
+      counters.sequence.push(validated.endpoint);
       let response: BitgetReadResponse;
       try {
         response = await fetchImpl(url, Object.freeze({
@@ -378,6 +384,14 @@ export function getBitgetReadRequestCount(transport: unknown): BitgetReadRequest
     total: counters.total,
     byEndpoint: Object.freeze(Object.fromEntries(counters.byEndpoint)),
   });
+}
+
+/** Ordered endpoints actually issued through the same private instrumentation as request counts. */
+export function getBitgetReadRequestSequence(transport: unknown): readonly BitgetReadEndpoint[] | null {
+  if (typeof transport !== 'object' || transport === null) return null;
+  const counters = REQUEST_COUNTERS.get(transport);
+  if (counters === undefined) return null;
+  return Object.freeze([...counters.sequence]);
 }
 
 export { BITGET_READ_ENDPOINTS, BITGET_L0_PRODUCTION_ORIGIN };

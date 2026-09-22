@@ -34,6 +34,7 @@ import {
   createBitgetReadTransport,
   createProductionBitgetReadTransport,
   getBitgetReadRequestCount,
+  getBitgetReadRequestSequence,
   hasProductionBitgetReadTransportProvenance,
   type BitgetReadFetch,
 } from './BitgetReadTransport';
@@ -73,6 +74,7 @@ export const MAX_BITGET_REAL_READ_ACCOUNT_GETS = BITGET_Q0_MAX_ACCOUNT_SNAPSHOT_
 export const MAX_BITGET_REAL_READ_INSTRUMENT_GETS = BITGET_Q0_MAX_INSTRUMENT_SNAPSHOT_GETS;
 
 export const BITGET_REAL_READ_BUDGET_EXCEEDED = 'BITGET_REAL_READ_BUDGET_EXCEEDED' as const;
+export const BITGET_REAL_READ_AUTHORIZATION_REQUIRED = 'BITGET_REAL_READ_AUTHORIZATION_REQUIRED' as const;
 
 /** Sanitized diagnostic: code/status/reason only - never a body, exchange message or credential. */
 export interface BitgetReadDiagnostic {
@@ -240,8 +242,6 @@ export function createBitgetRealReadRunner(options: BitgetRealReadRunnerOptions)
   const productionProvenance = hasProductionBitgetReadTransportProvenance(transport);
 
   const diagnostics: BitgetReadDiagnostic[] = [];
-  const requestSequence: string[] = [];
-
   function counter(): { total: number; byEndpoint: Readonly<Record<string, number>> } {
     const counts = getBitgetReadRequestCount(transport);
     return counts ?? { total: 0, byEndpoint: Object.freeze({}) };
@@ -254,13 +254,15 @@ export function createBitgetRealReadRunner(options: BitgetRealReadRunnerOptions)
     let instrumentFacts: { availability: string; value: BitgetCanonicalInstrumentFacts | null; reason: BitgetReadFailureReason | null } | null = null;
     let failureReason: BitgetReadFailureReason | string | null = null;
 
-    if (credential === null) {
+    if (productionProvenance && !realReadAuthorized) {
+      // Production provenance is a capability, not authorization. Refuse before the first GET.
+      failureReason = BITGET_REAL_READ_AUTHORIZATION_REQUIRED;
+    } else if (credential === null) {
       failureReason = 'BITGET_READ_CREDENTIALS_UNAVAILABLE';
     } else {
       // Phase 1: server-time preflight (public, exactly one GET). Issued through the L0 transport
       // directly so the sanitized diagnostic keeps the exchange's numeric rejection code.
       serverTimePreflightPerformed = true;
-      requestSequence.push(BITGET_READ_ENDPOINTS.SERVER_TIME);
       try {
         const startedMs = clock.now();
         const payload = await transport.get({
@@ -298,18 +300,9 @@ export function createBitgetRealReadRunner(options: BitgetRealReadRunnerOptions)
         });
         // Phase 2: account truth (<= 5 GETs).
         accountTruth = await foundation.accountTruth();
-        for (const endpoint of [
-          BITGET_READ_ENDPOINTS.ACCOUNTS,
-          BITGET_READ_ENDPOINTS.POSITIONS,
-          BITGET_READ_ENDPOINTS.PENDING_ORDERS,
-          BITGET_READ_ENDPOINTS.FILLS,
-        ]) {
-          requestSequence.push(endpoint);
-        }
         if (accountTruth.availability === 'AVAILABLE') {
           // Phase 3: instrument facts (<= 3 GETs).
           instrumentFacts = await foundation.instrumentFacts(symbol);
-          requestSequence.push(BITGET_READ_ENDPOINTS.CONTRACTS, BITGET_READ_ENDPOINTS.SYMBOL_PRICE);
           if (instrumentFacts.availability !== 'AVAILABLE') {
             failureReason = instrumentFacts.reason ?? 'INSTRUMENT_FACTS_MALFORMED';
             diagnostics.push(sanitizeError(
@@ -372,7 +365,7 @@ export function createBitgetRealReadRunner(options: BitgetRealReadRunnerOptions)
       REQUEST_COUNT_BY_ENDPOINT: counts.byEndpoint,
       MAX_REAL_READ_GETS: MAX_BITGET_REAL_READ_GETS,
       GETS_WITHIN_BUDGET: budget.withinBudget,
-      REQUEST_SEQUENCE: Object.freeze([...requestSequence]),
+      REQUEST_SEQUENCE: getBitgetReadRequestSequence(transport) ?? Object.freeze([]),
       DIAGNOSTICS: Object.freeze([...diagnostics]),
       FAILURE_REASON: failureReason,
       // Authority is fixed false in this phase: verification belongs to the auditor, not the runner.
