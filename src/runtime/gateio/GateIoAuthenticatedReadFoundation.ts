@@ -55,8 +55,15 @@ export interface GateIoCanonicalAccount {
   readonly orderMargin: number | null;
   readonly inDualMode: boolean | null;
   readonly positionMode: string | null;
-  readonly marginMode: string | null;
+  readonly marginMode: GateIoAccountMarginMode | null;
 }
+
+/**
+ * Gate reports the account margin mode as a numeric code, not as text:
+ * 0 classic | 1 multi-currency | 2 portfolio | 3 single-currency. The code is kept as a number — it is
+ * never rendered as a string — and any other value or type fails closed rather than being coerced.
+ */
+export type GateIoAccountMarginMode = 0 | 1 | 2 | 3;
 
 export type GateIoPositionMode = 'single' | 'dual_long' | 'dual_short';
 
@@ -256,6 +263,13 @@ function optionalText(value: unknown): string | null {
   malformed('ACCOUNT_TRUTH_MALFORMED');
 }
 
+/** Gate reports the account margin mode as a numeric code; anything else fails closed instead of coercing. */
+function accountMarginMode(value: unknown): GateIoAccountMarginMode | null {
+  if (value === undefined || value === null) return null;
+  if (value === 0 || value === 1 || value === 2 || value === 3) return value;
+  malformed('ACCOUNT_TRUTH_MALFORMED');
+}
+
 function text(value: unknown): string {
   if (typeof value === 'string' && value.length > 0) return value;
   malformed('ACCOUNT_TRUTH_MALFORMED');
@@ -295,7 +309,7 @@ export function normalizeGateIoAccount(raw: unknown): GateIoCanonicalAccount {
       orderMargin: optionalDecimal(raw.order_margin),
       inDualMode: optionalBoolean(raw.in_dual_mode),
       positionMode: optionalText(raw.position_mode),
-      marginMode: optionalText(raw.margin_mode),
+      marginMode: accountMarginMode(raw.margin_mode),
     });
   });
 }

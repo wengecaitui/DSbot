@@ -54,7 +54,7 @@ const identity: GateIoReadIdentity = Object.freeze({
 
 const accountFixture = Object.freeze({
   currency: 'USDT', total: '1000.5', available: '900.25', unrealised_pnl: '4.5',
-  order_margin: '10', in_dual_mode: false, position_mode: 'single', margin_mode: 'cross',
+  order_margin: '10', in_dual_mode: false, position_mode: 'single', margin_mode: 0,
 });
 const positionFixture = Object.freeze({
   contract: GATEIO_L0_INITIAL_CONTRACT, size: '2', mode: 'single', pos_margin_mode: 'cross',
@@ -267,7 +267,7 @@ describe('Gate.io L1A strict canonical normalization', () => {
   it('normalizes classic and unified-account-compatible facts without inventing zeroes', () => {
     assert.deepEqual(normalizeGateIoAccount(accountFixture), {
       currency: 'USDT', total: 1000.5, available: 900.25, unrealizedPnl: 4.5,
-      orderMargin: 10, inDualMode: false, positionMode: 'single', marginMode: 'cross',
+      orderMargin: 10, inDualMode: false, positionMode: 'single', marginMode: 0,
     });
     assert.deepEqual(normalizeGateIoAccount({
       currency: 'usdt', total: '8', available: '7', in_dual_mode: true, position_mode: 'dual',
@@ -281,6 +281,22 @@ describe('Gate.io L1A strict canonical normalization', () => {
     assert.throws(() => normalizeGateIoAccount({
       currency: 'USDT', total: '1', available: '1', order_margin: '',
     }));
+  });
+
+  it('accepts only the reported numeric account margin modes and fails closed on anything else', () => {
+    const withMarginMode = (margin_mode: unknown) => ({ ...accountFixture, margin_mode });
+    for (const margin_mode of [0, 1, 2, 3]) {
+      assert.equal(normalizeGateIoAccount(withMarginMode(margin_mode)).marginMode, margin_mode);
+    }
+    for (const absent of [null, undefined]) {
+      assert.equal(normalizeGateIoAccount(withMarginMode(absent)).marginMode, null);
+    }
+    const withoutField: Record<string, unknown> = { ...accountFixture };
+    delete withoutField.margin_mode;
+    assert.equal(normalizeGateIoAccount(withoutField).marginMode, null);
+    for (const rejected of [-1, 4, '0', '', Number.NaN, 'cross', 1.5, true]) {
+      assert.throws(() => normalizeGateIoAccount(withMarginMode(rejected)));
+    }
   });
 
   it('preserves signed single/dual positions and validates nonzero prices', () => {
