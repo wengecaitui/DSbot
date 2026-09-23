@@ -96,6 +96,7 @@ export interface GateIoCanonicalTrade {
   readonly orderId: string;
   readonly contract: typeof GATEIO_L0_INITIAL_CONTRACT;
   readonly signedSize: number;
+  /** Signed as reported by Gate: 0, positive or negative are all legal factual values. */
   readonly closeSize: number;
   readonly price: number;
   readonly clientText: string | null;
@@ -103,6 +104,7 @@ export interface GateIoCanonicalTrade {
   readonly pointFee: number;
   readonly role: 'maker' | 'taker';
   readonly tradeValue: number;
+  /** Gate epoch seconds; fractional seconds are preserved exactly as reported. */
   readonly createdAt: number;
 }
 
@@ -224,13 +226,22 @@ function optionalDecimal(value: unknown): number | null {
   return decimal(value);
 }
 
-function integer(value: unknown, optional = false): number | null {
-  if (optional && (value === undefined || value === null)) return null;
+/**
+ * Strict Gate epoch-time parser. Gate reports create/update times as doubles, so fractional seconds
+ * are legitimate facts and are preserved exactly — never rounded, floored or truncated. Only a finite
+ * positive number, or a positive plain-decimal numeric string, is accepted.
+ */
+function timestamp(value: unknown): number {
   const parsed = typeof value === 'number'
     ? value
-    : typeof value === 'string' && /^[0-9]+$/.test(value) ? Number(value) : Number.NaN;
-  if (!Number.isSafeInteger(parsed) || parsed < 0) malformed('ACCOUNT_TRUTH_MALFORMED');
+    : typeof value === 'string' && /^[0-9]+(\.[0-9]+)?$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) malformed('ACCOUNT_TRUTH_MALFORMED');
   return parsed;
+}
+
+function optionalTimestamp(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  return timestamp(value);
 }
 
 function identifier(value: unknown): string {
@@ -315,7 +326,7 @@ export function normalizeGateIoPosition(raw: unknown): GateIoCanonicalPosition {
       unrealizedPnl: optionalDecimal(raw.unrealised_pnl),
       realizedPnl: optionalDecimal(raw.realised_pnl),
       margin: optionalDecimal(raw.margin),
-      updatedAt: integer(raw.update_time) as number,
+      updatedAt: timestamp(raw.update_time),
     });
   });
 }
@@ -336,8 +347,8 @@ export function normalizeGateIoOpenOrder(raw: unknown): GateIoCanonicalOpenOrder
       status: 'open' as const,
       reduceOnly: boolean(raw.is_reduce_only),
       close: boolean(raw.is_close),
-      createdAt: integer(raw.create_time) as number,
-      updatedAt: integer(raw.update_time, true),
+      createdAt: timestamp(raw.create_time),
+      updatedAt: optionalTimestamp(raw.update_time),
     });
   });
 }
@@ -351,14 +362,16 @@ export function normalizeGateIoTrade(raw: unknown): GateIoCanonicalTrade {
       orderId: identifier(raw.order_id),
       contract: contract(raw.contract),
       signedSize: decimal(raw.size),
-      closeSize: decimal(raw.close_size, { nonNegative: true }),
+      // Gate reports close_size as a signed factual value: 0, positive and negative are all legal.
+      // The sign is preserved exactly as reported; no open/close direction is derived here.
+      closeSize: decimal(raw.close_size),
       price: decimal(raw.price, { positive: true }),
       clientText: optionalText(raw.text),
       fee: decimal(raw.fee),
       pointFee: decimal(raw.point_fee),
       role: raw.role,
       tradeValue: decimal(raw.trade_value),
-      createdAt: integer(raw.create_time) as number,
+      createdAt: timestamp(raw.create_time),
     });
   });
 }

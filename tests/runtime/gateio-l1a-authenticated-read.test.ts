@@ -331,6 +331,52 @@ describe('Gate.io L1A strict canonical normalization', () => {
     assert.throws(() => normalizeGateIoTrade({ ...tradeFixture, role: 'unknown' }));
   });
 
+  it('preserves signed close_size and fractional trade timestamps', async () => {
+    // P1-1: Gate reports close_size as signed — 0, positive and negative are all legal facts.
+    for (const [raw, expected] of [['0', 0], ['1', 1], ['-1', -1], ['2.5', 2.5], ['-0.75', -0.75]] as const) {
+      assert.equal(normalizeGateIoTrade({ ...tradeFixture, close_size: raw }).closeSize, expected);
+    }
+    const signed = normalizeGateIoTrade({ ...tradeFixture, close_size: '-1' });
+    assert.equal(signed.closeSize, -1);
+    assert.equal(signed.signedSize, -2, 'signedSize stays exchange-native');
+    assert.equal(Object.isFrozen(signed), true);
+    assert.deepEqual(Object.keys(signed).sort(), [
+      'clientText', 'closeSize', 'contract', 'createdAt', 'fee', 'orderId', 'pointFee', 'price',
+      'role', 'signedSize', 'tradeId', 'tradeValue',
+    ], 'no open/close direction may be invented');
+    for (const bad of ['', ' ', null, undefined, Number.NaN, Number.POSITIVE_INFINITY, 'abc']) {
+      assert.throws(() => normalizeGateIoTrade({ ...tradeFixture, close_size: bad }));
+    }
+
+    // P1-2: create_time is a double — fractional seconds survive, never rounded or truncated.
+    for (const raw of [1514764800.123, '1514764800.123'] as const) {
+      const trade = normalizeGateIoTrade({ ...tradeFixture, create_time: raw });
+      assert.equal(trade.createdAt, 1514764800.123);
+      assert.notEqual(Math.floor(trade.createdAt), trade.createdAt);
+    }
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1, 0, -0.5,
+                       '', ' ', 'junk', '12abc', '1e3', '1514764800.', '.5', null, undefined]) {
+      assert.throws(() => normalizeGateIoTrade({ ...tradeFixture, create_time: bad }));
+    }
+    // the same epoch rule applies to the other Gate doubles
+    assert.equal(normalizeGateIoOpenOrder({ ...orderFixture, create_time: '1514764800.5' }).createdAt, 1514764800.5);
+    assert.equal(normalizeGateIoOpenOrder({ ...orderFixture, update_time: '1514764800.25' }).updatedAt, 1514764800.25);
+    assert.equal(normalizeGateIoOpenOrder({ ...orderFixture, update_time: null }).updatedAt, null);
+    assert.equal(normalizeGateIoPosition({ ...positionFixture, update_time: '1514764800.125' }).updatedAt, 1514764800.125);
+    assert.throws(() => normalizeGateIoPosition({ ...positionFixture, update_time: '0' }));
+
+    // and it reaches the canonical account truth unchanged
+    const fractional = foundation({ respond(request) {
+      return request.endpoint === GATEIO_READ_ENDPOINTS.MY_TRADES
+        ? [{ ...tradeFixture, close_size: '-1', create_time: '1514764800.123' }]
+        : fixtureFor(request.endpoint);
+    } });
+    const truth = await fractional.value.accountTruth();
+    assert.equal(truth.availability, 'AVAILABLE');
+    assert.equal(truth.value?.recentTrades[0]?.closeSize, -1);
+    assert.equal(truth.value?.recentTrades[0]?.createdAt, 1514764800.123);
+  });
+
   it('preserves exchange-native Gate contract units and only opens trading/non-delisting', () => {
     const rule = normalizeGateIoContract(contractFixture);
     assert.equal(rule.multiplier, 0.00001);
