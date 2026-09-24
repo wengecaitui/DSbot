@@ -591,6 +591,16 @@ export function createGateIoAuthenticatedReadFoundation(
       const positions = array(
         await client.getPositions(), 'POSITION_TRUTH_MALFORMED',
       ).map(normalizeGateIoPosition);
+      // The L1A canonical scope accepts only ETH_USDT, so prove both factual legs.
+      const modes = positions.map((entry) => entry.mode);
+      if (account.inDualMode === null
+          || (account.inDualMode && (modes.length !== 2
+            || modes.filter((mode) => mode === 'dual_long').length !== 1
+            || modes.filter((mode) => mode === 'dual_short').length !== 1))
+          || (!account.inDualMode && modes.some((mode) => mode !== 'single'))
+          || (!account.inDualMode && modes.length > 1)) {
+        malformed('POSITION_TRUTH_MALFORMED');
+      }
       const openOrders = array(
         await client.getOpenOrders(), 'OPEN_ORDERS_MALFORMED',
       ).map(normalizeGateIoOpenOrder);

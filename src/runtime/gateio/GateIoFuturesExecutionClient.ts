@@ -37,6 +37,41 @@ export const GATEIO_EXECUTION_ORIGINS: Readonly<Record<GateIoEnvironment, string
 
 export const GATEIO_EXECUTION_ORDER_PATH = '/api/v4/futures/usdt/orders' as const;
 export const GATEIO_EXECUTION_POST_RETRY_COUNT = 0 as const;
+export const GATEIO_G3_PROOF_MUTATION_HARD_CAP = 2 as const;
+export const GATEIO_G3_EMERGENCY_CLEANUP_RESERVE = 1 as const;
+export const GATEIO_G3_TOTAL_MUTATION_HARD_CAP = 3 as const;
+
+export type GateIoMutationPurpose = 'PROOF' | 'EMERGENCY_CLEANUP';
+
+/** Explicitly shared across clients in one G3 run; it owns no trading state. */
+export class GateIoG3MutationBudget {
+  private proofMutations = 0;
+  private cleanupMutations = 0;
+
+  private constructor() {}
+
+  static create(): GateIoG3MutationBudget { return new GateIoG3MutationBudget(); }
+
+  consume(purpose: GateIoMutationPurpose, reduceOnly: boolean): void {
+    if ((purpose !== 'PROOF' && purpose !== 'EMERGENCY_CLEANUP')
+        || this.proofMutations + this.cleanupMutations >= GATEIO_G3_TOTAL_MUTATION_HARD_CAP
+        || (purpose === 'PROOF' && this.proofMutations >= GATEIO_G3_PROOF_MUTATION_HARD_CAP)
+        || (purpose === 'EMERGENCY_CLEANUP'
+          && (!reduceOnly || this.cleanupMutations >= GATEIO_G3_EMERGENCY_CLEANUP_RESERVE))) {
+      fail('GATEIO_EXECUTION_MUTATION_CAP_EXCEEDED');
+    }
+    if (purpose === 'PROOF') this.proofMutations += 1;
+    else this.cleanupMutations += 1;
+  }
+
+  snapshot(): Readonly<{ proof: number; cleanup: number; total: number }> {
+    return Object.freeze({
+      proof: this.proofMutations,
+      cleanup: this.cleanupMutations,
+      total: this.proofMutations + this.cleanupMutations,
+    });
+  }
+}
 
 export type GateIoFuturesExecutionFetch = (
   input: string,
@@ -52,18 +87,27 @@ export interface GateIoFuturesExecutionClientOptions {
   readonly fetchImpl: GateIoFuturesExecutionFetch;
   /** Existing L1A canonical truth authority; G2 does not normalize a second instrument model. */
   readonly readFoundation: Pick<GateIoAuthenticatedReadFoundation, 'instrumentFacts'>;
+  /** Mandatory for TestNet G3; optional for separately governed Live wiring. */
+  readonly mutationBudget?: GateIoG3MutationBudget;
 }
 
 export type GateIoFuturesExecutionClientErrorCode =
   | 'GATEIO_EXECUTION_CONFIGURATION_INVALID'
   | 'GATEIO_EXECUTION_REQUEST_INVALID'
+  | 'GATEIO_EXECUTION_MUTATION_CAP_EXCEEDED'
   | 'GATEIO_EXECUTION_SUBMISSION_UNKNOWN';
 
 /** Safe code only: no request, response, raw body, headers, credential, signature, or cause. */
 export class GateIoFuturesExecutionClientError extends Error {
+  readonly decision: 'DENIED' | null;
+  readonly reasonCode: string;
+
   constructor(readonly code: GateIoFuturesExecutionClientErrorCode) {
     super(code);
     this.name = 'GateIoFuturesExecutionClientError';
+    this.decision = code === 'GATEIO_EXECUTION_SUBMISSION_UNKNOWN' ? null : 'DENIED';
+    this.reasonCode = code === 'GATEIO_EXECUTION_MUTATION_CAP_EXCEEDED'
+      ? 'MUTATION_CAP_EXCEEDED' : code;
   }
 }
 
@@ -259,7 +303,11 @@ export function createGateIoFuturesExecutionClient(
       || typeof options.signedTimestamp !== 'function'
       || typeof options.fetchImpl !== 'function'
       || !isRecord(options.readFoundation)
-      || typeof options.readFoundation.instrumentFacts !== 'function') {
+      || typeof options.readFoundation.instrumentFacts !== 'function'
+      || (options.environment === 'testnet'
+        && !(options.mutationBudget instanceof GateIoG3MutationBudget))
+      || (options.mutationBudget !== undefined
+        && !(options.mutationBudget instanceof GateIoG3MutationBudget))) {
     fail('GATEIO_EXECUTION_CONFIGURATION_INVALID');
   }
   const origin = GATEIO_EXECUTION_ORIGINS[options.environment];
@@ -269,7 +317,13 @@ export function createGateIoFuturesExecutionClient(
     method: 'GET' | 'POST',
     path: string,
     body: string,
+    mutation: { readonly purpose: GateIoMutationPurpose; readonly reduceOnly: boolean } | null = null,
   ): Promise<WireResponse | null> {
+    if ((method === 'POST' && (path !== GATEIO_EXECUTION_ORDER_PATH || mutation === null))
+        || (method === 'GET' && (mutation !== null
+          || !new RegExp(`^${GATEIO_EXECUTION_ORDER_PATH}/t-dsb-[a-f0-9]{22}$`).test(path)))) {
+      fail('GATEIO_EXECUTION_REQUEST_INVALID');
+    }
     let timestamp: string;
     try {
       timestamp = options.signedTimestamp();
@@ -285,6 +339,7 @@ export function createGateIoFuturesExecutionClient(
       body,
     });
     let response: GateIoReadResponse;
+    if (mutation !== null) options.mutationBudget?.consume(mutation.purpose, mutation.reduceOnly);
     try {
       response = await options.fetchImpl(origin + path, Object.freeze({
         method,
@@ -348,8 +403,12 @@ export function createGateIoFuturesExecutionClient(
 
     async submitMarketOrder(
       request: GateIoFuturesMarketOrderRequest,
+      purpose: GateIoMutationPurpose = 'PROOF',
     ): Promise<GateIoFuturesMarketOrderResult> {
-      if (!requestValid(request)) fail('GATEIO_EXECUTION_REQUEST_INVALID');
+      if (!requestValid(request)
+          || (purpose !== 'PROOF' && purpose !== 'EMERGENCY_CLEANUP')) {
+        fail('GATEIO_EXECUTION_REQUEST_INVALID');
+      }
       const body = JSON.stringify({
         contract: request.contract,
         size: request.size,
@@ -358,7 +417,9 @@ export function createGateIoFuturesExecutionClient(
         reduce_only: request.reduceOnly,
         text: request.text,
       });
-      const response = await wire('POST', GATEIO_EXECUTION_ORDER_PATH, body);
+      const response = await wire('POST', GATEIO_EXECUTION_ORDER_PATH, body, {
+        purpose, reduceOnly: request.reduceOnly,
+      });
       if (response === null) return reconcile(request);
       if (!response.ok) {
         if (response.status >= 400 && response.status < 500) {

@@ -515,6 +515,41 @@ describe('Gate.io L1A foundation truth and readiness', () => {
     assert.notEqual(unknown.value?.accountState, 'FLAT');
   });
 
+  it('requires both dual legs and never nets opposite exposures into FLAT', async () => {
+    const dualAccount = { ...accountFixture, in_dual_mode: true, position_mode: 'dual' };
+    const long = { ...positionFixture, mode: 'dual_long', size: '1', value: '2010' };
+    const short = { ...positionFixture, mode: 'dual_short', size: '-1', value: '-2010' };
+    const zeroLong = {
+      ...long, size: '0', value: '0', entry_price: null, mark_price: null,
+    };
+    const zeroShort = {
+      ...short, size: '0', value: '0', entry_price: null, mark_price: null,
+    };
+    const read = (legs: unknown) => foundation({ respond(request) {
+      if (request.endpoint === GATEIO_READ_ENDPOINTS.ACCOUNTS) return dualAccount;
+      if (request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS) return legs;
+      return fixtureFor(request.endpoint);
+    } }).value.accountTruth();
+
+    const opposed = await read([long, short]);
+    assert.equal(opposed.availability, 'AVAILABLE');
+    assert.equal(opposed.value?.accountState, 'OPEN');
+    assert.equal(opposed.value?.positions.length, 2);
+    assert.equal(opposed.value?.positions.reduce((sum, leg) => sum + leg.signedSize, 0), 0);
+    assert.equal(opposed.value?.positions.reduce((sum, leg) => sum + Math.abs(leg.signedSize), 0), 2);
+
+    const flat = await read([zeroLong, zeroShort]);
+    assert.equal(flat.availability, 'AVAILABLE');
+    assert.equal(flat.value?.accountState, 'FLAT');
+
+    for (const legs of [[zeroLong], [zeroShort], [], [zeroLong, zeroLong],
+      [zeroLong, { ...zeroShort, value: 'bad' }]]) {
+      const result = await read(legs);
+      assert.equal(result.availability, 'UNKNOWN');
+      assert.equal(result.value, null);
+    }
+  });
+
   it('missing credentials are UNAVAILABLE before any GET and missing is not flat', async () => {
     const read = foundation({ withCredential: false });
     const result = await read.value.accountTruth();

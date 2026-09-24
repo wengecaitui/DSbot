@@ -15,6 +15,10 @@ import {
   GATEIO_EXECUTION_ORDER_PATH,
   GATEIO_EXECUTION_ORIGINS,
   GATEIO_EXECUTION_POST_RETRY_COUNT,
+  GATEIO_G3_PROOF_MUTATION_HARD_CAP,
+  GATEIO_G3_EMERGENCY_CLEANUP_RESERVE,
+  GATEIO_G3_TOTAL_MUTATION_HARD_CAP,
+  GateIoG3MutationBudget,
   GateIoFuturesExecutionClientError,
   createGateIoFuturesExecutionClient,
   type GateIoEnvironment,
@@ -130,6 +134,7 @@ function client(input: {
   readonly fetchImpl: GateIoFuturesExecutionFetch;
   readonly read?: Pick<GateIoAuthenticatedReadFoundation, 'instrumentFacts'>;
   readonly signedTimestamp?: () => string;
+  readonly mutationBudget?: GateIoG3MutationBudget;
 }) {
   return createGateIoFuturesExecutionClient({
     environment: input.environment ?? 'testnet',
@@ -137,6 +142,7 @@ function client(input: {
     signedTimestamp: input.signedTimestamp ?? (() => TIMESTAMP),
     fetchImpl: input.fetchImpl,
     readFoundation: input.read ?? foundation(),
+    mutationBudget: input.mutationBudget ?? GateIoG3MutationBudget.create(),
   });
 }
 
@@ -185,6 +191,18 @@ describe('Gate.io G2 closed environment and signing surface', () => {
       () => createGateIoFuturesExecutionClient(invalid as never),
       /GATEIO_EXECUTION_CONFIGURATION_INVALID/,
     );
+    const testnetWithoutBudget = { ...invalid, environment: 'testnet' };
+    assert.throws(() => createGateIoFuturesExecutionClient(testnetWithoutBudget as never),
+      (error: unknown) => {
+        assert.ok(error instanceof GateIoFuturesExecutionClientError);
+        assert.equal(error.decision, 'DENIED');
+        assert.equal(error.reasonCode, 'GATEIO_EXECUTION_CONFIGURATION_INVALID');
+        return true;
+      });
+    const liveWithoutG3Budget = createGateIoFuturesExecutionClient({
+      ...invalid, environment: 'live',
+    });
+    assert.equal(typeof liveWithoutG3Budget.submitMarketOrder, 'function');
   });
 
   it('emits the one closed POST body and an independently reproducible signature', async () => {
@@ -240,6 +258,57 @@ describe('Gate.io G2 closed environment and signing surface', () => {
 });
 
 describe('Gate.io G2 mutation outcome and reconciliation', () => {
+  it('enforces two proof POSTs plus one reduce-only cleanup before fetch, including across clients', async () => {
+    const budget = GateIoG3MutationBudget.create();
+    const fake = recordingFetch(({ init }) => jsonResponse(
+      200, orderObject(JSON.parse(init.body as string)),
+    ));
+    const first = client({ fetchImpl: fake.fetchImpl, mutationBudget: budget });
+    const second = client({ fetchImpl: fake.fetchImpl, mutationBudget: budget });
+    assert.equal((await first.submitMarketOrder(request())).status, 'FINISHED');
+    assert.equal((await second.submitMarketOrder(request())).status, 'FINISHED');
+    await assert.rejects(first.submitMarketOrder(request()), (error: unknown) => {
+      assert.ok(error instanceof GateIoFuturesExecutionClientError);
+      assert.equal(error.decision, 'DENIED');
+      assert.equal(error.reasonCode, 'MUTATION_CAP_EXCEEDED');
+      assert.equal(JSON.stringify(error).includes(API_KEY), false);
+      assert.equal(JSON.stringify(error).includes(SECRET), false);
+      return true;
+    });
+    assert.equal(fake.captured.length, 2);
+    assert.equal(fake.captured.filter(entry => entry.init.method === 'POST').length, 2);
+
+    await assert.rejects(first.submitMarketOrder(request(), 'EMERGENCY_CLEANUP'),
+      /GATEIO_EXECUTION_MUTATION_CAP_EXCEEDED/);
+    assert.equal(fake.captured.length, 2);
+    assert.equal((await first.submitMarketOrder(request({ size: -5, reduceOnly: true }),
+      'EMERGENCY_CLEANUP')).status, 'FINISHED');
+    await assert.rejects(second.submitMarketOrder(request({ size: -5, reduceOnly: true }),
+      'EMERGENCY_CLEANUP'), /GATEIO_EXECUTION_MUTATION_CAP_EXCEEDED/);
+    assert.equal(fake.captured.length, 3);
+    assert.deepEqual(budget.snapshot(), { proof: 2, cleanup: 1, total: 3 });
+    assert.equal(GATEIO_G3_PROOF_MUTATION_HARD_CAP, 2);
+    assert.equal(GATEIO_G3_EMERGENCY_CLEANUP_RESERVE, 1);
+    assert.equal(GATEIO_G3_TOTAL_MUTATION_HARD_CAP, 3);
+  });
+
+  it('returns safe structured denial for an invalid contract without touching transport', async () => {
+    const fake = recordingFetch(() => jsonResponse(200, {}));
+    await assert.rejects(client({ fetchImpl: fake.fetchImpl }).submitMarketOrder(
+      request({ contract: 'BTC_USDT' }),
+    ), (error: unknown) => {
+      assert.ok(error instanceof GateIoFuturesExecutionClientError);
+      assert.equal(error.decision, 'DENIED');
+      assert.equal(error.reasonCode, 'GATEIO_EXECUTION_REQUEST_INVALID');
+      const serialized = JSON.stringify(error);
+      for (const secret of [API_KEY, SECRET, RAW_MESSAGE, 'SIGN', 'KEY']) {
+        assert.equal(serialized.includes(secret), false);
+      }
+      return true;
+    });
+    assert.equal(fake.captured.length, 0);
+  });
+
   it('maps a definite 4xx API rejection without reconciliation or POST retry', async () => {
     const fake = recordingFetch(() => jsonResponse(400, {
       label: 'INVALID_PARAM_VALUE', message: RAW_MESSAGE, secret: SECRET,
@@ -274,6 +343,26 @@ describe('Gate.io G2 mutation outcome and reconciliation', () => {
     assert.equal(getHeaders.SIGN,
       createHmac('sha512', SECRET).update(getSigning, 'utf8').digest('hex'));
     assert.equal(GATEIO_EXECUTION_POST_RETRY_COUNT, 0);
+  });
+
+  it('ignores a pre-submit FLAT observation and uses a new post-submit GET to prove the fill', async () => {
+    const preSubmitPosition = 'FLAT';
+    const fake = recordingFetch((captured, index) => {
+      if (index === 0) {
+        assert.equal(captured.init.method, 'POST');
+        throw new Error(RAW_MESSAGE);
+      }
+      assert.equal(index, 1);
+      assert.equal(captured.init.method, 'GET');
+      return jsonResponse(200, orderObject(request()));
+    });
+    assert.equal(preSubmitPosition, 'FLAT');
+    const result = await client({ fetchImpl: fake.fetchImpl }).submitMarketOrder(request());
+    assert.equal(result.status, 'FINISHED');
+    assert.equal(result.signedFilledSize, 5);
+    assert.deepEqual(fake.captured.map(entry => entry.init.method), ['POST', 'GET']);
+    assert.equal(fake.captured[1]?.url,
+      GATEIO_EXECUTION_ORIGINS.testnet + GATEIO_EXECUTION_ORDER_PATH + '/' + CLIENT_TEXT);
   });
 
   it('keeps unknown unknown when reconciliation cannot prove submission', async () => {
@@ -369,6 +458,29 @@ describe('Gate.io G2 int64 and canonical truth safety', () => {
 });
 
 describe('Gate.io G2 real OMS-to-wire integration and static boundary', () => {
+  it('records a capped mutation as an OMS rejection without a network POST', async () => {
+    const budget = GateIoG3MutationBudget.create();
+    budget.consume('PROOF', false);
+    budget.consume('PROOF', false);
+    const fake = recordingFetch(() => jsonResponse(200, {}));
+    const kernel = createTradingKernel({ exchange: 'gateio' });
+    const oms = new OmsCore(kernel, new GateIoFuturesExecutionAdapter(
+      client({ fetchImpl: fake.fetchImpl, mutationBudget: budget }),
+    ));
+    const result = await oms.submitRequest({
+      intentId: 'gateio-g3-capped', exchange: 'gateio', symbol: 'ETH/USDT',
+      direction: 'long', orderType: 'market', positionUsd: 10.9,
+      source: 'test', createdAt: 1, reason: 'test', biasUpdatedAt: 1,
+    }, 'open', 10.9);
+    assert.equal(result.status, 'rejected');
+    assert.equal(fake.captured.length, 0);
+    const events = kernel.journal().readFromLogicalSequence(1);
+    assert.deepEqual(events.map(entry => entry.type),
+      ['order.created', 'order.submitted', 'order.rejected']);
+    assert.equal(JSON.stringify(events).includes('MUTATION_CAP_EXCEEDED'), true);
+    assert.deepEqual(budget.snapshot(), { proof: 2, cleanup: 0, total: 2 });
+  });
+
   it('drives OPEN and CLOSE through real Kernel, OMS, adapter, client, and recorded Gate wire', async () => {
     for (const scenario of [
       { action: 'open' as const, direction: 'long' as const, expectedSize: 5, reduceOnly: false },

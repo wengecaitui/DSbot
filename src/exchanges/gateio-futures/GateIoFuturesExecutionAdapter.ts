@@ -52,6 +52,7 @@ export interface GateIoFuturesExecutionClient {
   getInstrumentFacts(symbol: string): Promise<GateIoCanonicalInstrumentFacts | null>;
   submitMarketOrder(
     request: GateIoFuturesMarketOrderRequest,
+    purpose?: 'PROOF' | 'EMERGENCY_CLEANUP',
   ): Promise<GateIoFuturesMarketOrderResult>;
 }
 
@@ -230,8 +231,17 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
 
     let result: GateIoFuturesMarketOrderResult;
     try {
-      result = await this.client.submitMarketOrder(request);
-    } catch {
+      result = await this.client.submitMarketOrder(
+        request, order.action === 'emergency_exit' ? 'EMERGENCY_CLEANUP' : 'PROOF',
+      );
+    } catch (error) {
+      if (typeof error === 'object' && error !== null
+          && 'decision' in error && error.decision === 'DENIED'
+          && 'reasonCode' in error
+          && (error.reasonCode === 'MUTATION_CAP_EXCEEDED'
+            || error.reasonCode === 'GATEIO_EXECUTION_REQUEST_INVALID')) {
+        return rejected(error.reasonCode);
+      }
       return unknown('TRANSPORT_AMBIGUITY');
     }
 

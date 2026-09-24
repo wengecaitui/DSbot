@@ -13,6 +13,7 @@ import type {
 } from '../../src/runtime/gateio/GateIoAuthenticatedReadFoundation';
 import {
   GATEIO_EXECUTION_POST_RETRY_COUNT,
+  GateIoG3MutationBudget,
   createGateIoFuturesExecutionClient,
   type GateIoFuturesExecutionFetch,
 } from '../../src/runtime/gateio/GateIoFuturesExecutionClient';
@@ -142,6 +143,7 @@ function executionClient(
       environment: 'testnet',
       credential: { apiKey: 'FIXTURE_G2R1_KEY', secretKey: 'FIXTURE_G2R1_SECRET' },
       signedTimestamp: () => '1800000000', fetchImpl, readFoundation,
+      mutationBudget: GateIoG3MutationBudget.create(),
     }),
   };
 }
