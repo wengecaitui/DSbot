@@ -4,10 +4,12 @@
  * Every capability is explicit and injected: environment, credential, timestamp strategy,
  * canonical L1A instrument facts, and the fetch-shaped wire port. Construction performs no I/O.
  */
-import type {
-  GateIoFuturesExecutionClient as GateIoFuturesExecutionClientPort,
-  GateIoFuturesMarketOrderRequest,
-  GateIoFuturesMarketOrderResult,
+import {
+  GATEIO_ETH_DECIMAL_CONTRACT_SCALE,
+  gateIoEthContractSizeValid,
+  type GateIoFuturesExecutionClient as GateIoFuturesExecutionClientPort,
+  type GateIoFuturesMarketOrderRequest,
+  type GateIoFuturesMarketOrderResult,
 } from '../../exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 import {
   GATEIO_L0_INITIAL_CONTRACT,
@@ -101,7 +103,7 @@ function requestValid(value: unknown): value is GateIoFuturesMarketOrderRequest 
   if (keys.some(key => typeof key !== 'string')
       || (keys as string[]).sort().join(',') !== expected.join(',')) return false;
   return value.contract === GATEIO_L0_INITIAL_CONTRACT
-    && typeof value.size === 'number' && Number.isSafeInteger(value.size) && value.size !== 0
+    && gateIoEthContractSizeValid(value.size)
     && value.price === '0'
     && value.tif === 'ioc'
     && typeof value.reduceOnly === 'boolean'
@@ -119,9 +121,17 @@ function strictNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function strictInteger(value: unknown): number | null {
+function strictContractSize(value: unknown): number | null {
   const parsed = strictNumber(value);
-  return parsed !== null && Number.isSafeInteger(parsed) ? parsed : null;
+  if (parsed === 0) return 0;
+  return parsed !== null && gateIoEthContractSizeValid(parsed)
+    ? Math.round(parsed * GATEIO_ETH_DECIMAL_CONTRACT_SCALE)
+      / GATEIO_ETH_DECIMAL_CONTRACT_SCALE
+    : null;
+}
+
+function contractUnits(value: number): number {
+  return Math.round(value * GATEIO_ETH_DECIMAL_CONTRACT_SCALE);
 }
 
 function safeLabel(value: unknown): string | null {
@@ -152,24 +162,34 @@ function normalizedOrder(
   if (!isRecord(parsed)
       || parsed.contract !== request.contract
       || parsed.text !== request.text) return null;
-  const size = strictInteger(parsed.size);
-  const left = strictInteger(parsed.left);
-  if (size === null || left === null || size !== request.size
-      || Math.abs(left) > Math.abs(size)
-      || (left !== 0 && Math.sign(left) !== Math.sign(size))) return null;
+  const size = strictContractSize(parsed.size);
+  const left = strictContractSize(parsed.left);
+  if (size === null || left === null) return null;
   const exchangeOrderId = exactOrderId(parsed.id, rawText);
   if (exchangeOrderId === null) return null;
 
-  const signedFilledSize = size - left;
-  if (!Number.isSafeInteger(signedFilledSize)
-      || (signedFilledSize !== 0 && Math.sign(signedFilledSize) !== Math.sign(size))) return null;
   const wireStatus = typeof parsed.status === 'string' ? parsed.status : null;
   const finishAs = typeof parsed.finish_as === 'string' ? parsed.finish_as : null;
+  const sizeUnits = contractUnits(size);
+  const leftUnits = contractUnits(left);
+  const requestUnits = contractUnits(request.size);
+  // F-09: Gate can return size=0,left=0 for a decimal full fill. Exact attribution plus
+  // status=finished and finish_as=filled is the factual full-fill witness for the original request.
+  const decimalFullFillWitness = wireStatus === 'finished' && finishAs === 'filled'
+    && sizeUnits === 0 && leftUnits === 0;
+  if (!decimalFullFillWitness && sizeUnits !== requestUnits) return null;
+  if (Math.abs(leftUnits) > Math.abs(sizeUnits)
+      || (leftUnits !== 0 && Math.sign(leftUnits) !== Math.sign(sizeUnits))) return null;
+  const signedFilledUnits = decimalFullFillWitness ? requestUnits : sizeUnits - leftUnits;
+  if (signedFilledUnits !== 0 && Math.sign(signedFilledUnits) !== Math.sign(requestUnits)) return null;
+  const signedFilledSize = signedFilledUnits / GATEIO_ETH_DECIMAL_CONTRACT_SCALE;
   let status: GateIoFuturesMarketOrderResult['status'];
   if (wireStatus === 'open') {
     status = signedFilledSize === 0 ? 'OPEN' : 'PARTIALLY_FILLED';
   } else if (wireStatus === 'finished') {
-    if (Math.abs(signedFilledSize) === Math.abs(size) && left === 0 && finishAs === 'filled') {
+    if (decimalFullFillWitness
+        || (Math.abs(signedFilledUnits) === Math.abs(sizeUnits)
+          && leftUnits === 0 && finishAs === 'filled')) {
       status = 'FINISHED';
     } else if (signedFilledSize !== 0) {
       status = 'PARTIALLY_FILLED';

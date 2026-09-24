@@ -223,7 +223,7 @@ describe('Gate.io G2 closed environment and signing surface', () => {
     for (const invalid of [
       request({ contract: 'BTC_USDT' }),
       request({ size: 0 }),
-      request({ size: 1.5 }),
+      request({ size: 1.05 }),
       request({ price: '1' }),
       request({ tif: 'gtc' }),
       request({ text: 'bad' }),

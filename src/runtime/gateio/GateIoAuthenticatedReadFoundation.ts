@@ -70,6 +70,8 @@ export type GateIoPositionMode = 'single' | 'dual_long' | 'dual_short';
 export interface GateIoCanonicalPosition {
   readonly contract: typeof GATEIO_L0_INITIAL_CONTRACT;
   readonly signedSize: number;
+  /** Factual Gate quote-value exposure witness; F-09 proved size alone can be zero after decimal fills. */
+  readonly quoteValue: number;
   readonly mode: GateIoPositionMode;
   readonly marginMode: string | null;
   readonly leverage: number | null;
@@ -318,19 +320,21 @@ export function normalizeGateIoPosition(raw: unknown): GateIoCanonicalPosition {
   return tagged('POSITION_TRUTH_MALFORMED', () => {
     if (!isRecord(raw)) malformed('POSITION_TRUTH_MALFORMED');
     const signedSize = decimal(raw.size);
+    const quoteValue = decimal(raw.value);
     const mode = positionMode(raw.mode ?? raw.hedge_status);
     if ((mode === 'dual_long' && signedSize < 0) || (mode === 'dual_short' && signedSize > 0)) {
       malformed('POSITION_TRUTH_MALFORMED');
     }
     const entryPrice = optionalDecimal(raw.entry_price);
     const markPrice = optionalDecimal(raw.mark_price);
-    if (signedSize !== 0 && (entryPrice === null || entryPrice <= 0
+    if ((signedSize !== 0 || quoteValue !== 0) && (entryPrice === null || entryPrice <= 0
       || markPrice === null || markPrice <= 0)) {
       malformed('POSITION_TRUTH_MALFORMED');
     }
     return Object.freeze({
       contract: contract(raw.contract),
       signedSize,
+      quoteValue,
       mode,
       marginMode: optionalText(raw.pos_margin_mode),
       leverage: optionalDecimal(raw.leverage ?? raw.lever),
@@ -606,7 +610,8 @@ export function createGateIoAuthenticatedReadFoundation(
         freshness: gateIoFreshnessFromObservation(observedAtMs, time.value),
         source: GATEIO_L1A_SOURCE,
         schemaVersion: GATEIO_L1A_SCHEMA_VERSION,
-        accountState: positions.some((entry) => Math.abs(entry.signedSize) > 0) ? 'OPEN' : 'FLAT',
+        accountState: positions.some((entry) => Math.abs(entry.signedSize) > 0
+          || Math.abs(entry.quoteValue) > 0) ? 'OPEN' : 'FLAT',
         accountStateBasis: 'FACTUAL_POSITIONS_RESPONSE' as const,
       });
       return remember(available(value));

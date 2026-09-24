@@ -14,6 +14,11 @@ import type {
 export const GATEIO_G1_CANONICAL_SYMBOL = 'ETH/USDT' as const;
 export const GATEIO_CLIENT_TEXT_PREFIX = 't-dsb-' as const;
 export const GATEIO_CLIENT_TEXT_MAX_LENGTH = 28 as const;
+/** F-09 is proven only for ETH_USDT: Gate accepts one decimal contract place, minimum 0.1. */
+export const GATEIO_ETH_DECIMAL_CONTRACT_STEP = 0.1 as const;
+export const GATEIO_ETH_DECIMAL_CONTRACT_SCALE = 10 as const;
+/** Exact F-09 adversarial condition: a close mark 0.1% above the exposure valuation mark. */
+export const GATEIO_CLOSE_MARK_DRIFT_RATIO = 0.001 as const;
 
 export interface GateIoFuturesMarketOrderRequest {
   readonly contract: typeof GATEIO_L0_INITIAL_CONTRACT;
@@ -84,7 +89,65 @@ function instrumentFactsValid(
     value.markPrice, value.contractMultiplier, value.minOrderSize, value.maxOrderSize,
   ];
   return positive.every((entry) => typeof entry === 'number' && Number.isFinite(entry) && entry > 0)
-    && value.minOrderSize <= value.maxOrderSize;
+    && value.minOrderSize <= value.maxOrderSize
+    && (value.decimalSizeEnabled === false
+      || value.minOrderSize === GATEIO_ETH_DECIMAL_CONTRACT_STEP);
+}
+
+function scaledInteger(value: number, scale: number, direction: 'down' | 'up'): number | null {
+  const scaled = value * scale;
+  if (!Number.isFinite(scaled) || scaled <= 0) return null;
+  // Remove only binary floating-point dust at an already factual contract boundary.
+  const tolerance = Number.EPSILON * Math.max(1, Math.abs(scaled)) * 8;
+  let units = Math.floor(scaled + tolerance);
+  if (direction === 'up') {
+    const upper = Math.ceil(scaled - tolerance);
+    const relativeGap = upper > 0 ? (upper - scaled) / upper : Number.POSITIVE_INFINITY;
+    // Do not turn an arbitrary fractional approval into a larger close. Restore only the narrow
+    // next-step shortfall proven by F-09 mark drift; otherwise retain downward normalization.
+    if (relativeGap <= GATEIO_CLOSE_MARK_DRIFT_RATIO + tolerance) units = upper;
+  }
+  return Number.isSafeInteger(units) && units > 0 ? units : null;
+}
+
+/**
+ * Normalize ETH_USDT contracts without inventing a wider exchange rule.
+ * Entry never grows the approved amount. A reduce-only action may restore the next factual step
+ * only inside the proven mark-drift ratio; this prevents a newer, slightly higher mark from
+ * under-sizing the existing exposure without turning arbitrary fractional approval into authority.
+ */
+export function normalizeGateIoEthContracts(
+  rawContracts: number,
+  facts: GateIoCanonicalInstrumentFacts,
+  action: OmsOrder['action'],
+): number | null {
+  const scale = facts.decimalSizeEnabled ? GATEIO_ETH_DECIMAL_CONTRACT_SCALE : 1;
+  if (facts.decimalSizeEnabled && facts.minOrderSize !== GATEIO_ETH_DECIMAL_CONTRACT_STEP) {
+    return null;
+  }
+  const direction = action === 'reduce' || action === 'close' || action === 'emergency_exit'
+    ? 'up' : 'down';
+  const units = scaledInteger(rawContracts, scale, direction);
+  if (units === null) return null;
+  const contracts = units / scale;
+  return Number.isFinite(contracts) && contracts > 0 ? contracts : null;
+}
+
+export function gateIoEthContractSizeValid(value: unknown): value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value === 0) return false;
+  const units = Math.abs(value) * GATEIO_ETH_DECIMAL_CONTRACT_SCALE;
+  const nearest = Math.round(units);
+  const tolerance = Number.EPSILON * Math.max(1, units) * 8;
+  return Number.isSafeInteger(nearest) && Math.abs(units - nearest) <= tolerance;
+}
+
+function contractSizeUnits(value: number): number {
+  return Math.round(value * GATEIO_ETH_DECIMAL_CONTRACT_SCALE);
+}
+
+function sameContractSize(left: number, right: number): boolean {
+  return gateIoEthContractSizeValid(left) && gateIoEthContractSizeValid(right)
+    && contractSizeUnits(left) === contractSizeUnits(right);
 }
 
 function exchangeOrderIdValid(value: unknown): boolean {
@@ -99,9 +162,12 @@ function attributionValid(
       || !exchangeOrderIdValid(result.exchangeOrderId)
       || typeof result.signedFilledSize !== 'number'
       || !Number.isFinite(result.signedFilledSize)) return false;
+  if ((result.signedFilledSize !== 0 && !gateIoEthContractSizeValid(result.signedFilledSize))
+      || !gateIoEthContractSizeValid(request.size)) return false;
   if (result.signedFilledSize !== 0
       && Math.sign(result.signedFilledSize) !== Math.sign(request.size)) return false;
-  return Math.abs(result.signedFilledSize) <= Math.abs(request.size);
+  return contractSizeUnits(Math.abs(result.signedFilledSize))
+    <= contractSizeUnits(Math.abs(request.size));
 }
 
 /**
@@ -139,11 +205,14 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
     if (!Number.isFinite(rawContracts) || rawContracts <= 0) {
       return rejected('INVALID_APPROVED_NOTIONAL');
     }
-    const contracts = Math.floor(rawContracts);
-    if (!Number.isSafeInteger(contracts) || contracts <= 0) {
+    const contracts = normalizeGateIoEthContracts(rawContracts, facts, order.action);
+    if (contracts === null) {
       return rejected('NORMALIZED_SIZE_ZERO');
     }
-    if (contracts < facts.minOrderSize || rawContracts < facts.minOrderSize) {
+    if (contracts < facts.minOrderSize
+        || (order.action !== 'reduce' && order.action !== 'close'
+          && order.action !== 'emergency_exit'
+          && rawContracts < facts.minOrderSize)) {
       return rejected('BELOW_MIN_ORDER_SIZE');
     }
     if (contracts > facts.maxOrderSize) return rejected('ABOVE_MAX_ORDER_SIZE');
@@ -184,10 +253,11 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
     }
     if (result.status !== 'FINISHED') return unknown('MALFORMED_EXCHANGE_RESULT');
 
-    if (Math.abs(result.signedFilledSize) < Math.abs(request.size)) {
+    if (contractSizeUnits(Math.abs(result.signedFilledSize))
+        < contractSizeUnits(Math.abs(request.size))) {
       return unknown('PARTIAL_FILL_FULL_LIFECYCLE_REQUIRED');
     }
-    if (Math.abs(result.signedFilledSize) !== Math.abs(request.size)
+    if (!sameContractSize(Math.abs(result.signedFilledSize), Math.abs(request.size))
         || typeof result.averagePrice !== 'number'
         || !Number.isFinite(result.averagePrice) || result.averagePrice <= 0
         || typeof result.tradeId !== 'string' || !EXACT_INT64_STRING.test(result.tradeId)) {

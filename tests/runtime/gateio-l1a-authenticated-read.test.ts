@@ -57,7 +57,8 @@ const accountFixture = Object.freeze({
   order_margin: '10', in_dual_mode: false, position_mode: 'single', margin_mode: 0,
 });
 const positionFixture = Object.freeze({
-  contract: GATEIO_L0_INITIAL_CONTRACT, size: '2', mode: 'single', pos_margin_mode: 'cross',
+  contract: GATEIO_L0_INITIAL_CONTRACT, size: '2', value: '4020', mode: 'single',
+  pos_margin_mode: 'cross',
   leverage: '10', entry_price: '2000', mark_price: '2010', liq_price: '1600',
   unrealised_pnl: '20', realised_pnl: '1', margin: '400', update_time: '1800000000',
 });
@@ -307,7 +308,7 @@ describe('Gate.io L1A strict canonical normalization', () => {
       ...positionFixture, size: '-2', mode: 'dual_short', hedge_status: 'ignored',
     }).mode, 'dual_short');
     const zero = normalizeGateIoPosition({
-      ...positionFixture, size: '0', entry_price: null, mark_price: null,
+      ...positionFixture, size: '0', value: '0', entry_price: null, mark_price: null,
     });
     assert.equal(zero.signedSize, 0);
     assert.throws(() => normalizeGateIoPosition({ ...positionFixture, mode: 'unknown' }));
@@ -464,7 +465,9 @@ describe('Gate.io L1A foundation truth and readiness', () => {
   it('derives FLAT only from a factual valid all-zero positions response', async () => {
     const flat = foundation({ respond(request) {
       if (request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS) {
-        return [{ ...positionFixture, size: '0', entry_price: null, mark_price: null }];
+        return [{
+          ...positionFixture, size: '0', value: '0', entry_price: null, mark_price: null,
+        }];
       }
       return fixtureFor(request.endpoint);
     } });
@@ -484,6 +487,32 @@ describe('Gate.io L1A foundation truth and readiness', () => {
       assert.notEqual(result.value?.accountState, 'FLAT');
       assert.equal(result.value, null);
     }
+  });
+
+  it('uses Gate value as an exposure witness and never turns an F-09 decimal position into FLAT', async () => {
+    const fractional = foundation({ respond(request) {
+      if (request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS) {
+        return [{ ...positionFixture, size: '0', value: '2' }];
+      }
+      return fixtureFor(request.endpoint);
+    } });
+    const observed = await fractional.value.accountTruth();
+    assert.equal(observed.availability, 'AVAILABLE');
+    assert.equal(observed.value?.positions[0]?.signedSize, 0);
+    assert.equal(observed.value?.positions[0]?.quoteValue, 2);
+    assert.equal(observed.value?.accountState, 'OPEN');
+
+    const missingExposureWitness = foundation({ respond(request) {
+      if (request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS) {
+        const { value: _value, ...withoutValue } = positionFixture;
+        return [{ ...withoutValue, size: '0' }];
+      }
+      return fixtureFor(request.endpoint);
+    } });
+    const unknown = await missingExposureWitness.value.accountTruth();
+    assert.equal(unknown.availability, 'UNKNOWN');
+    assert.equal(unknown.value, null);
+    assert.notEqual(unknown.value?.accountState, 'FLAT');
   });
 
   it('missing credentials are UNAVAILABLE before any GET and missing is not flat', async () => {
