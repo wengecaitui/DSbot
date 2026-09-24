@@ -28,7 +28,7 @@
 // Used by KillSwitch, ExecutionRouter, SlowPipeline, FastPipeline, TradingRuntime
 // to fail closed on exchange mismatch during construction.
 
-export type ExchangeId = 'bitget' | 'binance';
+export type ExchangeId = 'bitget' | 'binance' | 'gateio';
 
 export interface ExchangeAwareMarketData {
   readonly exchange: ExchangeId;
@@ -38,7 +38,7 @@ export interface ExchangeAwareMarketData {
 /**
  * Stage 3B4C1-R1: Runtime type guard for ExchangeId.
  *
- * Accepts EXACTLY 'bitget' or 'binance'. Rejects:
+ * Accepts EXACTLY 'bitget', 'binance', or 'gateio'. Rejects:
  *   - any other string (e.g. 'coinbase', 'okx')
  *   - empty string
  *   - case variants ('BITGET', 'Bitget', ' Binance ')
@@ -50,7 +50,7 @@ export interface ExchangeAwareMarketData {
  * re-emitted with a fabricated exchange.
  */
 export function isExchangeId(value: unknown): value is ExchangeId {
-  return value === 'bitget' || value === 'binance';
+  return value === 'bitget' || value === 'binance' || value === 'gateio';
 }
 
 /**

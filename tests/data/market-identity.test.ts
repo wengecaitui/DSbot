@@ -29,6 +29,17 @@ test('2. isExchangeId accepts "binance"', () => {
   }
 });
 
+test('2b. isExchangeId accepts "gateio" and narrows it', () => {
+  const value: unknown = 'gateio';
+  assert.equal(isExchangeId(value), true);
+  if (isExchangeId(value)) {
+    const typed: ExchangeId = value;
+    assert.equal(typed, 'gateio');
+  } else {
+    assert.fail('should narrow gateio to ExchangeId');
+  }
+});
+
 // ── isExchangeId: negative strings ──────────────────────────────────────────
 
 test('3. isExchangeId rejects "coinbase" (unknown exchange)', () => {
@@ -45,6 +56,9 @@ test('5. isExchangeId rejects case variant "BITGET"', () => {
   assert.equal(isExchangeId('Bitget'), false);
   assert.equal(isExchangeId(' binance'), false); // leading space
   assert.equal(isExchangeId('binance '), false); // trailing space
+  assert.equal(isExchangeId('GATEIO'), false);
+  assert.equal(isExchangeId('GateIO'), false);
+  assert.equal(isExchangeId('gate'), false);
 });
 
 test('6. isExchangeId rejects "default" and "unknown" placeholders', () => {
@@ -83,15 +97,15 @@ test('11. isExchangeId rejects boolean', () => {
 
 // ── isExchangeId: exhaustive coverage ───────────────────────────────────────
 
-test('12. isExchangeId only matches the two canonical values', () => {
-  const allStrings: string[] = ['bitget', 'binance', 'BITGET', '', 'bitget ', ' binance',
+test('12. isExchangeId only matches the three canonical values', () => {
+  const allStrings: string[] = ['bitget', 'binance', 'gateio', 'BITGET', '', 'bitget ', ' binance',
                                 'coinbase', 'okx', 'kraken', 'default', 'unknown',
-                                'BITGET', 'Binance', 'bitgetx', 'xbittance'];
+                                'BITGET', 'Binance', 'GATEIO', 'GateIO', 'gate', 'bitgetx', 'xbittance'];
   let trueCount = 0;
   for (const s of allStrings) {
     if (isExchangeId(s)) trueCount++;
   }
-  assert.equal(trueCount, 2, 'exactly two strings accepted: bitget + binance');
+  assert.equal(trueCount, 3, 'exactly three strings accepted: bitget + binance + gateio');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -109,6 +123,10 @@ test('13. assertExchangeId accepts bitget without throwing', () => {
 
 test('14. assertExchangeId accepts binance without throwing', () => {
   assert.doesNotThrow(() => assertExchangeId('TestComp', 'binance'));
+});
+
+test('14b. assertExchangeId accepts gateio without throwing', () => {
+  assert.doesNotThrow(() => assertExchangeId('TestComp', 'gateio'));
 });
 
 test('15. assertExchangeId throws on coinbase', () => {
@@ -197,5 +215,6 @@ test('25. sourceKey rejects symbol that is undefined', () => {
 test('26. sourceKey produces expected format', () => {
   assert.equal(sourceKey('bitget', 'BTC/USDT'), 'bitget:BTC/USDT');
   assert.equal(sourceKey('binance', 'BTC/USDT'), 'binance:BTC/USDT');
+  assert.equal(sourceKey('gateio', 'ETH/USDT'), 'gateio:ETH/USDT');
   assert.equal(sourceKey('bitget', 'ETH/USDT:SWAP'), 'bitget:ETH/USDT:SWAP');
 });
