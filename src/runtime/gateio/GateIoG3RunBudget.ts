@@ -3,6 +3,7 @@ export interface GateIoG3RunLimits {
   readonly accountAcquisitions: number;
   readonly instrumentAcquisitions: number;
   readonly ambiguousReconciliations: number;
+  readonly currentRunOrderAttestations: number;
   readonly proofMutations: number;
   readonly cleanupMutations: number;
   readonly totalMutations: number;
@@ -11,14 +12,16 @@ export interface GateIoG3RunLimits {
 
 export const GATEIO_G3_LIMITS: Readonly<GateIoG3RunLimits> = Object.freeze({
   accountAcquisitions: 5, instrumentAcquisitions: 2,
-  ambiguousReconciliations: 2, proofMutations: 2, cleanupMutations: 1,
-  totalMutations: 3, networkRequests: 36,
+  ambiguousReconciliations: 2, currentRunOrderAttestations: 3,
+  proofMutations: 2, cleanupMutations: 1,
+  totalMutations: 3, networkRequests: 39,
 });
 
 export type GateIoG3DenialReason =
   | 'ACCOUNT_TRUTH_ACQUISITION_CAP_EXCEEDED'
   | 'INSTRUMENT_FACTS_ACQUISITION_CAP_EXCEEDED'
   | 'AMBIGUOUS_RECONCILIATION_CAP_EXCEEDED'
+  | 'CURRENT_RUN_ORDER_ATTESTATION_CAP_EXCEEDED'
   | 'NETWORK_REQUEST_CAP_EXCEEDED'
   | 'MUTATION_PROOF_CAP_EXCEEDED'
   | 'MUTATION_CLEANUP_CAP_EXCEEDED'
@@ -37,6 +40,7 @@ export class GateIoG3RunBudget {
   private accountUsed = 0;
   private instrumentUsed = 0;
   private ambiguousUsed = 0;
+  private attestationUsed = 0;
   private proofUsed = 0;
   private cleanupUsed = 0;
   private networkUsed = 0;
@@ -47,6 +51,7 @@ export class GateIoG3RunBudget {
   static create(limits: GateIoG3RunLimits = GATEIO_G3_LIMITS): GateIoG3RunBudget {
     const keys: readonly (keyof GateIoG3RunLimits)[] = [
       'accountAcquisitions', 'instrumentAcquisitions', 'ambiguousReconciliations',
+      'currentRunOrderAttestations',
       'proofMutations', 'cleanupMutations', 'totalMutations', 'networkRequests',
     ];
     if (!limits || !keys.every((key) => Number.isSafeInteger(limits[key]) && limits[key] >= 0)
@@ -73,6 +78,13 @@ export class GateIoG3RunBudget {
       throw new GateIoG3BudgetDenial('AMBIGUOUS_RECONCILIATION_CAP_EXCEEDED');
     this.ambiguousUsed += 1;
   }
+  beginCurrentRunOrderAttestation(): void {
+    if (this.networkUsed >= this.limits.networkRequests)
+      throw new GateIoG3BudgetDenial('NETWORK_REQUEST_CAP_EXCEEDED');
+    if (this.attestationUsed >= this.limits.currentRunOrderAttestations)
+      throw new GateIoG3BudgetDenial('CURRENT_RUN_ORDER_ATTESTATION_CAP_EXCEEDED');
+    this.attestationUsed += 1;
+  }
   consumeReadRequest(): void {
     if (this.networkUsed >= this.limits.networkRequests)
       throw new GateIoG3BudgetDenial('NETWORK_REQUEST_CAP_EXCEEDED');
@@ -98,7 +110,8 @@ export class GateIoG3RunBudget {
   }
   snapshot() {
     return Object.freeze({ accountUsed: this.accountUsed, instrumentUsed: this.instrumentUsed,
-      ambiguousUsed: this.ambiguousUsed, proofUsed: this.proofUsed,
+      ambiguousUsed: this.ambiguousUsed, attestationUsed: this.attestationUsed,
+      proofUsed: this.proofUsed,
       cleanupUsed: this.cleanupUsed, totalUsed: this.proofUsed + this.cleanupUsed,
       networkUsed: this.networkUsed });
   }

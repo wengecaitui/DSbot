@@ -1,10 +1,11 @@
 /** Gate factual reads projected into the existing, fail-closed reconciliation schema. */
-import { gateIoExecutionSecondsToMilliseconds, toGateIoClientText } from '../exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
+import { gateIoEthContractSizeValid, gateIoExecutionSecondsToMilliseconds, toGateIoClientText } from '../exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 import type { OmsOrderSnapshot } from '../oms/oms-types';
 import type { GateIoAuthenticatedReadFoundation, GateIoCanonicalAccountTruth, GateIoCanonicalInstrumentFacts, GateIoCanonicalTrade } from '../runtime/gateio/GateIoAuthenticatedReadFoundation';
 import type { GateIoReadTransport } from '../runtime/gateio/GateIoReadContracts';
 import { gateIoReadTransportBudget, gateIoReadTransportEnvironment } from '../runtime/gateio/GateIoReadTransport';
 import { GateIoG3RunBudget } from '../runtime/gateio/GateIoG3RunBudget';
+import type { GateIoCurrentRunOrderAttestation } from '../runtime/gateio/GateIoFuturesExecutionClient';
 import type { ExecutionTruthPort, ExecutionTruthSnapshot, ExternalFill, ExternalOrder, ExternalPosition } from './reconciliation-types';
 
 export interface GateIoExecutionTruthPortOptions {
@@ -16,6 +17,8 @@ export interface GateIoExecutionTruthPortOptions {
   readonly now: () => number;
   /** Correlation candidates only; broker facts come exclusively from Gate reads. */
   readonly listOmsOrders: () => readonly OmsOrderSnapshot[];
+  /** G2's existing signed exact-order GET; one factual lookup per filled current-run order. */
+  readonly attestCurrentRunOrder?: (clientText: string) => Promise<GateIoCurrentRunOrderAttestation | null>;
 }
 
 export interface GateIoExecutionTruthPort extends ExecutionTruthPort {
@@ -28,6 +31,7 @@ export interface GateIoExecutionTruthPort extends ExecutionTruthPort {
   }> | null;
   refreshInstrumentFacts(): Promise<GateIoCanonicalInstrumentFacts | null>;
   currentInstrument(): GateIoCanonicalInstrumentFacts | null;
+  currentRunTradeHistory(): 'NONE' | 'LAGGING' | 'CONVERGED' | 'UNKNOWN';
   /** Called only by verified bootstrap; fixes a run-scoped historical trade boundary. */
   establishVerifiedTradeBoundary(truth: ExecutionTruthSnapshot): void;
 }
@@ -43,6 +47,8 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
       || !(options.runBudget instanceof GateIoG3RunBudget)
       || typeof options.accountId !== 'string' || options.accountId.length === 0
       || typeof options.now !== 'function' || typeof options.listOmsOrders !== 'function'
+      || (options.attestCurrentRunOrder !== undefined
+        && typeof options.attestCurrentRunOrder !== 'function')
       || typeof options.foundation?.accountTruth !== 'function'
       || typeof options.foundation.instrumentFacts !== 'function') {
     throw new Error('GATEIO_TRUTH_BINDING_INVALID');
@@ -51,6 +57,8 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
   let instrument: GateIoCanonicalInstrumentFacts | null = null;
   let latest: Readonly<{ account: GateIoCanonicalAccountTruth; instrument: GateIoCanonicalInstrumentFacts }> | null = null;
   let latestTruth: ExecutionTruthSnapshot | null = null;
+  let tradeHistory: ReturnType<GateIoExecutionTruthPort['currentRunTradeHistory']> = 'UNKNOWN';
+  const orderAttestations = new Map<string, GateIoCurrentRunOrderAttestation | null>();
   let tradeBoundary: Readonly<{
     serverTimeMs: number;
     observedTradeFingerprints: ReadonlyMap<string, string>;
@@ -76,6 +84,7 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
     currentInstrument: () => instrument !== null && options.now() >= instrument.observedAtMs
       && options.now() - instrument.observedAtMs <= 30_000
       ? instrument : null,
+    currentRunTradeHistory: () => tradeHistory,
     establishVerifiedTradeBoundary(truth: ExecutionTruthSnapshot): void {
       const account = latest?.account;
       if (tradeBoundary !== null || sequence !== 1 || truth !== latestTruth
@@ -95,6 +104,7 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
       sequence += 1;
       latest = null;
       latestTruth = null;
+      tradeHistory = 'UNKNOWN';
       const source = `gateio-${options.environment}-read:capture-${sequence}`;
       const read = await options.foundation.accountTruth(); // always a new factual 5-GET path
       if (instrument === null && read.availability === 'AVAILABLE') await refreshInstrumentFacts();
@@ -210,7 +220,79 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
         });
       }
       const fills: ExternalFill[] = [];
+      let lagging = false;
+      let currentRunFilledOrders = 0;
+      let expectedSignedPosition = 0;
+      for (const order of localOrders) {
+        if (order.status !== 'FILLED') continue;
+        currentRunFilledOrders += 1;
+        const clientText = toGateIoClientText(order.orderId);
+        const trades = tradeGroups.get(order.fillId!);
+        // An already factual personal-trades aggregate keeps the established G3D path.
+        // The extra order GET is required only for absent, delayed current-run history.
+        if (trades !== undefined && !orderAttestations.has(order.orderId)) {
+          const price = trades.notional / trades.quantity;
+          if (trades.local.orderId !== order.orderId || !Number.isFinite(price)
+              || price <= 0 || !Number.isFinite(trades.quantity)
+              || trades.quantity <= 0) {
+            incomplete ??= 'GATEIO_TRADE_AGGREGATE_INVALID';
+            continue;
+          }
+          expectedSignedPosition += (order.side === 'buy' ? 1 : -1) * trades.quantity;
+          fills.push(Object.freeze({ fillId: order.fillId!, orderId: order.orderId,
+            exchange: 'gateio', symbol: 'ETH/USDT', side: order.side,
+            quantity: trades.quantity, price, executedAt: trades.executedAt }));
+          continue;
+        }
+        if (!orderAttestations.has(order.orderId)) {
+          let observed: GateIoCurrentRunOrderAttestation | null = null;
+          try { observed = await options.attestCurrentRunOrder?.(clientText) ?? null; }
+          catch { /* A failed factual GET is never retried or treated as a fill. */ }
+          orderAttestations.set(order.orderId, observed);
+        }
+        const attested = orderAttestations.get(order.orderId);
+        const request = attested?.request;
+        const result = attested?.result;
+        const reduceOnly = order.action === 'reduce' || order.action === 'close'
+          || order.action === 'emergency_exit';
+        if (!request || !result || request.text !== clientText
+            || request.contract !== 'ETH_USDT' || request.reduceOnly !== reduceOnly
+            || request.price !== '0' || request.tif !== 'ioc'
+            || !gateIoEthContractSizeValid(request.size)
+            || Math.sign(request.size) !== (order.side === 'buy' ? 1 : -1)
+            || result.clientText !== clientText || result.contract !== 'ETH_USDT'
+            || result.status !== 'FINISHED' || result.tradeId !== order.fillId
+            || result.exchangeOrderId !== order.fillId
+            || !gateIoEthContractSizeValid(result.signedFilledSize)
+            || Math.abs(result.signedFilledSize - request.size) > 1e-10
+            || result.averagePrice === null || result.averagePrice <= 0) {
+          incomplete ??= result?.status === 'PARTIALLY_FILLED'
+            ? 'GATEIO_PARTIAL_FILL_LIFECYCLE_REQUIRED'
+            : 'GATEIO_ORDER_ATTESTATION_UNPROVABLE';
+          continue;
+        }
+        const executedAt = gateIoExecutionSecondsToMilliseconds(result.executedAt);
+        const quantity = Math.abs(result.signedFilledSize) * facts.contractMultiplier;
+        if (executedAt === null || !Number.isFinite(quantity) || quantity <= 0) {
+          incomplete ??= 'GATEIO_ORDER_ATTESTATION_UNPROVABLE';
+          continue;
+        }
+        expectedSignedPosition += result.signedFilledSize * facts.contractMultiplier;
+        if (trades !== undefined
+            && (trades.local.orderId !== order.orderId
+              || Math.abs(trades.quantity - quantity) > 1e-10
+              || Math.abs(trades.notional / trades.quantity - result.averagePrice) > 1e-8)) {
+          incomplete ??= 'GATEIO_ORDER_TRADE_FACTS_CONFLICT';
+          continue;
+        }
+        if (trades === undefined) lagging = true;
+        fills.push(Object.freeze({ fillId: order.fillId!, orderId: order.orderId,
+          exchange: 'gateio', symbol: 'ETH/USDT', side: order.side,
+          quantity, price: result.averagePrice,
+          executedAt: trades?.executedAt ?? executedAt }));
+      }
       for (const [exchangeOrderId, group] of tradeGroups) {
+        if (group.local.status === 'FILLED') continue; // exact order already projected once
         const price = group.notional / group.quantity;
         if (!Number.isFinite(group.quantity) || group.quantity <= 0
             || !Number.isFinite(price) || price <= 0) {
@@ -221,12 +303,14 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
           exchange: 'gateio', symbol: 'ETH/USDT', side: group.local.side,
           quantity: group.quantity, price, executedAt: group.executedAt }));
       }
-      for (const order of localOrders) {
-        if (order.status === 'FILLED' && !fills.some((fill) =>
-          fill.orderId === order.orderId && fill.fillId === order.fillId)) {
-          incomplete ??= 'GATEIO_CONFIRMED_FILL_NOT_IN_RECENT_TRADES';
-        }
+      if (lagging) {
+        const factualSignedPosition = positions.reduce((sum, leg) => sum + leg.signedQuantity, 0);
+        if (positions.length > 1 || !Number.isFinite(expectedSignedPosition)
+            || Math.abs(expectedSignedPosition - factualSignedPosition) > 1e-10)
+          incomplete ??= 'GATEIO_ORDER_POSITION_DELTA_MISMATCH';
       }
+      tradeHistory = incomplete !== null ? 'UNKNOWN'
+        : currentRunFilledOrders === 0 ? 'NONE' : lagging ? 'LAGGING' : 'CONVERGED';
       latestTruth = Object.freeze({ identity, orders: Object.freeze(orders), fills: Object.freeze(fills),
         positions: Object.freeze(positions), capturedAt, source,
         complete: incomplete === null, ...(incomplete === null ? {} : { incompleteReason: incomplete }) });

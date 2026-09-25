@@ -282,16 +282,17 @@ describe('Gate G3A-R1 offline budget and runner', () => {
       && error.decision === null && error.reasonCode === 'NETWORK_REQUEST_CAP_EXCEEDED');
     assert.deepEqual(methods, ['POST']);
     assert.deepEqual(budget.snapshot(), { accountUsed: 0, instrumentUsed: 0,
-      ambiguousUsed: 0, proofUsed: 1, cleanupUsed: 0, totalUsed: 1, networkUsed: 1 });
+      ambiguousUsed: 0, attestationUsed: 0, proofUsed: 1, cleanupUsed: 0,
+      totalUsed: 1, networkUsed: 1 });
   });
 
-  it('rejects the 37th network request before transport and keeps mutation limits separate', () => {
+  it('rejects the 40th network request before transport and keeps mutation limits separate', () => {
     const budget = GateIoG3RunBudget.create();
-    for (let i = 0; i < 36; i++) budget.consumeReadRequest();
+    for (let i = 0; i < 39; i++) budget.consumeReadRequest();
     assert.throws(() => budget.consumeReadRequest(), (error: unknown) =>
       error instanceof GateIoG3BudgetDenial && error.reasonCode === 'NETWORK_REQUEST_CAP_EXCEEDED');
     assert.deepEqual(budget.snapshot(), { accountUsed: 0, instrumentUsed: 0, ambiguousUsed: 0,
-      proofUsed: 0, cleanupUsed: 0, totalUsed: 0, networkUsed: 36 });
+      attestationUsed: 0, proofUsed: 0, cleanupUsed: 0, totalUsed: 0, networkUsed: 39 });
     const separate = GateIoG3RunBudget.create();
     separate.consumeMutationRequest('PROOF', false);
     separate.consumeMutationRequest('PROOF', true);
@@ -302,8 +303,8 @@ describe('Gate G3A-R1 offline budget and runner', () => {
       /MUTATION_TOTAL_CAP_EXCEEDED/);
     assert.equal(separate.snapshot().networkUsed, 3);
     assert.deepEqual(GATEIO_G3_LIMITS, { accountAcquisitions: 5, instrumentAcquisitions: 2,
-      ambiguousReconciliations: 2, proofMutations: 2, cleanupMutations: 1,
-      totalMutations: 3, networkRequests: 36 });
+      ambiguousReconciliations: 2, currentRunOrderAttestations: 3,
+      proofMutations: 2, cleanupMutations: 1, totalMutations: 3, networkRequests: 39 });
   });
 
   it('keeps acquisition, reconciliation and cleanup cap denials structured with unchanged counts', () => {
@@ -324,6 +325,51 @@ describe('Gate G3A-R1 offline budget and runner', () => {
     denied(() => budget.consumeMutationRequest('EMERGENCY_CLEANUP', true),
       'MUTATION_CLEANUP_CAP_EXCEEDED');
     assert.deepEqual(budget.snapshot(), afterCleanup);
+  });
+
+  it('caps current-run order attestations at three independent of POST mutation slots', () => {
+    const budget = GateIoG3RunBudget.create();
+    for (let index = 0; index < 3; index += 1) {
+      budget.beginCurrentRunOrderAttestation();
+      budget.consumeReadRequest();
+    }
+    assert.throws(() => budget.beginCurrentRunOrderAttestation(),
+      /CURRENT_RUN_ORDER_ATTESTATION_CAP_EXCEEDED/);
+    assert.equal(budget.snapshot().attestationUsed, 3);
+    assert.equal(budget.snapshot().networkUsed, 3);
+    assert.equal(budget.snapshot().totalUsed, 0);
+  });
+
+  it('preserves factual partial quantity on the read-only lookup without promoting it to a full fill', async () => {
+    const budget = GateIoG3RunBudget.create();
+    const methods: string[] = [];
+    const client = createGateIoFuturesExecutionClient({
+      environment: 'testnet', credential: { apiKey: KEY, secretKey: SECRET },
+      signedTimestamp: () => SECOND, runBudget: budget,
+      readFoundation: { async instrumentFacts() { throw new Error('unused'); } },
+      fetchImpl: async (_url, init) => {
+        methods.push(init.method ?? '');
+        return new Response(JSON.stringify({
+          id: '9007199254740993', text: 't-dsb-' + 'a'.repeat(22),
+          contract: 'ETH_USDT', size: 0.2, left: 0.1, status: 'open',
+          fill_price: '2000', finish_time: Number(SECOND),
+        }));
+      },
+    });
+    const request = { contract: 'ETH_USDT' as const, size: 0.2,
+      price: '0' as const, tif: 'ioc' as const, reduceOnly: false,
+      text: 't-dsb-' + 'a'.repeat(22) };
+    const submission = await client.submitMarketOrder(request);
+    const observed = await client.lookupSubmittedOrder(request.text);
+    assert.equal(submission.status, 'PARTIALLY_FILLED');
+    assert.equal(submission.signedFilledSize, 0.1);
+    assert.equal(observed?.result.status, 'PARTIALLY_FILLED');
+    assert.equal(observed?.result.signedFilledSize, 0.1);
+    assert.deepEqual(methods, ['POST', 'GET']);
+    assert.equal(budget.snapshot().proofUsed, 1);
+    assert.equal(budget.snapshot().attestationUsed, 1);
+    assert.equal(await client.lookupSubmittedOrder('t-dsb-' + 'b'.repeat(22)), null);
+    assert.deepEqual(methods, ['POST', 'GET']);
   });
 
   for (const scenario of ['normal', 'ambiguous-open', 'ambiguous-close', 'cleanup', 'dual-opposed'] as const) {

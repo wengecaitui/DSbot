@@ -28,6 +28,10 @@ interface Scenario {
   readonly externalFlattens?: boolean;
   readonly wrongCurrentOrderId?: boolean;
   readonly subMillisecondTimes?: boolean;
+  readonly historyLag?: 'both' | 'open' | 'close';
+  readonly orderLookupFailure?: 'NOT_FOUND' | 'QUANTITY_MISMATCH';
+  readonly positionMismatchAfterOpen?: boolean;
+  readonly closeRejectedForCleanup?: boolean;
 }
 
 function numericToken(value: Record<string, unknown>, field: string, token: string): string {
@@ -75,6 +79,7 @@ function fixture(scenario: Scenario = {}) {
     ];
   let position = scenario.initialPosition ?? 0;
   let postCount = 0;
+  let accountReads = 0;
   const response = (value: unknown) => new Response(JSON.stringify(value));
   const fetchImpl = async (url: string, init: RequestInit) => {
     assert.equal(new URL(url).origin, 'https://api-testnet.gateapi.io');
@@ -84,10 +89,13 @@ function fixture(scenario: Scenario = {}) {
     calls.push({ path, method: init.method ?? 'GET', body });
     if (path === GATEIO_READ_ENDPOINTS.SERVER_TIME)
       return response({ server_time: observedNow });
-    if (path === GATEIO_READ_ENDPOINTS.ACCOUNTS) return response({
-      currency: 'USDT', total: '1000', available: '900',
-      in_dual_mode: false, position_mode: 'single', margin_mode: 0,
-    });
+    if (path === GATEIO_READ_ENDPOINTS.ACCOUNTS) {
+      accountReads += 1;
+      return response({
+        currency: 'USDT', total: '1000', available: '900',
+        in_dual_mode: false, position_mode: 'single', margin_mode: 0,
+      });
+    }
     if (path === GATEIO_READ_ENDPOINTS.POSITIONS) return response([{
       contract: 'ETH_USDT', mode: 'single', size: String(position),
       value: String(position * 2), pos_margin_mode: 'cross', leverage: '10',
@@ -120,7 +128,11 @@ function fixture(scenario: Scenario = {}) {
           'external-after-run', -0.1,
           scenario.subMillisecondTimes ? '1800000001.0009' : SECOND,
           scenario.missingTradeValue)] : [];
-      return new Response('[' + [...malformed, ...currentTrades, ...external].join(',') + ']');
+      const visibleCurrent = scenario.historyLag === 'both' ? []
+        : scenario.historyLag === 'close' ? currentTrades.slice(0, 1)
+        : scenario.historyLag === 'open' && accountReads < 3
+          ? currentTrades.slice(1) : currentTrades;
+      return new Response('[' + [...malformed, ...visibleCurrent, ...external].join(',') + ']');
     }
     if (path === GATEIO_READ_ENDPOINTS.CONTRACT) return response({
       name: 'ETH_USDT', status: 'trading', in_delisting: false,
@@ -138,12 +150,18 @@ function fixture(scenario: Scenario = {}) {
     if (init.method === 'GET' && path.startsWith('/api/v4/futures/usdt/orders/')) {
       const text = path.split('/').at(-1)!;
       assert.ok(orders.has(text));
+      if (scenario.orderLookupFailure === 'NOT_FOUND' && postCount === 1)
+        return response({ label: 'ORDER_NOT_FOUND' }, 404);
+      if (scenario.orderLookupFailure === 'QUANTITY_MISMATCH' && postCount === 1)
+        return new Response(orders.get(text)!.replace('"size":0.1', '"size":0.2'));
       return new Response(orders.get(text));
     }
     assert.equal(path, '/api/v4/futures/usdt/orders');
     assert.equal(init.method, 'POST');
     assert.ok(body);
     postCount += 1;
+    if (scenario.closeRejectedForCleanup && postCount === 2)
+      return response({ label: 'ORDER_REJECTED' }, 400);
     const orderId = postCount === 1 ? ORDER_ONE : ORDER_TWO;
     const rawOrder = numericToken({
       id: '__EXACT__', text: body.text, contract: 'ETH_USDT', size: body.size,
@@ -152,6 +170,7 @@ function fixture(scenario: Scenario = {}) {
     }, 'id', orderId);
     orders.set(body.text as string, rawOrder);
     position = Math.round((position + Number(body.size)) * 10) / 10;
+    if (scenario.positionMismatchAfterOpen && postCount === 1) position = 0.2;
     if (scenario.externalFlattens && postCount === 1) position = 0;
     const tradeOrderId = scenario.wrongCurrentOrderId && postCount === 1
       ? '9007199254740992' : orderId;
@@ -352,5 +371,90 @@ describe('Gate G3G exact fractional trade time formal offline path', () => {
     assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
     assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
     assert.equal(fake.postCount >= 1, true);
+  });
+});
+
+describe('Gate G3H current-run fill attestation with delayed personal trades', () => {
+  it('passes the formal OPEN/CLOSE/FLAT path while both current fills lag in my_trades', async () => {
+    const fake = fixture({ history: 'eight', missingTradeValue: true,
+      subMillisecondTimes: true, historyLag: 'both' });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'PASS', JSON.stringify(result.receipt));
+    assert.equal(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+    assert.equal(result.receipt.currentRunTradeHistory, 'LAGGING');
+    assert.equal(result.receipt.budget.attestationUsed, 2);
+    assert.equal(result.receipt.budget.networkUsed, fake.calls.length);
+    assert.equal(result.receipt.budget.networkUsed <= 39, true);
+    assert.equal(fake.postCount, 2);
+    assert.equal(fake.position, 0);
+    assert.equal(fake.journal.readFromLogicalSequence(1)
+      .filter((event) => event.type === 'execution.fill.confirmed').length, 2,
+    'read-only order attestation must not apply a second Kernel fill');
+  });
+
+  it('returns FAIL_CLEANED_UP when cleanup is factually flat despite lagging history', async () => {
+    const fake = fixture({ history: 'one', historyLag: 'both',
+      closeRejectedForCleanup: true, missingTradeValue: true });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
+    assert.equal(result.receipt.reasonCode, 'FAIL_CLEANED_UP');
+    assert.equal(result.receipt.currentRunTradeHistory, 'LAGGING');
+    assert.equal(result.receipt.budget.attestationUsed, 2);
+    assert.equal(result.receipt.budget.cleanupUsed, 1);
+    assert.equal(fake.postCount, 3);
+    assert.equal(fake.position, 0);
+    assert.equal(fake.journal.readFromLogicalSequence(1)
+      .filter((event) => event.type === 'execution.fill.confirmed').length, 2);
+  });
+
+  it('attests a lagging CLOSE against a visible OPEN trade and the resulting flat position', async () => {
+    const fake = fixture({ history: 'one', historyLag: 'close' });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'PASS', JSON.stringify(result.receipt));
+    assert.equal(result.receipt.currentRunTradeHistory, 'LAGGING');
+    assert.equal(result.receipt.budget.attestationUsed, 1);
+    assert.equal(fake.position, 0);
+  });
+
+  for (const failure of ['NOT_FOUND', 'QUANTITY_MISMATCH'] as const) {
+    it('fails closed when exact order lookup is ' + failure, async () => {
+      const fake = fixture({ history: 'one', historyLag: 'both',
+        orderLookupFailure: failure });
+      const result = await fake.binding.run();
+      assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
+      assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+      assert.equal(result.receipt.currentRunTradeHistory, 'UNKNOWN');
+      assert.equal(result.receipt.budget.attestationUsed, 1);
+      assert.equal(fake.postCount, 1);
+    });
+  }
+
+  it('fails closed when the fresh Gate position disagrees with the exact order fill', async () => {
+    const fake = fixture({ history: 'one', historyLag: 'both',
+      positionMismatchAfterOpen: true });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
+    assert.equal(result.receipt.currentRunTradeHistory, 'UNKNOWN');
+    assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+    assert.equal(fake.postCount, 1);
+  });
+
+  it('converges when a delayed trade appears later, without another order GET or fill apply', async () => {
+    const fake = fixture({ history: 'one', historyLag: 'open' });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'PASS', JSON.stringify(result.receipt));
+    assert.equal(result.receipt.currentRunTradeHistory, 'CONVERGED');
+    assert.equal(result.receipt.budget.attestationUsed, 1);
+    assert.equal(fake.journal.readFromLogicalSequence(1)
+      .filter((event) => event.type === 'execution.fill.confirmed').length, 2);
+  });
+
+  it('still fails closed on unrelated new trade during a history lag', async () => {
+    const fake = fixture({ history: 'one', historyLag: 'both',
+      externalAfterOpen: true });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
+    assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+    assert.equal(result.receipt.currentRunTradeHistory, 'UNKNOWN');
   });
 });

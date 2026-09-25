@@ -57,6 +57,7 @@ export interface GateIoG3RunReceipt {
   readonly finalExposure: 'NOT_OBSERVED' | 'FACTUAL_FLAT' | 'FACTUAL_NON_FLAT' | 'EXPOSURE_UNKNOWN';
   readonly failureOrigin: string | null;
   readonly truthFailureReason: string | null;
+  readonly currentRunTradeHistory: 'NONE' | 'LAGGING' | 'CONVERGED' | 'UNKNOWN';
   readonly testnetOnly: true;
   readonly liveReady: false;
 }
@@ -113,6 +114,7 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
     environment: 'testnet', transport, runBudget: budget, foundation,
     accountId: options.accountId, now: options.now,
     listOmsOrders: () => oms.getStore().list(),
+    attestCurrentRunOrder: (clientText) => client.lookupSubmittedOrder(clientText),
   });
   let started = false;
   let openOmsStatus: string | null = null;
@@ -127,6 +129,7 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
     status, reasonCode, openOmsStatus, closeOmsStatus, cleanupOmsStatus,
     lastCaptureSequence: truthPort.captureSequence(), budget: budget.snapshot(),
     finalExposure, failureOrigin, truthFailureReason,
+    currentRunTradeHistory: truthPort.currentRunTradeHistory(),
     testnetOnly: true as const, liveReady: false as const,
   });
 

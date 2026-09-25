@@ -95,6 +95,17 @@ export interface GateIoFuturesExecutionClientOptions {
   readonly runBudget?: GateIoG3RunBudget;
 }
 
+/** Read-only verification of the exact request already sent by this client. Never applies a fill. */
+export interface GateIoCurrentRunOrderAttestation {
+  readonly request: GateIoFuturesMarketOrderRequest;
+  readonly result: GateIoFuturesMarketOrderResult;
+}
+
+export interface GateIoFuturesExecutionClientWithAttestation
+  extends GateIoFuturesExecutionClientPort {
+  lookupSubmittedOrder(clientText: string): Promise<GateIoCurrentRunOrderAttestation | null>;
+}
+
 export type GateIoFuturesExecutionClientErrorCode =
   | 'GATEIO_EXECUTION_CONFIGURATION_INVALID'
   | 'GATEIO_EXECUTION_REQUEST_INVALID'
@@ -287,7 +298,7 @@ function instrumentFactsUsable(value: GateIoCanonicalInstrumentFacts | null): bo
 
 export function createGateIoFuturesExecutionClient(
   options: GateIoFuturesExecutionClientOptions,
-): GateIoFuturesExecutionClientPort {
+): GateIoFuturesExecutionClientWithAttestation {
   if (!isRecord(options)
       || (options.environment !== 'testnet' && options.environment !== 'live')
       || !validCredential(options.credential)
@@ -306,6 +317,7 @@ export function createGateIoFuturesExecutionClient(
   }
   const origin = GATEIO_EXECUTION_ORIGINS[options.environment];
   const credential = options.credential;
+  const submittedRequests = new Map<string, GateIoFuturesMarketOrderRequest>();
 
   async function wire(
     method: 'GET' | 'POST',
@@ -396,6 +408,15 @@ export function createGateIoFuturesExecutionClient(
   }
 
   return Object.freeze({
+    async lookupSubmittedOrder(clientText: string): Promise<GateIoCurrentRunOrderAttestation | null> {
+      const request = submittedRequests.get(clientText);
+      if (!options.runBudget || request === undefined || !CLIENT_TEXT.test(clientText)) return null;
+      options.runBudget.beginCurrentRunOrderAttestation();
+      const response = await wire('GET', GATEIO_EXECUTION_ORDER_PATH + '/' + clientText, '');
+      if (response === null || !response.ok || response.parsed === null) return null;
+      const result = normalizedOrder(response.parsed, request);
+      return result === null ? null : Object.freeze({ request, result });
+    },
     async getInstrumentFacts(symbol: string): Promise<GateIoCanonicalInstrumentFacts | null> {
       if (symbol !== 'ETH/USDT') return null;
       try {
@@ -415,6 +436,10 @@ export function createGateIoFuturesExecutionClient(
           || (purpose !== 'PROOF' && purpose !== 'EMERGENCY_CLEANUP')) {
         fail('GATEIO_EXECUTION_REQUEST_INVALID');
       }
+      // Observation only: keep the first exact request without changing G2's frozen
+      // mutation-budget/duplicate-submission decision ordering.
+      if (!submittedRequests.has(request.text))
+        submittedRequests.set(request.text, Object.freeze({ ...request }));
       const body = JSON.stringify({
         contract: request.contract,
         size: request.size,
