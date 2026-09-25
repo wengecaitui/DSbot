@@ -114,7 +114,8 @@ export interface GateIoCanonicalTrade {
   readonly fee: number;
   readonly pointFee: number;
   readonly role: 'maker' | 'taker';
-  readonly tradeValue: number;
+  /** Optional exchange metadata. Null means omitted; supplied decimal text remains exact. */
+  readonly tradeValue: string | number | null;
   /** Gate epoch seconds; fractional seconds are preserved exactly as reported. */
   readonly createdAt: number;
 }
@@ -244,6 +245,13 @@ function optionalDecimal(value: unknown): number | null {
   if (value === undefined || value === null) return null;
   if (typeof value === 'string' && value.trim() === '') malformed('ACCOUNT_TRUTH_MALFORMED');
   return decimal(value);
+}
+
+function optionalTradeValue(raw: Record<string, unknown>): string | number | null {
+  if (!Object.prototype.hasOwnProperty.call(raw, 'trade_value')) return null;
+  // A present null, blank, object or non-finite value is malformed, not "unavailable".
+  decimal(raw.trade_value);
+  return raw.trade_value as string | number;
 }
 
 /**
@@ -409,7 +417,7 @@ export function normalizeGateIoTrade(raw: unknown): GateIoCanonicalTrade {
       fee: decimal(raw.fee),
       pointFee: decimal(raw.point_fee),
       role: raw.role,
-      tradeValue: decimal(raw.trade_value),
+      tradeValue: optionalTradeValue(raw),
       createdAt: timestamp(raw.create_time),
     });
   });

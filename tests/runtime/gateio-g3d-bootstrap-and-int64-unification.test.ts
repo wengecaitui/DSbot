@@ -15,7 +15,8 @@ const HISTORICAL_ONE = '9007199254740997';
 const HISTORICAL_TWO = '9007199254740999';
 
 interface Scenario {
-  readonly history?: 'none' | 'one' | 'multiple' | 'malformed';
+  readonly history?: 'none' | 'one' | 'multiple' | 'eight' | 'malformed';
+  readonly missingTradeValue?: boolean;
   readonly initialPosition?: number;
   readonly initialOpenOrder?: boolean;
   readonly pageChurn?: boolean;
@@ -31,12 +32,13 @@ function numericToken(value: Record<string, unknown>, field: string, token: stri
 }
 
 function tradeRaw(id: string, orderId: string, text: string, size: number,
-  createdAt: number): string {
+  createdAt: number, missingTradeValue = false): string {
   const entry = {
     id: '__EXACT__', order_id: '__ORDER__', contract: 'ETH_USDT',
     size: String(size), close_size: '0', price: '2000', text,
     fee: '0', point_fee: '0', role: 'taker',
-    trade_value: String(Math.abs(size) * 2), create_time: String(createdAt),
+    ...(missingTradeValue ? {} : { trade_value: String(Math.abs(size) * 2) }),
+    create_time: String(createdAt),
   };
   return numericToken(entry, 'id', id).replace('"order_id":"__ORDER__"',
     '"order_id":' + orderId);
@@ -46,12 +48,20 @@ function fixture(scenario: Scenario = {}) {
   const calls: { path: string; method: string; body: Record<string, unknown> | null }[] = [];
   const orders = new Map<string, string>();
   const currentTrades: string[] = [];
-  const historical = [
-    tradeRaw(HISTORICAL_ONE, '9100000000000001', 'external-before-run', 0.1,
-      scenario.contemporaneousInitialTrade ? SECOND : SECOND - 20),
-    ...(scenario.history === 'multiple'
-      ? [tradeRaw(HISTORICAL_TWO, '9100000000000003', 'older-page', -0.1, SECOND - 30)] : []),
-  ];
+  const historical = scenario.history === 'eight'
+    ? Array.from({ length: 8 }, (_, index) =>
+      tradeRaw((9007199254740997n + BigInt(index) * 2n).toString(),
+        (9100000000000001n + BigInt(index) * 2n).toString(),
+        'older-page', index % 2 === 0 ? 0.1 : -0.1, SECOND - 20 - index,
+        scenario.missingTradeValue))
+    : [
+      tradeRaw(HISTORICAL_ONE, '9100000000000001', 'external-before-run', 0.1,
+        scenario.contemporaneousInitialTrade ? SECOND : SECOND - 20,
+        scenario.missingTradeValue),
+      ...(scenario.history === 'multiple'
+        ? [tradeRaw(HISTORICAL_TWO, '9100000000000003', 'older-page', -0.1,
+          SECOND - 30, scenario.missingTradeValue)] : []),
+    ];
   let position = scenario.initialPosition ?? 0;
   let postCount = 0;
   const response = (value: unknown) => new Response(JSON.stringify(value));
@@ -92,7 +102,7 @@ function fixture(scenario: Scenario = {}) {
         ? [tradeRaw('1.234e16', '9100000000000001', 'bad', 0.1, SECOND - 20)] : previous;
       const external = scenario.externalAfterOpen && postCount > 0
         ? [tradeRaw('9100000000000099', '9100000000000097',
-          'external-after-run', -0.1, SECOND)] : [];
+          'external-after-run', -0.1, SECOND, scenario.missingTradeValue)] : [];
       return new Response('[' + [...malformed, ...currentTrades, ...external].join(',') + ']');
     }
     if (path === GATEIO_READ_ENDPOINTS.CONTRACT) return response({
@@ -129,16 +139,18 @@ function fixture(scenario: Scenario = {}) {
     const tradeOrderId = scenario.wrongCurrentOrderId && postCount === 1
       ? '9007199254740992' : orderId;
     currentTrades.push(tradeRaw(postCount === 1 ? '9100000000000011' : '9100000000000013',
-      tradeOrderId, body.text as string, Number(body.size), SECOND));
+      tradeOrderId, body.text as string, Number(body.size), SECOND,
+      scenario.missingTradeValue));
     return new Response(rawOrder);
   };
+  const journal = createInMemoryEventJournal();
   const binding = createGateIoTestnetOmsE2ELaunchBinding({
     credential: { apiKey: 'FIXTURE_G3D_KEY', secretKey: 'FIXTURE_G3D_SECRET' },
     accountId: 'fixture-account', fetchImpl, now: () => NOW,
-    journal: createInMemoryEventJournal(),
+    journal,
     expectedExactHead: HEAD, actualExactHead: () => HEAD, worktreeClean: () => true,
   });
-  return { binding, calls, get postCount() { return postCount; },
+  return { binding, calls, journal, get postCount() { return postCount; },
     get position() { return position; } };
 }
 
@@ -255,6 +267,34 @@ describe('Gate G3D formal offline bootstrap and runtime trade scope', () => {
     const result = await fake.binding.run();
     assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
     assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+    assert.equal(fake.postCount >= 1, true);
+  });
+});
+
+describe('Gate G3F formal offline path with absent trade_value', () => {
+  it('accepts eight historical trades and correlates current OPEN/CLOSE without invented value', async () => {
+    const fake = fixture({ history: 'eight', missingTradeValue: true });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'PASS', JSON.stringify(result.receipt));
+    assert.equal(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+    assert.equal(fake.postCount, 2);
+    assert.equal(fake.position, 0);
+    assert.equal(result.receipt.budget.proofUsed, 2);
+    assert.equal(result.receipt.budget.cleanupUsed, 0);
+    assert.equal(result.receipt.budget.networkUsed, fake.calls.length);
+    const events = fake.journal.readFromLogicalSequence(1);
+    assert.equal(events.filter((event) => event.type === 'position.baseline.confirmed').length, 1);
+    assert.equal(events.filter((event) => event.type === 'execution.fill.confirmed').length, 2,
+      'historical trades cannot become current-run fills');
+  });
+
+  it('still fails closed on a new external trade whose trade_value is absent', async () => {
+    const fake = fixture({ history: 'eight', missingTradeValue: true,
+      externalAfterOpen: true, externalFlattens: true });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
+    assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+    assert.equal(result.receipt.liveReady, false);
     assert.equal(fake.postCount >= 1, true);
   });
 });
