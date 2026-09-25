@@ -44,6 +44,9 @@ export interface GateIoG3RunReceipt {
   readonly cleanupOmsStatus: string | null;
   readonly lastCaptureSequence: number;
   readonly budget: ReturnType<GateIoG3RunBudget['snapshot']>;
+  readonly finalExposure: 'NOT_OBSERVED' | 'FACTUAL_FLAT' | 'FACTUAL_NON_FLAT' | 'EXPOSURE_UNKNOWN';
+  readonly failureOrigin: string | null;
+  readonly truthFailureReason: string | null;
   readonly testnetOnly: true;
   readonly liveReady: false;
 }
@@ -98,9 +101,14 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
   let openOmsStatus: string | null = null;
   let closeOmsStatus: string | null = null;
   let cleanupOmsStatus: string | null = null;
+  let finalExposure: GateIoG3RunReceipt['finalExposure'] = 'NOT_OBSERVED';
+  let failureOrigin: string | null = null;
+  let truthFailureReason: string | null = null;
+  let finalizing = false;
   const receipt = (status: 'PASS' | 'STOP', reasonCode: string): GateIoG3RunReceipt => Object.freeze({
     status, reasonCode, openOmsStatus, closeOmsStatus, cleanupOmsStatus,
     lastCaptureSequence: truthPort.captureSequence(), budget: budget.snapshot(),
+    finalExposure, failureOrigin, truthFailureReason,
     testnetOnly: true as const, liveReady: false as const,
   });
 
@@ -109,9 +117,13 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
     const truth = await truthPort.acquireTruth();
     const facts = truthPort.canonicalForCapture(truthPort.captureSequence());
     const age = options.now() - truth.capturedAt;
-    return truthPort.captureSequence() === before + 1 && truth.complete && facts !== null
+    const usable = truthPort.captureSequence() === before + 1 && truth.complete && facts !== null
       && Number.isSafeInteger(age) && age >= 0 && age <= 30_000
       ? { truth, facts } : null;
+    truthFailureReason = usable === null
+      ? truth.incompleteReason ?? (facts === null ? 'CANONICAL_TRUTH_UNAVAILABLE' : 'TRUTH_STALE')
+      : null;
+    return usable;
   }
 
   async function submit(action: TradeAction, direction: 'long' | 'short', positionUsd: number,
@@ -178,6 +190,101 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
       && positionStore.resolve('gateio', 'ETH/USDT').status === 'flat';
   }
 
+  type Capture = NonNullable<Awaited<ReturnType<typeof capture>>>;
+  function classifyExposure(value: Capture): 'FACTUAL_FLAT' | 'FACTUAL_NON_FLAT' | 'EXPOSURE_UNKNOWN' {
+    const { account, instrument } = value.facts;
+    if (value.truth.orders.length !== 0 || account.identity.accountId !== options.accountId
+        || account.identity.exchange !== 'gateio' || account.freshness !== 'FRESH'
+        || instrument.freshness !== 'FRESH') return 'EXPOSURE_UNKNOWN';
+    if (account.accountState === 'FLAT' && value.truth.positions.length === 0
+        && account.positions.every((leg) => leg.signedSize === 0 && leg.quoteValue === 0))
+      return 'FACTUAL_FLAT';
+    const position = value.truth.positions[0];
+    const factualLegs = account.positions.filter((leg) => leg.signedSize !== 0);
+    if (account.accountState !== 'OPEN' || account.account.inDualMode !== false
+        || value.truth.positions.length !== 1 || factualLegs.length !== 1
+        || factualLegs[0]!.mode !== 'single' || !position
+        || !Number.isFinite(position.signedQuantity) || position.signedQuantity === 0
+        || Math.abs(factualLegs[0]!.signedSize * instrument.contractMultiplier
+          - position.signedQuantity) > 1e-10) return 'EXPOSURE_UNKNOWN';
+    return 'FACTUAL_NON_FLAT';
+  }
+
+  /** A failed proof is never rehabilitated by emergency cleanup. */
+  async function finalizeFailedRun(reason: string, alreadyFresh: Capture | null = null): Promise<GateIoG3RunReceipt> {
+    failureOrigin = reason;
+    if (budget.snapshot().totalUsed === 0) return receipt('STOP', reason);
+    if (finalizing) return receipt('STOP', 'FAIL_EXPOSURE_UNKNOWN');
+    finalizing = true;
+    let current: Capture | null = alreadyFresh;
+    if (current !== null) {
+      const age = options.now() - current.truth.capturedAt;
+      if (!Number.isSafeInteger(age) || age < 0 || age > 30_000) current = null;
+    }
+    if (current === null) {
+      try { current = await capture(); }
+      catch { truthFailureReason = 'TRUTH_ACQUISITION_FAILED'; }
+    }
+    if (current === null) {
+      finalExposure = 'EXPOSURE_UNKNOWN';
+      return receipt('STOP', 'FAIL_EXPOSURE_UNKNOWN');
+    }
+    finalExposure = classifyExposure(current);
+    const exposureAge = options.now() - current.truth.capturedAt;
+    if (!Number.isSafeInteger(exposureAge) || exposureAge < 0 || exposureAge > 30_000) {
+      finalExposure = 'EXPOSURE_UNKNOWN';
+      truthFailureReason = 'TRUTH_STALE';
+      return receipt('STOP', 'FAIL_EXPOSURE_UNKNOWN');
+    }
+    if (finalExposure === 'FACTUAL_FLAT') return receipt('STOP', 'FAIL_' + reason + '_FLAT');
+    if (finalExposure === 'EXPOSURE_UNKNOWN') {
+      truthFailureReason ??= 'EXACT_EXPOSURE_UNPROVABLE';
+      return receipt('STOP', 'FAIL_EXPOSURE_UNKNOWN');
+    }
+    const beforeCleanup = budget.snapshot();
+    if (beforeCleanup.cleanupUsed >= GATEIO_G3_LIMITS.cleanupMutations
+        || beforeCleanup.totalUsed >= GATEIO_G3_LIMITS.totalMutations
+        || beforeCleanup.networkUsed >= GATEIO_G3_LIMITS.networkRequests)
+      return receipt('STOP', 'FAIL_CLEANUP_BUDGET_EXHAUSTED');
+    const exposure = current.truth.positions[0]!;
+    const facts = current.facts.instrument;
+    const contracts = Math.abs(exposure.signedQuantity) / facts.contractMultiplier;
+    const normalized = normalizeGateIoEthContracts(contracts, facts, 'emergency_exit');
+    const currentFacts = truthPort.currentInstrument();
+    if (currentFacts !== facts || normalized === null
+        || Math.abs(normalized - contracts) > 1e-10
+        || !Number.isFinite(facts.markPrice) || facts.markPrice <= 0)
+      return receipt('STOP', 'FAIL_POSITION_REMAINS_OPEN');
+    const positionUsd = Math.abs(exposure.signedQuantity) * facts.markPrice;
+    if (!Number.isFinite(positionUsd) || positionUsd <= 0)
+      return receipt('STOP', 'FAIL_POSITION_REMAINS_OPEN');
+    // Emergency exit still uses the sole OMS and adapter. The factual Gate leg, not
+    // a divergent local position, determines the reduce-only target.
+    try {
+      const intent = createTradeIntent({ exchange: 'gateio', symbol: 'ETH/USDT',
+        direction: exposure.side === 'long' ? 'short' : 'long', positionUsd,
+        source: 'gateio-g3-testnet', reason: 'g3-factual-emergency-exit',
+        biasUpdatedAt: options.now(), createdAt: options.now() });
+      const cleanup = await oms.submitRequest(intent, 'emergency_exit', positionUsd);
+      cleanupOmsStatus = cleanup.status;
+    } catch {
+      cleanupOmsStatus = 'submission_unknown';
+    }
+    // Even an ambiguous or rejected cleanup must be followed by a new factual read.
+    let postCleanup: Capture | null = null;
+    try { postCleanup = await capture(); }
+    catch { truthFailureReason = 'POST_CLEANUP_TRUTH_ACQUISITION_FAILED'; }
+    if (postCleanup === null) {
+      finalExposure = 'EXPOSURE_UNKNOWN';
+      return receipt('STOP', 'FAIL_POST_CLEANUP_TRUTH_UNKNOWN');
+    }
+    finalExposure = classifyExposure(postCleanup);
+    if (finalExposure === 'FACTUAL_FLAT') return receipt('STOP', 'FAIL_CLEANED_UP');
+    if (finalExposure === 'FACTUAL_NON_FLAT') return receipt('STOP', 'FAIL_POSITION_REMAINS_OPEN');
+    truthFailureReason ??= 'POST_CLEANUP_EXPOSURE_UNPROVABLE';
+    return receipt('STOP', 'FAIL_POST_CLEANUP_TRUTH_UNKNOWN');
+  }
+
   return Object.freeze({
     sharedBudget: budget,
     truthPort,
@@ -199,46 +306,39 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
         const open = await submit('open', 'long', minNotional,
           initial.facts.instrument.minOrderSize);
         openOmsStatus = open === 'RISK_REJECTED' ? open : open.status;
-        if (open === 'RISK_REJECTED') return receipt('STOP', 'OPEN_RISK_REJECTED');
+        if (open === 'RISK_REJECTED') return await finalizeFailedRun('OPEN_RISK_REJECTED');
         const postOpen = await capture(); // fresh after mutation even when submission unknown
-        if (!postOpen) return receipt('STOP', 'POST_OPEN_TRUTH_UNKNOWN');
-        if (open.status !== 'filled' || !factualOpen(postOpen))
-          return receipt('STOP', 'OPEN_NOT_FACTUALLY_CONFIRMED');
+        if (!postOpen) return await finalizeFailedRun('POST_OPEN_TRUTH_UNKNOWN');
+        if (open.status !== 'filled') return await finalizeFailedRun('OPEN_FILL_UNCONFIRMED');
+        if (!factualFillsMatchKernel(postOpen.truth))
+          return await finalizeFailedRun('OPEN_QUANTITY_MISMATCH');
+        if (!factualOpen(postOpen)) return await finalizeFailedRun('OPEN_POSITION_MISMATCH');
         const preClose = await capture(); // fresh position/order/trade facts
-        if (!preClose || !factualOpen(preClose)) return receipt('STOP', 'PRE_CLOSE_TRUTH_UNKNOWN');
+        if (!preClose || !factualOpen(preClose))
+          return await finalizeFailedRun('PRE_CLOSE_TRUTH_MISMATCH');
         const freshInstrument = await truthPort.refreshInstrumentFacts();
-        if (!freshInstrument) return receipt('STOP', 'PRE_CLOSE_INSTRUMENT_UNKNOWN');
+        if (!freshInstrument) return await finalizeFailedRun('PRE_CLOSE_INSTRUMENT_UNKNOWN');
         if (options.now() - preClose.truth.capturedAt > 30_000)
-          return receipt('STOP', 'PRE_CLOSE_TRUTH_STALE');
+          return await finalizeFailedRun('PRE_CLOSE_TRUTH_STALE');
         const local = positionStore.resolve('gateio', 'ETH/USDT');
         const closeUsd = Math.abs(local.signedQuantity) * freshInstrument.markPrice;
         const close = await submit('close', 'short', closeUsd,
           Math.abs(preClose.truth.positions[0]!.signedQuantity)
           / freshInstrument.contractMultiplier);
         closeOmsStatus = close === 'RISK_REJECTED' ? close : close.status;
-        if (close === 'RISK_REJECTED') return receipt('STOP', 'CLOSE_RISK_REJECTED');
+        if (close === 'RISK_REJECTED') return await finalizeFailedRun('CLOSE_RISK_REJECTED');
         const postClose = await capture();
-        if (!postClose) return receipt('STOP', 'POST_CLOSE_TRUTH_UNKNOWN');
-        if (close.status === 'filled' && factualFlat(postClose)) return receipt('PASS', 'G3_FACTUAL_FLAT');
-        const exposure = postClose.truth.positions[0];
-        const current = positionStore.resolve('gateio', 'ETH/USDT');
-        if (postClose.truth.positions.length !== 1 || exposure?.side !== 'long'
-            || current.status !== 'open' || current.side !== 'long'
-            || Math.abs(exposure.signedQuantity - current.signedQuantity) >= 1e-10) {
-          return receipt('STOP', 'CLOSE_UNKNOWN_OR_EXPOSURE_MISMATCH');
+        if (!postClose) return await finalizeFailedRun('POST_CLOSE_TRUTH_UNKNOWN');
+        if (close.status === 'filled' && factualFlat(postClose)
+            && budget.snapshot().cleanupUsed === 0) {
+          finalExposure = 'FACTUAL_FLAT';
+          return receipt('PASS', 'G3_FACTUAL_FLAT');
         }
-        const cleanup = await submit('emergency_exit', 'short',
-          Math.abs(exposure.signedQuantity) * freshInstrument.markPrice,
-          Math.abs(exposure.signedQuantity) / freshInstrument.contractMultiplier);
-        cleanupOmsStatus = cleanup === 'RISK_REJECTED' ? cleanup : cleanup.status;
-        if (cleanup === 'RISK_REJECTED') return receipt('STOP', 'CLEANUP_RISK_REJECTED');
-        const postCleanup = await capture(); // fifth and last account acquisition
-        return cleanup.status === 'filled' && postCleanup && factualFlat(postCleanup)
-          ? receipt('PASS', 'G3_CLEANUP_FACTUAL_FLAT')
-          : receipt('STOP', 'CLEANUP_NOT_FACTUALLY_FLAT');
+        return await finalizeFailedRun('CLOSE_NOT_FACTUALLY_CONFIRMED', postClose);
       } catch (error) {
-        return receipt('STOP', error instanceof Error && /^[A-Z0-9_]+$/.test(error.message)
-          ? error.message : 'G3_RUN_UNKNOWN');
+        const reason = error instanceof Error && /^[A-Z0-9_]+$/.test(error.message)
+          ? error.message : 'G3_RUN_UNKNOWN';
+        return await finalizeFailedRun(reason);
       }
     },
   });
