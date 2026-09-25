@@ -168,8 +168,8 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
           continue;
         }
         seenTradeIds.add(trade.tradeId);
-        const executedAt = gateIoExecutionSecondsToMilliseconds(trade.createdAt);
-        if (executedAt === null) {
+        const executedAt = trade.createdAtMs;
+        if (!Number.isSafeInteger(executedAt) || executedAt <= 0) {
           incomplete ??= 'GATEIO_TRADE_TIME_INVALID';
           continue;
         }

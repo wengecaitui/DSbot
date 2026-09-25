@@ -9,8 +9,16 @@ const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 export interface GateIoExactInt64Spec {
   readonly shape: 'object' | 'array';
   readonly fields: readonly string[];
+  /** Numeric lexical facts recovered with the same per-element attribution as identifiers. */
+  readonly decimalFields?: readonly string[];
   /** API-rejection objects may have no order id; present fields are still exact. */
   readonly required?: boolean;
+}
+
+const DECIMAL_SOURCES = new WeakMap<object, ReadonlyMap<string, string>>();
+
+export function gateIoExactDecimalSource(entry: object, field: string): string | null {
+  return DECIMAL_SOURCES.get(entry)?.get(field) ?? null;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -33,7 +41,11 @@ function exactIdentifier(value: unknown, source: string | undefined): string {
  */
 function unambiguousFields(raw: string, spec: GateIoExactInt64Spec): boolean {
   const stack: ('array' | 'object')[] = [];
-  const wanted = new Set(spec.fields);
+  const allFields = [...spec.fields, ...(spec.decimalFields ?? [])];
+  const wanted = new Set(allFields);
+  // Decimal source capture is optional at L0: malformed/missing factual trade time is
+  // rejected by L1A, while exact-int64-only transport fixtures retain their old contract.
+  const required = new Set(spec.required === false ? [] : spec.fields);
   const objectDepth = spec.shape === 'object' ? 1 : 2;
   let counts: Map<string, number> | null = null;
   let objects = 0;
@@ -63,14 +75,14 @@ function unambiguousFields(raw: string, spec: GateIoExactInt64Spec): boolean {
     else if (char === '{') {
       if (stack.length === objectDepth - 1
           && (spec.shape === 'object' || stack[0] === 'array')) {
-        counts = new Map(spec.fields.map((field) => [field, 0]));
+        counts = new Map(allFields.map((field) => [field, 0]));
         objects += 1;
       }
       stack.push('object');
     } else if (char === '}') {
       if (stack.length === objectDepth && stack[objectDepth - 1] === 'object') {
-        if (counts === null || spec.fields.some((field) =>
-          spec.required === false ? (counts?.get(field) ?? 0) > 1 : counts?.get(field) !== 1))
+        if (counts === null || allFields.some((field) =>
+          required.has(field) ? counts?.get(field) !== 1 : (counts?.get(field) ?? 0) > 1))
           return false;
         counts = null;
       }
@@ -86,10 +98,14 @@ export function parseGateIoExactInt64Json(raw: string, spec: GateIoExactInt64Spe
       || !spec || (spec.shape !== 'object' && spec.shape !== 'array')
       || !Array.isArray(spec.fields) || spec.fields.length === 0
       || new Set(spec.fields).size !== spec.fields.length
-      || spec.fields.some((field) => typeof field !== 'string' || field.length === 0)) {
+      || spec.fields.some((field) => typeof field !== 'string' || field.length === 0)
+      || (spec.decimalFields !== undefined && (!Array.isArray(spec.decimalFields)
+        || spec.decimalFields.some((field) => typeof field !== 'string' || field.length === 0)))
+      || new Set([...spec.fields, ...(spec.decimalFields ?? [])]).size
+        !== spec.fields.length + (spec.decimalFields?.length ?? 0)) {
     throw new Error('GATEIO_EXACT_INT64_INVALID');
   }
-  const wanted = new Set(spec.fields);
+  const wanted = new Set([...spec.fields, ...(spec.decimalFields ?? [])]);
   const evidence = new WeakMap<object, Map<string, string | undefined>>();
   const parsed: unknown = JSON.parse(raw, function (this: unknown, key: string, value: unknown,
     context?: { readonly source?: string }) {
@@ -111,6 +127,15 @@ export function parseGateIoExactInt64Json(raw: string, spec: GateIoExactInt64Spe
       if (spec.required === false && !Object.prototype.hasOwnProperty.call(entry, field)) continue;
       recovered[field] = exactIdentifier(entry[field], fields?.get(field));
     }
+    const decimalSources = new Map<string, string>();
+    for (const field of spec.decimalFields ?? []) {
+      if (typeof entry[field] === 'number') {
+        const source = fields?.get(field);
+        if (typeof source !== 'string') throw new Error('GATEIO_EXACT_DECIMAL_INVALID');
+        decimalSources.set(field, source);
+      }
+    }
+    if (decimalSources.size > 0) DECIMAL_SOURCES.set(recovered, decimalSources);
     return recovered;
   };
   return Array.isArray(parsed) ? parsed.map(recover) : recover(parsed);

@@ -358,7 +358,8 @@ describe('Gate.io L1A strict canonical normalization', () => {
     assert.equal(signed.signedSize, -2, 'signedSize stays exchange-native');
     assert.equal(Object.isFrozen(signed), true);
     assert.deepEqual(Object.keys(signed).sort(), [
-      'clientText', 'closeSize', 'contract', 'createdAt', 'fee', 'orderId', 'pointFee', 'price',
+      'clientText', 'closeSize', 'contract', 'createdAt', 'createdAtMs',
+      'createdAtSecondsExact', 'fee', 'orderId', 'pointFee', 'price',
       'role', 'signedSize', 'tradeId', 'tradeValue',
     ], 'no open/close direction may be invented');
     for (const bad of ['', ' ', null, undefined, Number.NaN, Number.POSITIVE_INFINITY, 'abc']) {

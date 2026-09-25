@@ -350,7 +350,9 @@ function createReadTransport(
       let parsed: unknown;
       try {
         parsed = validated.endpoint === GATEIO_READ_ENDPOINTS.MY_TRADES
-          ? parseGateIoExactInt64Json(text, { shape: 'array', fields: ['id', 'order_id'] })
+          ? parseGateIoExactInt64Json(text, {
+            shape: 'array', fields: ['id', 'order_id'], decimalFields: ['create_time'],
+          })
           : JSON.parse(text);
       } catch {
         if (!response.ok) {

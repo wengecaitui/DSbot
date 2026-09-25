@@ -28,6 +28,8 @@ import {
 } from './GateIoReadClock';
 import { gateIoReadTransportBudget, hasProductionGateIoReadTransportProvenance } from './GateIoReadTransport';
 import { GateIoG3BudgetDenial, type GateIoG3RunBudget } from './GateIoG3RunBudget';
+import { gateIoExactDecimalSource } from './GateIoExactInt64Recovery';
+import { gateIoExactSecondsToMilliseconds } from './GateIoExactTradeTime';
 
 export const MAX_GATEIO_ACCOUNT_TRUTH_GETS = 5 as const;
 export const MAX_GATEIO_INSTRUMENT_FACTS_GETS = 3 as const;
@@ -116,8 +118,12 @@ export interface GateIoCanonicalTrade {
   readonly role: 'maker' | 'taker';
   /** Optional exchange metadata. Null means omitted; supplied decimal text remains exact. */
   readonly tradeValue: string | number | null;
-  /** Gate epoch seconds; fractional seconds are preserved exactly as reported. */
+  /** Legacy numeric Gate epoch seconds; not an exact lexical representation. */
   readonly createdAt: number;
+  /** Exact source token when available; null for directly injected numeric values without raw JSON. */
+  readonly createdAtSecondsExact: string | null;
+  /** Exact decimal floor projection into canonical safe-integer milliseconds. */
+  readonly createdAtMs: number;
 }
 
 export interface GateIoCanonicalAccountTruth {
@@ -404,6 +410,13 @@ export function normalizeGateIoTrade(raw: unknown): GateIoCanonicalTrade {
   return tagged('TRADES_MALFORMED', () => {
     if (!isRecord(raw)) malformed('TRADES_MALFORMED');
     if (raw.role !== 'maker' && raw.role !== 'taker') malformed('TRADES_MALFORMED');
+    const createdAt = timestamp(raw.create_time);
+    const createdAtSecondsExact = gateIoExactDecimalSource(raw, 'create_time')
+      ?? (typeof raw.create_time === 'string' ? raw.create_time : null);
+    // Directly injected numeric fixtures have no raw token. Their finite numeric value remains
+    // supported for L1A compatibility, but is not mislabeled as the exchange's exact source.
+    const createdAtMs = gateIoExactSecondsToMilliseconds(createdAtSecondsExact ?? String(createdAt));
+    if (createdAtMs === null) malformed('TRADES_MALFORMED');
     return Object.freeze({
       tradeId: tradeIdentifier(raw.id),
       orderId: tradeIdentifier(raw.order_id),
@@ -418,7 +431,9 @@ export function normalizeGateIoTrade(raw: unknown): GateIoCanonicalTrade {
       pointFee: decimal(raw.point_fee),
       role: raw.role,
       tradeValue: optionalTradeValue(raw),
-      createdAt: timestamp(raw.create_time),
+      createdAt,
+      createdAtSecondsExact,
+      createdAtMs,
     });
   });
 }

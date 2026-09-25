@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createInMemoryEventJournal } from '../../src/kernel/InMemoryEventJournal';
+import { gateIoExecutionSecondsToMilliseconds } from '../../src/exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 import { parseGateIoExactInt64Json } from '../../src/runtime/gateio/GateIoExactInt64Recovery';
 import { GATEIO_READ_ENDPOINTS } from '../../src/runtime/gateio/GateIoReadContracts';
 import { createGateIoTestnetOmsE2ELaunchBinding } from '../../src/runtime/gateio/GateIoTestnetOmsE2ELaunchBinding';
@@ -21,10 +22,12 @@ interface Scenario {
   readonly initialOpenOrder?: boolean;
   readonly pageChurn?: boolean;
   readonly historicalChangedAfterOpen?: boolean;
+  readonly historicalTimeChangedAfterOpen?: boolean;
   readonly contemporaneousInitialTrade?: boolean;
   readonly externalAfterOpen?: boolean;
   readonly externalFlattens?: boolean;
   readonly wrongCurrentOrderId?: boolean;
+  readonly subMillisecondTimes?: boolean;
 }
 
 function numericToken(value: Record<string, unknown>, field: string, token: string): string {
@@ -32,7 +35,7 @@ function numericToken(value: Record<string, unknown>, field: string, token: stri
 }
 
 function tradeRaw(id: string, orderId: string, text: string, size: number,
-  createdAt: number, missingTradeValue = false): string {
+  createdAt: number | string, missingTradeValue = false): string {
   const entry = {
     id: '__EXACT__', order_id: '__ORDER__', contract: 'ETH_USDT',
     size: String(size), close_size: '0', price: '2000', text,
@@ -41,10 +44,12 @@ function tradeRaw(id: string, orderId: string, text: string, size: number,
     create_time: String(createdAt),
   };
   return numericToken(entry, 'id', id).replace('"order_id":"__ORDER__"',
-    '"order_id":' + orderId);
+    '"order_id":' + orderId).replace('"create_time":"' + String(createdAt) + '"',
+      '"create_time":' + String(createdAt));
 }
 
 function fixture(scenario: Scenario = {}) {
+  const observedNow = scenario.subMillisecondTimes ? NOW + 1000 : NOW;
   const calls: { path: string; method: string; body: Record<string, unknown> | null }[] = [];
   const orders = new Map<string, string>();
   const currentTrades: string[] = [];
@@ -52,15 +57,21 @@ function fixture(scenario: Scenario = {}) {
     ? Array.from({ length: 8 }, (_, index) =>
       tradeRaw((9007199254740997n + BigInt(index) * 2n).toString(),
         (9100000000000001n + BigInt(index) * 2n).toString(),
-        'older-page', index % 2 === 0 ? 0.1 : -0.1, SECOND - 20 - index,
+        'older-page', index % 2 === 0 ? 0.1 : -0.1,
+        scenario.subMillisecondTimes
+          ? ['1800000000.4845', '1800000000.1234',
+            '1800000000.123456', '1800000000.4849'][index % 4]!
+          : SECOND - 20 - index,
         scenario.missingTradeValue))
     : [
       tradeRaw(HISTORICAL_ONE, '9100000000000001', 'external-before-run', 0.1,
-        scenario.contemporaneousInitialTrade ? SECOND : SECOND - 20,
+        scenario.contemporaneousInitialTrade ? SECOND
+          : scenario.subMillisecondTimes ? '1800000000.4845' : SECOND - 20,
         scenario.missingTradeValue),
       ...(scenario.history === 'multiple'
         ? [tradeRaw(HISTORICAL_TWO, '9100000000000003', 'older-page', -0.1,
-          SECOND - 30, scenario.missingTradeValue)] : []),
+          scenario.subMillisecondTimes ? '1800000000.1234' : SECOND - 30,
+          scenario.missingTradeValue)] : []),
     ];
   let position = scenario.initialPosition ?? 0;
   let postCount = 0;
@@ -71,7 +82,8 @@ function fixture(scenario: Scenario = {}) {
     const body = init.method === 'POST'
       ? JSON.parse(init.body as string) as Record<string, unknown> : null;
     calls.push({ path, method: init.method ?? 'GET', body });
-    if (path === GATEIO_READ_ENDPOINTS.SERVER_TIME) return response({ server_time: NOW });
+    if (path === GATEIO_READ_ENDPOINTS.SERVER_TIME)
+      return response({ server_time: observedNow });
     if (path === GATEIO_READ_ENDPOINTS.ACCOUNTS) return response({
       currency: 'USDT', total: '1000', available: '900',
       in_dual_mode: false, position_mode: 'single', margin_mode: 0,
@@ -94,6 +106,9 @@ function fixture(scenario: Scenario = {}) {
         : scenario.pageChurn && postCount > 0
           ? [historical[1] ?? tradeRaw(HISTORICAL_TWO, '9100000000000003',
             'older-page', -0.1, SECOND - 30)]
+          : scenario.historicalTimeChangedAfterOpen && postCount > 0
+            ? [tradeRaw(HISTORICAL_ONE, '9100000000000001', 'external-before-run',
+              0.1, '1800000000.4849', scenario.missingTradeValue)]
           : scenario.historicalChangedAfterOpen && postCount > 0
             ? [tradeRaw(HISTORICAL_ONE, '9100000000000001', 'external-before-run',
               0.2, SECOND - 20)]
@@ -102,7 +117,9 @@ function fixture(scenario: Scenario = {}) {
         ? [tradeRaw('1.234e16', '9100000000000001', 'bad', 0.1, SECOND - 20)] : previous;
       const external = scenario.externalAfterOpen && postCount > 0
         ? [tradeRaw('9100000000000099', '9100000000000097',
-          'external-after-run', -0.1, SECOND, scenario.missingTradeValue)] : [];
+          'external-after-run', -0.1,
+          scenario.subMillisecondTimes ? '1800000001.0009' : SECOND,
+          scenario.missingTradeValue)] : [];
       return new Response('[' + [...malformed, ...currentTrades, ...external].join(',') + ']');
     }
     if (path === GATEIO_READ_ENDPOINTS.CONTRACT) return response({
@@ -139,14 +156,17 @@ function fixture(scenario: Scenario = {}) {
     const tradeOrderId = scenario.wrongCurrentOrderId && postCount === 1
       ? '9007199254740992' : orderId;
     currentTrades.push(tradeRaw(postCount === 1 ? '9100000000000011' : '9100000000000013',
-      tradeOrderId, body.text as string, Number(body.size), SECOND,
+      tradeOrderId, body.text as string, Number(body.size),
+      scenario.subMillisecondTimes
+        ? postCount === 1 ? '1800000001.4845' : '1800000001.123456'
+        : SECOND,
       scenario.missingTradeValue));
     return new Response(rawOrder);
   };
   const journal = createInMemoryEventJournal();
   const binding = createGateIoTestnetOmsE2ELaunchBinding({
     credential: { apiKey: 'FIXTURE_G3D_KEY', secretKey: 'FIXTURE_G3D_SECRET' },
-    accountId: 'fixture-account', fetchImpl, now: () => NOW,
+    accountId: 'fixture-account', fetchImpl, now: () => observedNow,
     journal,
     expectedExactHead: HEAD, actualExactHead: () => HEAD, worktreeClean: () => true,
   });
@@ -295,6 +315,42 @@ describe('Gate G3F formal offline path with absent trade_value', () => {
     assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
     assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
     assert.equal(result.receipt.liveReady, false);
+    assert.equal(fake.postCount >= 1, true);
+  });
+});
+
+describe('Gate G3G exact fractional trade time formal offline path', () => {
+  it('reproduces the former time blocker but verifies flat baseline and sub-ms OPEN/CLOSE', async () => {
+    assert.equal(gateIoExecutionSecondsToMilliseconds(1800000000.4845), null,
+      'the old float/integer path rejected a factual Gate sub-ms time');
+    const fake = fixture({ history: 'eight', missingTradeValue: true,
+      subMillisecondTimes: true });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'PASS', JSON.stringify(result.receipt));
+    assert.equal(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+    assert.equal(fake.postCount, 2);
+    assert.equal(fake.position, 0);
+    const events = fake.journal.readFromLogicalSequence(1);
+    assert.equal(events.filter((event) => event.type === 'position.baseline.confirmed').length, 1);
+    assert.equal(events.filter((event) => event.type === 'execution.fill.confirmed').length, 2);
+  });
+
+  it('keeps a new exact external trade distinct even in the same projected millisecond', async () => {
+    const fake = fixture({ history: 'eight', missingTradeValue: true,
+      subMillisecondTimes: true, externalAfterOpen: true, externalFlattens: true });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
+    assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
+    assert.equal(result.receipt.liveReady, false);
+    assert.equal(fake.postCount >= 1, true);
+  });
+
+  it('rejects an existing historical ID whose exact sub-ms source changes within one ms', async () => {
+    const fake = fixture({ history: 'one', missingTradeValue: true,
+      subMillisecondTimes: true, historicalTimeChangedAfterOpen: true });
+    const result = await fake.binding.run();
+    assert.equal(result.receipt.status, 'STOP', JSON.stringify(result.receipt));
+    assert.notEqual(result.receipt.reasonCode, 'G3_FACTUAL_FLAT');
     assert.equal(fake.postCount >= 1, true);
   });
 });
