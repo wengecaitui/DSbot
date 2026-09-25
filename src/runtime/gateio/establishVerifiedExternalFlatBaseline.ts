@@ -55,6 +55,9 @@ export function establishVerifiedExternalFlatBaseline(
     capturedAt: truth.capturedAt, source: truth.source, digest,
     positionMode, baseline: 'flat',
   });
+  // Only this verified, empty-OMS bootstrap path may freeze historical trade identities.
+  // If Kernel publication fails, the run stops without an execution-authoritative baseline.
+  truthPort.establishVerifiedTradeBoundary(truth);
   const published = kernel.publish('position.baseline.confirmed', {
     baseline: { exchange: 'gateio', symbol: 'ETH/USDT', side: 'flat',
       signedQuantity: 0, averageEntryPrice: 0 }, evidence,

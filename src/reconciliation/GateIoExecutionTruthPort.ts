@@ -1,7 +1,7 @@
 /** Gate factual reads projected into the existing, fail-closed reconciliation schema. */
 import { gateIoExecutionSecondsToMilliseconds, toGateIoClientText } from '../exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 import type { OmsOrderSnapshot } from '../oms/oms-types';
-import type { GateIoAuthenticatedReadFoundation, GateIoCanonicalAccountTruth, GateIoCanonicalInstrumentFacts } from '../runtime/gateio/GateIoAuthenticatedReadFoundation';
+import type { GateIoAuthenticatedReadFoundation, GateIoCanonicalAccountTruth, GateIoCanonicalInstrumentFacts, GateIoCanonicalTrade } from '../runtime/gateio/GateIoAuthenticatedReadFoundation';
 import type { GateIoReadTransport } from '../runtime/gateio/GateIoReadContracts';
 import { gateIoReadTransportBudget, gateIoReadTransportEnvironment } from '../runtime/gateio/GateIoReadTransport';
 import { GateIoG3RunBudget } from '../runtime/gateio/GateIoG3RunBudget';
@@ -28,6 +28,12 @@ export interface GateIoExecutionTruthPort extends ExecutionTruthPort {
   }> | null;
   refreshInstrumentFacts(): Promise<GateIoCanonicalInstrumentFacts | null>;
   currentInstrument(): GateIoCanonicalInstrumentFacts | null;
+  /** Called only by verified bootstrap; fixes a run-scoped historical trade boundary. */
+  establishVerifiedTradeBoundary(truth: ExecutionTruthSnapshot): void;
+}
+
+function tradeFingerprint(trade: GateIoCanonicalTrade): string {
+  return JSON.stringify(trade);
 }
 
 export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPortOptions): GateIoExecutionTruthPort {
@@ -45,6 +51,10 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
   let instrument: GateIoCanonicalInstrumentFacts | null = null;
   let latest: Readonly<{ account: GateIoCanonicalAccountTruth; instrument: GateIoCanonicalInstrumentFacts }> | null = null;
   let latestTruth: ExecutionTruthSnapshot | null = null;
+  let tradeBoundary: Readonly<{
+    serverTimeMs: number;
+    observedTradeFingerprints: ReadonlyMap<string, string>;
+  }> | null = null;
   const identity = Object.freeze({ exchange: 'gateio' as const, accountId: options.accountId });
 
   async function refreshInstrumentFacts(): Promise<GateIoCanonicalInstrumentFacts | null> {
@@ -66,6 +76,21 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
     currentInstrument: () => instrument !== null && options.now() >= instrument.observedAtMs
       && options.now() - instrument.observedAtMs <= 30_000
       ? instrument : null,
+    establishVerifiedTradeBoundary(truth: ExecutionTruthSnapshot): void {
+      const account = latest?.account;
+      if (tradeBoundary !== null || sequence !== 1 || truth !== latestTruth
+          || !truth.complete || account === undefined || account.accountState !== 'FLAT'
+          || account.openOrders.length !== 0 || options.listOmsOrders().length !== 0
+          || account.positions.some((leg) => leg.signedSize !== 0 || leg.quoteValue !== 0)
+          || !Number.isSafeInteger(account.serverTimeMs) || account.serverTimeMs <= 0) {
+        throw new Error('GATEIO_TRADE_BOUNDARY_DENIED');
+      }
+      tradeBoundary = Object.freeze({
+        serverTimeMs: account.serverTimeMs,
+        observedTradeFingerprints: new Map(account.recentTrades.map((trade) =>
+          [trade.tradeId, tradeFingerprint(trade)])),
+      });
+    },
     async acquireTruth(): Promise<ExecutionTruthSnapshot> {
       sequence += 1;
       latest = null;
@@ -92,6 +117,8 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
       latest = Object.freeze({ account, instrument: facts });
       const byText = new Map<string, OmsOrderSnapshot>();
       const localOrders = options.listOmsOrders();
+      const bootstrap = tradeBoundary === null && sequence === 1 && localOrders.length === 0
+        && account.accountState === 'FLAT' && account.openOrders.length === 0;
       for (const order of localOrders) {
         if (order.exchange !== 'gateio' || order.symbol !== 'ETH/USDT') return unavailable('OMS_IDENTITY_MISMATCH');
         let text: string;
@@ -141,12 +168,34 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
           continue;
         }
         seenTradeIds.add(trade.tradeId);
-        const local = trade.clientText === null ? null : byText.get(trade.clientText);
         const executedAt = gateIoExecutionSecondsToMilliseconds(trade.createdAt);
+        if (executedAt === null) {
+          incomplete ??= 'GATEIO_TRADE_TIME_INVALID';
+          continue;
+        }
+        // Historical exchange facts are retained in the canonical capture, never projected as
+        // this run's fill. Exact IDs plus factual server time handle repeated and page-churned history.
+        if (bootstrap) {
+          if (executedAt >= account.serverTimeMs)
+            incomplete ??= 'GATEIO_BOOTSTRAP_TRADE_NOT_HISTORICAL';
+          continue;
+        }
+        if (tradeBoundary !== null) {
+          const previous = tradeBoundary.observedTradeFingerprints.get(trade.tradeId);
+          if (previous !== undefined) {
+            if (previous !== tradeFingerprint(trade))
+              incomplete ??= 'GATEIO_HISTORICAL_TRADE_CHANGED';
+            continue;
+          }
+          if (executedAt < tradeBoundary.serverTimeMs) continue;
+        }
+        const local = trade.clientText === null ? null : byText.get(trade.clientText);
         const quantity = Math.abs(trade.signedSize) * facts.contractMultiplier;
-        if (!local || executedAt === null || !Number.isFinite(quantity) || quantity <= 0
-            || local.side !== (trade.signedSize > 0 ? 'buy' : 'sell')) {
-          incomplete ??= 'GATEIO_TRADE_UNCORRELATED';
+        if (!local || !Number.isFinite(quantity) || quantity <= 0
+            || local.side !== (trade.signedSize > 0 ? 'buy' : 'sell')
+            || (typeof local.fillId === 'string' && local.fillId !== trade.orderId)) {
+          incomplete ??= tradeBoundary === null
+            ? 'GATEIO_TRADE_UNCORRELATED' : 'GATEIO_NEW_TRADE_UNCORRELATED';
           continue;
         }
         const previous = tradeGroups.get(trade.orderId);

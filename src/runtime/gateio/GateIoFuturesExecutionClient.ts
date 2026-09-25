@@ -28,6 +28,7 @@ import {
 } from './GateIoReadTransport';
 import { signGateIoV4ExecutionRequest } from './GateIoV4Signer';
 import { GateIoG3BudgetDenial, GateIoG3RunBudget, type GateIoG3DenialReason } from './GateIoG3RunBudget';
+import { parseGateIoExactInt64Json } from './GateIoExactInt64Recovery';
 
 export type GateIoEnvironment = 'testnet' | 'live';
 
@@ -119,8 +120,6 @@ interface WireResponse {
   readonly ok: boolean;
   readonly status: number;
   readonly parsed: unknown;
-  /** Transient and function-local. Used only for exact int64 recovery. */
-  readonly rawText: string;
 }
 
 const CLIENT_TEXT = /^t-dsb-[a-f0-9]{22}$/;
@@ -190,21 +189,8 @@ function safeGateLabel(parsed: unknown): string | null {
   return isRecord(parsed) ? safeLabel(parsed.label) : null;
 }
 
-function exactOrderId(parsedValue: unknown, rawText: string): string | null {
-  if (typeof parsedValue === 'string' && EXACT_POSITIVE_INTEGER.test(parsedValue)) {
-    return parsedValue;
-  }
-  if (typeof parsedValue === 'number' && Number.isSafeInteger(parsedValue) && parsedValue > 0) {
-    return String(parsedValue);
-  }
-  if (typeof parsedValue !== 'number' || Number.isSafeInteger(parsedValue)) return null;
-  const match = /"id"\s*:\s*([1-9][0-9]*)(?=\s*[,}])/.exec(rawText);
-  return match?.[1] && EXACT_POSITIVE_INTEGER.test(match[1]) ? match[1] : null;
-}
-
 function normalizedOrder(
   parsed: unknown,
-  rawText: string,
   request: GateIoFuturesMarketOrderRequest,
 ): GateIoFuturesMarketOrderResult | null {
   if (!isRecord(parsed)
@@ -213,7 +199,8 @@ function normalizedOrder(
   const size = strictContractSize(parsed.size);
   const left = strictContractSize(parsed.left);
   if (size === null || left === null) return null;
-  const exchangeOrderId = exactOrderId(parsed.id, rawText);
+  const exchangeOrderId = typeof parsed.id === 'string' && EXACT_POSITIVE_INTEGER.test(parsed.id)
+    ? parsed.id : null;
   if (exchangeOrderId === null) return null;
 
   const wireStatus = typeof parsed.status === 'string' ? parsed.status : null;
@@ -379,11 +366,12 @@ export function createGateIoFuturesExecutionClient(
         || Buffer.byteLength(rawText, 'utf8') > MAX_GATEIO_RESPONSE_BYTES) return null;
     let parsed: unknown = null;
     try {
-      parsed = rawText.length === 0 ? null : JSON.parse(rawText);
+      parsed = rawText.length === 0 ? null
+        : parseGateIoExactInt64Json(rawText, { shape: 'object', fields: ['id'], required: false });
     } catch {
       parsed = null;
     }
-    return { ok: response.ok, status: response.status, parsed, rawText };
+    return { ok: response.ok, status: response.status, parsed };
   }
 
   async function reconcile(
@@ -396,7 +384,7 @@ export function createGateIoFuturesExecutionClient(
       if (response === null || !response.ok || response.parsed === null) {
         fail('GATEIO_EXECUTION_SUBMISSION_UNKNOWN');
       }
-      const normalized = normalizedOrder(response.parsed, response.rawText, request);
+      const normalized = normalizedOrder(response.parsed, request);
       if (normalized === null) fail('GATEIO_EXECUTION_SUBMISSION_UNKNOWN');
       return normalized;
     } catch (error) {
@@ -452,7 +440,7 @@ export function createGateIoFuturesExecutionClient(
           && (!isRecord(response.parsed) || response.parsed.contract === undefined)) {
         return rejectedResult(request, safeGateLabel(response.parsed) ?? 'GATEIO_EXECUTION_REJECTED');
       }
-      const normalized = normalizedOrder(response.parsed, response.rawText, request);
+      const normalized = normalizedOrder(response.parsed, request);
       return normalized ?? reconcile(request);
     },
   });

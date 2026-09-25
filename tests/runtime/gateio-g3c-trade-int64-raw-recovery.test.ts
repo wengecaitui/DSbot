@@ -116,7 +116,9 @@ describe('Gate G3C factual truth path with unsafe trade IDs', () => {
   it('recovers exact complete truth for a correlated historical fill, but does not bless an uncorrelated one', async () => {
     const localOrderId = 'a'.repeat(64);
     const clientText = toGateIoClientText(localOrderId);
-    const trade = rawTrade(FIRST_TRADE, FIRST_ORDER).replace('t-dsb-fixture', clientText);
+    const trade = rawTrade(FIRST_TRADE, FIRST_ORDER)
+      .replace('t-dsb-fixture', clientText)
+      .replace('"create_time":"1800000000.123"', '"create_time":"1799999999.123"');
     const budget = GateIoG3RunBudget.create();
     const requests: string[] = [];
     const transport = createGateIoTestnetReadTransport(async (url, init) => {
@@ -173,7 +175,7 @@ describe('Gate G3C factual truth path with unsafe trade IDs', () => {
     assert.equal(account?.recentTrades[0]?.tradeId, FIRST_TRADE);
     assert.equal(account?.recentTrades[0]?.orderId, FIRST_ORDER);
     assert.equal(account?.recentTrades[0]?.signedSize, 0.1);
-    assert.equal(account?.recentTrades[0]?.createdAt, 1_800_000_000.123);
+    assert.equal(account?.recentTrades[0]?.createdAt, 1_799_999_999.123);
     assert.equal(truth.positions.length, 0);
     assert.equal(truth.fills[0]?.fillId, FIRST_ORDER);
     assert.deepEqual(requests, [
@@ -188,8 +190,8 @@ describe('Gate G3C factual truth path with unsafe trade IDs', () => {
       listOmsOrders: () => [],
     });
     const initialTruth = await emptyOmsTruthPort.acquireTruth();
-    assert.equal(initialTruth.complete, false);
-    assert.equal(initialTruth.incompleteReason, 'GATEIO_TRADE_UNCORRELATED');
+    assert.equal(initialTruth.complete, true);
+    assert.equal(initialTruth.fills.length, 0);
     assert.equal(emptyOmsTruthPort.canonicalForCapture(
       emptyOmsTruthPort.captureSequence(),
     )?.account.recentTrades[0]?.tradeId, FIRST_TRADE);
