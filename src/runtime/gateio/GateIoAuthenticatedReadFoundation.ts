@@ -270,6 +270,16 @@ function identifier(value: unknown): string {
   malformed('ACCOUNT_TRUTH_MALFORMED');
 }
 
+const MAX_GATEIO_TRADE_INT64 = '9223372036854775807';
+function tradeIdentifier(value: unknown): string {
+  const id = identifier(value);
+  if (!/^[1-9][0-9]*$/.test(id) || id.length > MAX_GATEIO_TRADE_INT64.length
+      || (id.length === MAX_GATEIO_TRADE_INT64.length && id > MAX_GATEIO_TRADE_INT64)) {
+    malformed('TRADES_MALFORMED');
+  }
+  return id;
+}
+
 function optionalText(value: unknown): string | null {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value === 'string' && value.length > 0) return value;
@@ -387,8 +397,8 @@ export function normalizeGateIoTrade(raw: unknown): GateIoCanonicalTrade {
     if (!isRecord(raw)) malformed('TRADES_MALFORMED');
     if (raw.role !== 'maker' && raw.role !== 'taker') malformed('TRADES_MALFORMED');
     return Object.freeze({
-      tradeId: identifier(raw.id),
-      orderId: identifier(raw.order_id),
+      tradeId: tradeIdentifier(raw.id),
+      orderId: tradeIdentifier(raw.order_id),
       contract: contract(raw.contract),
       signedSize: decimal(raw.size),
       // Gate reports close_size as a signed factual value: 0, positive and negative are all legal.

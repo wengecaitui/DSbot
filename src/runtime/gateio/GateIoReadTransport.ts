@@ -260,6 +260,93 @@ function safeLabel(parsed: unknown): string | null {
   return GATEIO_SAFE_LABEL_PATTERN.test(parsed.label) ? parsed.label : null;
 }
 
+const MAX_GATEIO_SIGNED_INT64 = '9223372036854775807';
+const EXACT_POSITIVE_INTEGER = /^[1-9][0-9]*$/;
+
+/**
+ * JSON.parse's source context is the token authority before an unsafe JSON number is rounded.
+ * This stays endpoint/field scoped: price, quantity, fee and timestamps use the normal parser.
+ */
+function exactTradeIdentifier(value: unknown, source: string | undefined): unknown {
+  if (typeof value !== 'number' && typeof value !== 'string') return value;
+  const token = typeof value === 'number' ? source : value;
+  if (typeof token !== 'string' || !EXACT_POSITIVE_INTEGER.test(token)
+      || token.length > MAX_GATEIO_SIGNED_INT64.length
+      || (token.length === MAX_GATEIO_SIGNED_INT64.length
+        && token > MAX_GATEIO_SIGNED_INT64)) {
+    throw new Error('GATEIO_TRADE_EXACT_ID_INVALID');
+  }
+  return token;
+}
+
+/** Detect duplicate identifier keys that JSON.parse would otherwise silently collapse. */
+function tradeIdentifierKeysUnique(raw: string): boolean {
+  const stack: ('array' | 'object')[] = [];
+  let counts: { id: number; order_id: number } | null = null;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === '"') {
+      const start = index;
+      index += 1;
+      for (; index < raw.length; index += 1) {
+        if (raw[index] === '\\') { index += 1; continue; }
+        if (raw[index] === '"') break;
+      }
+      if (stack.length === 2 && stack[0] === 'array' && stack[1] === 'object') {
+        let after = index + 1;
+        while (after < raw.length && /\s/.test(raw[after]!)) after += 1;
+        if (raw[after] === ':') {
+          const key = JSON.parse(raw.slice(start, index + 1)) as string;
+          if (key === 'id' || key === 'order_id') {
+            if (counts === null) return false;
+            counts[key] += 1;
+          }
+        }
+      }
+      continue;
+    }
+    if (char === '[') stack.push('array');
+    else if (char === '{') {
+      if (stack.length === 1 && stack[0] === 'array') {
+        counts = { id: 0, order_id: 0 };
+      }
+      stack.push('object');
+    } else if (char === '}') {
+      if (stack.length === 2 && stack[0] === 'array' && stack[1] === 'object') {
+        if (counts?.id !== 1 || counts.order_id !== 1) return false;
+        counts = null;
+      }
+      stack.pop();
+    } else if (char === ']') stack.pop();
+  }
+  // The caller separately checks the parsed array shape, including a valid empty array.
+  return stack.length === 0 && counts === null;
+}
+
+function parseGateIoRecentTrades(raw: string): unknown {
+  const evidence = new WeakMap<object, Map<'id' | 'order_id', string | undefined>>();
+  const parsed: unknown = JSON.parse(raw, function (this: unknown, key: string, value: unknown,
+    context?: { readonly source?: string }) {
+    if ((key === 'id' || key === 'order_id') && isRecord(this)) {
+      const fields = evidence.get(this) ?? new Map<'id' | 'order_id', string | undefined>();
+      fields.set(key, context?.source);
+      evidence.set(this, fields);
+    }
+    return value;
+  });
+  if (!Array.isArray(parsed) || !tradeIdentifierKeysUnique(raw))
+    throw new Error('GATEIO_TRADE_EXACT_ID_INVALID');
+  return parsed.map((entry: unknown) => {
+    if (!isRecord(entry)) return entry;
+    const fields = evidence.get(entry);
+    return {
+      ...entry,
+      id: exactTradeIdentifier(entry.id, fields?.get('id')),
+      order_id: exactTradeIdentifier(entry.order_id, fields?.get('order_id')),
+    };
+  });
+}
+
 function normalizeSuccessfulResponse(
   validated: ValidatedRequest,
   parsed: unknown,
@@ -348,7 +435,8 @@ function createReadTransport(
       }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text);
+        parsed = validated.endpoint === GATEIO_READ_ENDPOINTS.MY_TRADES
+          ? parseGateIoRecentTrades(text) : JSON.parse(text);
       } catch {
         if (!response.ok) {
           throw new GateIoReadTransportError(
