@@ -7,6 +7,7 @@
  */
 import {
   GATEIO_L0_LIVE_ORIGIN,
+  GATEIO_L0_TESTNET_ORIGIN,
   GATEIO_READ_ENDPOINTS,
   GATEIO_SAFE_LABEL_PATTERN,
   canonicalGateIoQuery,
@@ -21,6 +22,7 @@ import {
   type GateIoReadTransportRequest,
 } from './GateIoReadContracts';
 import { GATEIO_V4_L0_SIGNED_METHOD, signGateIoV4Request } from './GateIoV4Signer';
+import { GateIoG3RunBudget } from './GateIoG3RunBudget';
 
 export const MAX_GATEIO_RESPONSE_BYTES = 1_048_576 as const;
 export const MAX_GATEIO_CREDENTIAL_CHARACTERS = 512 as const;
@@ -86,6 +88,8 @@ interface ValidatedRequest {
 
 const PRODUCTION_TRANSPORTS = new WeakSet<object>();
 const REQUEST_COUNTERS = new WeakMap<object, GateIoRequestCounters>();
+const TRANSPORT_ENVIRONMENTS = new WeakMap<object, 'live' | 'testnet'>();
+const TRANSPORT_BUDGETS = new WeakMap<object, GateIoG3RunBudget>();
 
 function fail(code: GateIoReadTransportErrorCode): never {
   throw new GateIoReadTransportError(code);
@@ -291,8 +295,12 @@ function responseSurfaceValid(value: unknown): value is GateIoReadResponse {
     && typeof value.text === 'function';
 }
 
-function createReadTransport(fetchImpl: GateIoReadFetch): GateIoReadTransport {
+function createReadTransport(
+  fetchImpl: GateIoReadFetch, environment: 'live' | 'testnet',
+  budget: GateIoG3RunBudget | null,
+): GateIoReadTransport {
   if (typeof fetchImpl !== 'function') fail('GATEIO_READ_REQUEST_INVALID');
+  const origin = environment === 'testnet' ? GATEIO_L0_TESTNET_ORIGIN : GATEIO_L0_LIVE_ORIGIN;
   const counters: GateIoRequestCounters = {
     total: 0,
     byEndpoint: new Map<string, number>(),
@@ -302,9 +310,10 @@ function createReadTransport(fetchImpl: GateIoReadFetch): GateIoReadTransport {
     async get(request: GateIoReadTransportRequest): Promise<unknown> {
       const validated = validateRequest(request);
       const url = validated.canonicalQuery.length === 0
-        ? `${GATEIO_L0_LIVE_ORIGIN}${validated.endpoint}`
-        : `${GATEIO_L0_LIVE_ORIGIN}${validated.endpoint}?${validated.canonicalQuery}`;
+        ? `${origin}${validated.endpoint}`
+        : `${origin}${validated.endpoint}?${validated.canonicalQuery}`;
       const headers = authenticatedHeaders(validated);
+      budget?.consumeReadRequest();
       counters.total += 1;
       counters.byEndpoint.set(
         validated.endpoint,
@@ -366,18 +375,28 @@ function createReadTransport(fetchImpl: GateIoReadFetch): GateIoReadTransport {
   };
   const frozen = Object.freeze(transport);
   REQUEST_COUNTERS.set(frozen, counters);
+  TRANSPORT_ENVIRONMENTS.set(frozen, environment);
+  if (budget !== null) TRANSPORT_BUDGETS.set(frozen, budget);
   return frozen;
 }
 
 /** Simulation/test constructor. An injected fetch can never receive production provenance. */
 export function createGateIoReadTransport(fetchImpl: GateIoReadFetch): GateIoReadTransport {
-  return createReadTransport(fetchImpl);
+  return createReadTransport(fetchImpl, 'live', null);
+}
+
+/** Explicit TestNet binding; the same L0 validation, signer and parser own every GET. */
+export function createGateIoTestnetReadTransport(
+  fetchImpl: GateIoReadFetch, budget: GateIoG3RunBudget,
+): GateIoReadTransport {
+  if (!(budget instanceof GateIoG3RunBudget)) fail('GATEIO_READ_REQUEST_INVALID');
+  return createReadTransport(fetchImpl, 'testnet', budget);
 }
 
 /** Closed production constructor: binds ambient fetch, performs zero I/O, accepts no fetch argument. */
 export function createProductionGateIoReadTransport(): GateIoProductionReadTransport {
   if (typeof globalThis.fetch !== 'function') fail('GATEIO_READ_REQUEST_INVALID');
-  const transport = createReadTransport(globalThis.fetch.bind(globalThis) as GateIoReadFetch);
+  const transport = createReadTransport(globalThis.fetch.bind(globalThis) as GateIoReadFetch, 'live', null);
   PRODUCTION_TRANSPORTS.add(transport);
   return transport as GateIoProductionReadTransport;
 }
@@ -386,6 +405,16 @@ export function hasProductionGateIoReadTransportProvenance(
   value: unknown,
 ): value is GateIoProductionReadTransport {
   return typeof value === 'object' && value !== null && PRODUCTION_TRANSPORTS.has(value);
+}
+
+export function gateIoReadTransportEnvironment(value: unknown): 'live' | 'testnet' | null {
+  return typeof value === 'object' && value !== null
+    ? TRANSPORT_ENVIRONMENTS.get(value) ?? null : null;
+}
+
+export function gateIoReadTransportBudget(value: unknown): GateIoG3RunBudget | null {
+  return typeof value === 'object' && value !== null
+    ? TRANSPORT_BUDGETS.get(value) ?? null : null;
 }
 
 export interface GateIoReadRequestCount {

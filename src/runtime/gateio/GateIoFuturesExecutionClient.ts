@@ -27,6 +27,7 @@ import {
   type GateIoReadResponse,
 } from './GateIoReadTransport';
 import { signGateIoV4ExecutionRequest } from './GateIoV4Signer';
+import { GateIoG3BudgetDenial, GateIoG3RunBudget, type GateIoG3DenialReason } from './GateIoG3RunBudget';
 
 export type GateIoEnvironment = 'testnet' | 'live';
 
@@ -89,6 +90,8 @@ export interface GateIoFuturesExecutionClientOptions {
   readonly readFoundation: Pick<GateIoAuthenticatedReadFoundation, 'instrumentFacts'>;
   /** Mandatory for TestNet G3; optional for separately governed Live wiring. */
   readonly mutationBudget?: GateIoG3MutationBudget;
+  /** G3 verification owns read, mutation and total-request limits in one run object. */
+  readonly runBudget?: GateIoG3RunBudget;
 }
 
 export type GateIoFuturesExecutionClientErrorCode =
@@ -102,12 +105,13 @@ export class GateIoFuturesExecutionClientError extends Error {
   readonly decision: 'DENIED' | null;
   readonly reasonCode: string;
 
-  constructor(readonly code: GateIoFuturesExecutionClientErrorCode) {
+  constructor(readonly code: GateIoFuturesExecutionClientErrorCode,
+    budgetReason: GateIoG3DenialReason | null = null) {
     super(code);
     this.name = 'GateIoFuturesExecutionClientError';
     this.decision = code === 'GATEIO_EXECUTION_SUBMISSION_UNKNOWN' ? null : 'DENIED';
-    this.reasonCode = code === 'GATEIO_EXECUTION_MUTATION_CAP_EXCEEDED'
-      ? 'MUTATION_CAP_EXCEEDED' : code;
+    this.reasonCode = budgetReason ?? (code === 'GATEIO_EXECUTION_MUTATION_CAP_EXCEEDED'
+      ? 'MUTATION_CAP_EXCEEDED' : code);
   }
 }
 
@@ -305,9 +309,12 @@ export function createGateIoFuturesExecutionClient(
       || !isRecord(options.readFoundation)
       || typeof options.readFoundation.instrumentFacts !== 'function'
       || (options.environment === 'testnet'
-        && !(options.mutationBudget instanceof GateIoG3MutationBudget))
+        && !(options.mutationBudget instanceof GateIoG3MutationBudget)
+        && !(options.runBudget instanceof GateIoG3RunBudget))
       || (options.mutationBudget !== undefined
-        && !(options.mutationBudget instanceof GateIoG3MutationBudget))) {
+        && !(options.mutationBudget instanceof GateIoG3MutationBudget))
+      || (options.runBudget !== undefined
+        && !(options.runBudget instanceof GateIoG3RunBudget))) {
     fail('GATEIO_EXECUTION_CONFIGURATION_INVALID');
   }
   const origin = GATEIO_EXECUTION_ORIGINS[options.environment];
@@ -339,7 +346,10 @@ export function createGateIoFuturesExecutionClient(
       body,
     });
     let response: GateIoReadResponse;
-    if (mutation !== null) options.mutationBudget?.consume(mutation.purpose, mutation.reduceOnly);
+    if (mutation !== null) {
+      if (options.runBudget) options.runBudget.consumeMutationRequest(mutation.purpose, mutation.reduceOnly);
+      else options.mutationBudget?.consume(mutation.purpose, mutation.reduceOnly);
+    } else options.runBudget?.consumeReadRequest();
     try {
       response = await options.fetchImpl(origin + path, Object.freeze({
         method,
@@ -379,14 +389,22 @@ export function createGateIoFuturesExecutionClient(
   async function reconcile(
     request: GateIoFuturesMarketOrderRequest,
   ): Promise<GateIoFuturesMarketOrderResult> {
-    const path = GATEIO_EXECUTION_ORDER_PATH + '/' + request.text;
-    const response = await wire('GET', path, '');
-    if (response === null || !response.ok || response.parsed === null) {
-      fail('GATEIO_EXECUTION_SUBMISSION_UNKNOWN');
+    try {
+      options.runBudget?.beginAmbiguousReconciliation();
+      const path = GATEIO_EXECUTION_ORDER_PATH + '/' + request.text;
+      const response = await wire('GET', path, '');
+      if (response === null || !response.ok || response.parsed === null) {
+        fail('GATEIO_EXECUTION_SUBMISSION_UNKNOWN');
+      }
+      const normalized = normalizedOrder(response.parsed, response.rawText, request);
+      if (normalized === null) fail('GATEIO_EXECUTION_SUBMISSION_UNKNOWN');
+      return normalized;
+    } catch (error) {
+      if (error instanceof GateIoG3BudgetDenial) {
+        throw new GateIoFuturesExecutionClientError('GATEIO_EXECUTION_SUBMISSION_UNKNOWN', error.reasonCode);
+      }
+      throw error;
     }
-    const normalized = normalizedOrder(response.parsed, response.rawText, request);
-    if (normalized === null) fail('GATEIO_EXECUTION_SUBMISSION_UNKNOWN');
-    return normalized;
   }
 
   return Object.freeze({

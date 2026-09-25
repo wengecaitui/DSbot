@@ -71,9 +71,18 @@ export function validateTradingEventPayload(
   }
 
   if (type === 'position.baseline.confirmed') {
-    const p = payload as { baseline?: unknown };
+    const p = payload as { baseline?: unknown; evidence?: unknown };
     if (!p || p.baseline === undefined) throw new InvalidExchangeProvenanceError('position.baseline.confirmed requires baseline payload');
     validatePositionBaseline(p.baseline);
+    if (p.evidence !== undefined) {
+      const e = p.evidence as Record<string, unknown>;
+      if (!e || e.exchange !== 'gateio' || typeof e.accountId !== 'string' || !e.accountId
+          || e.symbol !== 'ETH/USDT' || !Number.isSafeInteger(e.capturedAt)
+          || typeof e.source !== 'string' || !e.source
+          || typeof e.digest !== 'string' || !/^[a-f0-9]{64}$/.test(e.digest)
+          || (e.positionMode !== 'single' && e.positionMode !== 'dual')
+          || e.baseline !== 'flat') throw new Error('BASELINE_EVIDENCE_INVALID');
+    }
   }
 
   // Phase 3 OMS: strict order lifecycle validation

@@ -25,7 +25,8 @@ import {
   type GateIoReadFreshness,
   type GateIoServerTimeObservation,
 } from './GateIoReadClock';
-import { hasProductionGateIoReadTransportProvenance } from './GateIoReadTransport';
+import { gateIoReadTransportBudget, hasProductionGateIoReadTransportProvenance } from './GateIoReadTransport';
+import { GateIoG3BudgetDenial, type GateIoG3RunBudget } from './GateIoG3RunBudget';
 
 export const MAX_GATEIO_ACCOUNT_TRUTH_GETS = 5 as const;
 export const MAX_GATEIO_INSTRUMENT_FACTS_GETS = 3 as const;
@@ -185,6 +186,7 @@ export interface GateIoAuthenticatedReadFoundationOptions {
   readonly identity: GateIoReadIdentity;
   readonly now: () => number;
   readonly credential: GateIoReadCredential | null;
+  readonly runBudget?: GateIoG3RunBudget;
 }
 
 class GateIoMalformedPayload extends Error {
@@ -477,6 +479,7 @@ function available<T>(value: T): GateIoFoundationReadResult<T> {
 }
 
 function failed<T>(error: unknown, fallback: GateIoReadFailureReason): GateIoFoundationReadResult<T> {
+  if (error instanceof GateIoG3BudgetDenial) return result<T>('UNKNOWN', null, error.reasonCode);
   if (error instanceof GateIoReadClientError) {
     const availability = error.reason === 'GATEIO_READ_CREDENTIALS_UNAVAILABLE'
       || error.reason === 'GATEIO_AUTH_READ_NOT_CONFIGURED' ? 'UNAVAILABLE' : 'UNKNOWN';
@@ -539,6 +542,9 @@ export function evaluateGateIoEntryReadiness(input: {
 export function createGateIoAuthenticatedReadFoundation(
   options: GateIoAuthenticatedReadFoundationOptions,
 ): GateIoAuthenticatedReadFoundation {
+  const transportBudget = gateIoReadTransportBudget(options.transport);
+  if (transportBudget !== null && options.runBudget !== transportBudget)
+    throw new GateIoReadClientError('GATEIO_AUTH_READ_NOT_CONFIGURED');
   const identity = validateIdentity(options.identity);
   const clock: GateIoReadClock = createGateIoReadClock(options.now);
   const credential = options.credential ?? null;
@@ -582,6 +588,8 @@ export function createGateIoAuthenticatedReadFoundation(
         'UNAVAILABLE', null, 'GATEIO_READ_CREDENTIALS_UNAVAILABLE',
       ));
     }
+    try { options.runBudget?.beginAccountTruth(); }
+    catch (error) { return remember(failed(error, 'ACCOUNT_TRUTH_UNKNOWN')); }
     const time = await synchronizeTime();
     if (time.value === null) return remember(result<GateIoCanonicalAccountTruth>(
       time.availability, null, time.reason ?? 'GATEIO_SERVER_TIME_INVALID', time.failureProvenance,
@@ -631,6 +639,8 @@ export function createGateIoAuthenticatedReadFoundation(
   }
 
   async function instrumentFacts(): Promise<GateIoFoundationReadResult<GateIoCanonicalInstrumentFacts>> {
+    try { options.runBudget?.beginInstrumentFacts(); }
+    catch (error) { return remember(failed(error, 'INSTRUMENT_FACTS_UNKNOWN')); }
     const time = await synchronizeTime();
     if (time.value === null) return remember(result<GateIoCanonicalInstrumentFacts>(
       time.availability, null, time.reason ?? 'GATEIO_SERVER_TIME_INVALID', time.failureProvenance,

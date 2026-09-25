@@ -7,6 +7,7 @@ import {
   GATEIO_API_PREFIX,
   GATEIO_L0_INITIAL_CONTRACT,
   GATEIO_L0_LIVE_ORIGIN,
+  GATEIO_L0_TESTNET_ORIGIN,
   GATEIO_L0_SETTLE,
   GATEIO_READ_ENDPOINTS,
   canonicalGateIoQuery,
@@ -403,10 +404,11 @@ describe('Gate.io L0 read foundation', () => {
     assert.doesNotMatch(source, /fetchArbitrary|request\(path|get\(path/);
   });
 
-  it('34. fixed origin has no testnet, US or fallback host', () => {
+  it('34. explicit live/testnet origins have no US or fallback host', () => {
     const source = gateIoProductionSource();
     assert.equal(GATEIO_L0_LIVE_ORIGIN, 'https://api.gateio.ws');
-    assert.doesNotMatch(source, /api-testnet\.gateapi\.io|fx-api\.gateio\.ws|gate\.us/);
+    assert.equal(GATEIO_L0_TESTNET_ORIGIN, 'https://api-testnet.gateapi.io');
+    assert.doesNotMatch(source, /fx-api\.gateio\.ws|gate\.us/);
   });
 
   it('35. production sources contain no retry, polling or background timer implementation', () => {

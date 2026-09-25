@@ -236,9 +236,22 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
       );
     } catch (error) {
       if (typeof error === 'object' && error !== null
+          && 'decision' in error && error.decision === null
+          && 'reasonCode' in error && typeof error.reasonCode === 'string'
+          && (error.reasonCode === 'NETWORK_REQUEST_CAP_EXCEEDED'
+            || error.reasonCode === 'AMBIGUOUS_RECONCILIATION_CAP_EXCEEDED')) {
+        return unknown(error.reasonCode);
+      }
+      if (typeof error === 'object' && error !== null
           && 'decision' in error && error.decision === 'DENIED'
           && 'reasonCode' in error
           && (error.reasonCode === 'MUTATION_CAP_EXCEEDED'
+            || error.reasonCode === 'MUTATION_PROOF_CAP_EXCEEDED'
+            || error.reasonCode === 'MUTATION_CLEANUP_CAP_EXCEEDED'
+            || error.reasonCode === 'MUTATION_TOTAL_CAP_EXCEEDED'
+            || error.reasonCode === 'NETWORK_REQUEST_CAP_EXCEEDED'
+            || error.reasonCode === 'AMBIGUOUS_RECONCILIATION_CAP_EXCEEDED'
+            || error.reasonCode === 'CLEANUP_REQUIRES_REDUCE_ONLY'
             || error.reasonCode === 'GATEIO_EXECUTION_REQUEST_INVALID')) {
         return rejected(error.reasonCode);
       }
