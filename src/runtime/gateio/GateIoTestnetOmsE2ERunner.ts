@@ -14,7 +14,8 @@ import { evaluatePreTradeRisk } from '../../risk/PreTradeRiskGateway';
 import type { AccountBoundHardRiskSnapshot, TradeAction } from '../../risk/pretrade-risk-types';
 import type { PolicyResolution } from '../../types/policy-snapshot';
 import { createTradeIntent } from '../../types/trade-intent';
-import { createGateIoAuthenticatedReadFoundation } from './GateIoAuthenticatedReadFoundation';
+import { createGateIoAuthenticatedReadFoundation, type GateIoCanonicalAccountTruth,
+  type GateIoCanonicalInstrumentFacts } from './GateIoAuthenticatedReadFoundation';
 import { createGateIoFuturesExecutionClient, type GateIoFuturesExecutionFetch } from './GateIoFuturesExecutionClient';
 import { type GateIoReadCredential } from './GateIoReadContracts';
 import { createGateIoTestnetReadTransport, type GateIoReadFetch } from './GateIoReadTransport';
@@ -27,13 +28,22 @@ export interface GateIoG3RunnerOptions {
   readonly credential: GateIoReadCredential;
   readonly readFetch: GateIoReadFetch;
   readonly executionFetch: GateIoFuturesExecutionFetch;
-  readonly signedTimestamp: () => string;
+  /** Legacy explicit strategy; the formal G3 binding uses the L1A observed server clock. */
+  readonly signedTimestamp?: () => string;
+  /** Formal launch binding owns this one budget; direct offline users may omit it. */
+  readonly runBudget?: GateIoG3RunBudget;
   readonly now: () => number;
   readonly journal: EventJournalPort;
   /** Mainline factual collector and policy projections; no synthesized market/policy facts. */
-  readonly marketSnapshot: () => MarketSnapshot;
+  readonly marketSnapshot: (facts: GateIoG3FactualRiskInput) => MarketSnapshot;
   readonly policyResolution: () => PolicyResolution;
-  readonly hardRisk: () => AccountBoundHardRiskSnapshot;
+  readonly hardRisk: (facts: GateIoG3FactualRiskInput) => AccountBoundHardRiskSnapshot;
+}
+
+export interface GateIoG3FactualRiskInput {
+  readonly account: GateIoCanonicalAccountTruth;
+  readonly instrument: GateIoCanonicalInstrumentFacts;
+  readonly nowMs: number;
 }
 
 export interface GateIoG3RunReceipt {
@@ -60,13 +70,19 @@ export interface GateIoG3Runner {
 export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions): GateIoG3Runner {
   if (!options || options.environment !== 'testnet' || !options.credential
       || typeof options.readFetch !== 'function' || typeof options.executionFetch !== 'function'
-      || typeof options.signedTimestamp !== 'function' || typeof options.now !== 'function'
+      || (options.signedTimestamp !== undefined && typeof options.signedTimestamp !== 'function')
+      || (options.runBudget !== undefined && !(options.runBudget instanceof GateIoG3RunBudget))
+      || typeof options.now !== 'function'
       || !options.journal || typeof options.journal.append !== 'function'
       || typeof options.marketSnapshot !== 'function' || typeof options.policyResolution !== 'function'
       || typeof options.hardRisk !== 'function' || !options.accountId) {
     throw new Error('GATEIO_G3_RUNNER_CONFIGURATION_INVALID');
   }
-  const budget = GateIoG3RunBudget.create(GATEIO_G3_LIMITS);
+  const budget = options.runBudget ?? GateIoG3RunBudget.create(GATEIO_G3_LIMITS);
+  if (Object.entries(GATEIO_G3_LIMITS).some(([key, value]) =>
+    budget.limits[key as keyof typeof GATEIO_G3_LIMITS] !== value)
+      || Object.values(budget.snapshot()).some((value) => value !== 0))
+    throw new Error('GATEIO_G3_RUN_BUDGET_INVALID');
   const transport = createGateIoTestnetReadTransport(options.readFetch, budget);
   const foundation = createGateIoAuthenticatedReadFoundation({
     transport, runBudget: budget, credential: options.credential, now: options.now,
@@ -75,7 +91,8 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
   let truthPort: GateIoExecutionTruthPort;
   const client = createGateIoFuturesExecutionClient({
     environment: 'testnet', credential: options.credential,
-    signedTimestamp: options.signedTimestamp, fetchImpl: options.executionFetch,
+    signedTimestamp: options.signedTimestamp ?? (() => foundation.signedTimestamp()),
+    fetchImpl: options.executionFetch,
     readFoundation: { async instrumentFacts() {
       const facts = truthPort.currentInstrument();
       return facts === null
@@ -105,6 +122,7 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
   let failureOrigin: string | null = null;
   let truthFailureReason: string | null = null;
   let finalizing = false;
+  let latestAccount: GateIoCanonicalAccountTruth | null = null;
   const receipt = (status: 'PASS' | 'STOP', reasonCode: string): GateIoG3RunReceipt => Object.freeze({
     status, reasonCode, openOmsStatus, closeOmsStatus, cleanupOmsStatus,
     lastCaptureSequence: truthPort.captureSequence(), budget: budget.snapshot(),
@@ -123,14 +141,25 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
     truthFailureReason = usable === null
       ? truth.incompleteReason ?? (facts === null ? 'CANONICAL_TRUTH_UNAVAILABLE' : 'TRUTH_STALE')
       : null;
+    latestAccount = usable?.facts.account ?? null;
     return usable;
   }
 
   async function submit(action: TradeAction, direction: 'long' | 'short', positionUsd: number,
     expectedContracts: number): Promise<Awaited<ReturnType<OmsCore['submitRequest']>> | 'RISK_REJECTED'> {
-    const marketSnapshot = options.marketSnapshot();
+    const facts = truthPort.currentInstrument();
+    const account = latestAccount;
+    const nowMs = options.now();
+    if (facts === null || account === null || account.identity.accountId !== options.accountId
+        || account.freshness !== 'FRESH' || !Number.isSafeInteger(nowMs)
+        || nowMs < account.observedAtMs || nowMs - account.observedAtMs > 30_000)
+      return 'RISK_REJECTED';
+    const factualInput: GateIoG3FactualRiskInput = Object.freeze({
+      account, instrument: facts, nowMs,
+    });
+    const marketSnapshot = options.marketSnapshot(factualInput);
     const policyResolution = options.policyResolution();
-    const hardRisk = options.hardRisk();
+    const hardRisk = options.hardRisk(factualInput);
     if (hardRisk.accountId !== options.accountId || hardRisk.exchange !== 'gateio'
         || marketSnapshot?.exchange !== 'gateio' || marketSnapshot.symbol !== 'ETH/USDT'
         || marketSnapshot.isStale || !marketSnapshot.ticker) return 'RISK_REJECTED';
@@ -143,8 +172,6 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
         openPositionCount: positionStore.resolve('gateio', 'ETH/USDT').status === 'open' ? 1 : 0,
         allowScale: false } });
     if (risk.decision !== 'ADMITTED') return 'RISK_REJECTED';
-    const facts = truthPort.currentInstrument();
-    if (!facts) return 'RISK_REJECTED';
     const contracts = normalizeGateIoEthContracts(
       risk.approvedPositionUsd / (facts.markPrice * facts.contractMultiplier), facts, action,
     );

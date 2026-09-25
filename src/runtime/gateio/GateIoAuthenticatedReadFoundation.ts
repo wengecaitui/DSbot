@@ -21,6 +21,7 @@ import {
   createGateIoReadClock,
   gateIoFreshnessFromObservation,
   observeGateIoServerTime,
+  signedGateIoTimestamp,
   type GateIoReadClock,
   type GateIoReadFreshness,
   type GateIoServerTimeObservation,
@@ -149,6 +150,12 @@ export interface GateIoCanonicalInstrumentFacts {
   readonly markPrice: number;
   readonly indexPrice: number;
   readonly lastPrice: number;
+  /** Optional factual ticker fields; a G3 market projection must reject missing values. */
+  readonly bestBid?: number | null;
+  readonly bestAsk?: number | null;
+  readonly volume24h?: number | null;
+  readonly high24h?: number | null;
+  readonly low24h?: number | null;
   readonly makerFeeRate: number;
   readonly takerFeeRate: number;
   readonly fundingRate: number;
@@ -178,6 +185,8 @@ export interface GateIoAuthenticatedReadStatus {
 export interface GateIoAuthenticatedReadFoundation {
   accountTruth(): Promise<GateIoFoundationReadResult<GateIoCanonicalAccountTruth>>;
   instrumentFacts(): Promise<GateIoFoundationReadResult<GateIoCanonicalInstrumentFacts>>;
+  /** Uses only the latest bounded public server-time observation; no new I/O. */
+  signedTimestamp(): string;
   status(): GateIoAuthenticatedReadStatus;
 }
 
@@ -447,6 +456,11 @@ interface GateIoTickerFacts {
   readonly indexPrice: number;
   readonly lastPrice: number;
   readonly fundingRate: number;
+  readonly bestBid: number | null;
+  readonly bestAsk: number | null;
+  readonly volume24h: number | null;
+  readonly high24h: number | null;
+  readonly low24h: number | null;
 }
 
 export function normalizeGateIoTicker(raw: unknown): GateIoTickerFacts {
@@ -460,6 +474,11 @@ export function normalizeGateIoTicker(raw: unknown): GateIoTickerFacts {
       indexPrice: decimal(entry.index_price, { positive: true }),
       lastPrice: decimal(entry.last, { positive: true }),
       fundingRate: decimal(entry.funding_rate),
+      bestBid: optionalDecimal(entry.highest_bid),
+      bestAsk: optionalDecimal(entry.lowest_ask),
+      volume24h: optionalDecimal(entry.volume_24h),
+      high24h: optionalDecimal(entry.high_24h),
+      low24h: optionalDecimal(entry.low_24h),
     });
   });
 }
@@ -666,6 +685,11 @@ export function createGateIoAuthenticatedReadFoundation(
         markPrice: ticker.markPrice,
         indexPrice: ticker.indexPrice,
         lastPrice: ticker.lastPrice,
+        bestBid: ticker.bestBid,
+        bestAsk: ticker.bestAsk,
+        volume24h: ticker.volume24h,
+        high24h: ticker.high24h,
+        low24h: ticker.low24h,
         makerFeeRate: rule.makerFeeRate,
         takerFeeRate: rule.takerFeeRate,
         fundingRate: ticker.fundingRate,
@@ -684,6 +708,7 @@ export function createGateIoAuthenticatedReadFoundation(
   return Object.freeze({
     accountTruth,
     instrumentFacts,
+    signedTimestamp: () => signedGateIoTimestamp(clock, observation),
     status(): GateIoAuthenticatedReadStatus {
       return Object.freeze({
         configured: credential !== null,
