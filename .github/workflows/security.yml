@@ -15,6 +15,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      - name: Verify tested commit identity
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_EVENT_SHA: ${{ github.sha }}
+          CI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          expected_sha="$CI_EVENT_SHA"
+          if [[ "$CI_EVENT_NAME" == "pull_request" ]]; then
+            expected_sha="$CI_PR_HEAD_SHA"
+          fi
+          printf '%s\n' \
+            "GITHUB_EVENT_NAME=$CI_EVENT_NAME" \
+            "GITHUB_EVENT_SHA=$CI_EVENT_SHA" \
+            "PR_HEAD_SHA=$CI_PR_HEAD_SHA" \
+            "ACTUAL_TESTED_SHA=$actual_sha" \
+            "EXPECTED_TESTED_SHA=$expected_sha"
+          if [[ ! "$expected_sha" =~ ^[0-9a-f]{40}$ || "$actual_sha" != "$expected_sha" ]]; then
+            echo "EXACT_HEAD_MATCH=false"
+            echo "::error::Checked-out commit does not match the expected event head."
+            exit 1
+          fi
+          echo "EXACT_HEAD_MATCH=true"
 
       - name: Setup Node
         uses: actions/setup-node@v6
