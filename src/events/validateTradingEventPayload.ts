@@ -8,11 +8,22 @@ import { isExchangeId } from '../data/MarketIdentity';
 import { InvalidExchangeProvenanceError, KlineClosedEventRejectedError } from './TradingEvent';
 import { validateConfirmedFill } from '../types/confirmed-fill';
 import { validatePositionBaseline } from '../types/position-state';
+import { validateExecutionPreparation, validateExecutionObservation } from '../oms/execution-observation';
+import type { ExecutionPreparation, OrderExecutionObservation } from '../oms/oms-types';
 
 export function validateTradingEventPayload(
   type: string,
   payload: Record<string, unknown>,
 ): void {
+  if (type === 'order.execution.prepared') {
+    if (typeof payload.orderId !== 'string' || !payload.orderId) throw new Error('OMS_PREPARATION_ORDER_REQUIRED');
+    validateExecutionPreparation(payload.preparation as ExecutionPreparation);
+    return;
+  }
+  if (type === 'order.execution.observed') {
+    validateExecutionObservation(payload.execution as OrderExecutionObservation);
+    return;
+  }
   if (type !== 'market.ticker.updated' && type !== 'market.kline.closed' && type !== 'research.bias.updated' && type !== 'policy.snapshot.published' && type !== 'execution.fill.confirmed' && type !== 'position.baseline.confirmed' && type !== 'order.created' && type !== 'order.submitted' && type !== 'order.rejected' && type !== 'order.submission.unknown' && type !== 'position.plan.created' && type !== 'position.plan.updated' && type !== 'position.plan.archived' && type !== 'position.plan.closed') {
     throw new Error(`UNKNOWN_EVENT_TYPE: ${JSON.stringify(type)}`);
   }
@@ -68,6 +79,7 @@ export function validateTradingEventPayload(
     const p = payload as { fill?: unknown };
     if (!p || p.fill === undefined) throw new InvalidExchangeProvenanceError('execution.fill.confirmed requires fill payload');
     validateConfirmedFill(p.fill);
+    if (payload.execution !== undefined) validateExecutionObservation(payload.execution as OrderExecutionObservation);
   }
 
   if (type === 'position.baseline.confirmed') {

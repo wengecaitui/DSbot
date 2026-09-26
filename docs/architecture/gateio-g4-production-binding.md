@@ -64,6 +64,7 @@ its GET allowlist, signer, raw-int64 parser and production provenance are unchan
 The market bridge now retains the collector's receivedAt rather than replacing
 it with a later wall clock.
 
-PARTIAL_FILL_LIFECYCLE=P1 remains inherited. Partial execution stays
-SUBMISSION_UNKNOWN/unreconciled; it is not represented as a full fill or safe flat
-account. No autonomous-live readiness is claimed.
+At the G4 baseline, PARTIAL_FILL_LIFECYCLE=P1 remained inherited. G5 adds the
+bounded, offline-verified cumulative lifecycle described in
+[gateio-g5-partial-fill-lifecycle.md](gateio-g5-partial-fill-lifecycle.md).
+This does not certify ProductionSpine Live execution or autonomous-live readiness.

@@ -5,7 +5,6 @@
  * canonical L1A instrument facts, and the fetch-shaped wire port. Construction performs no I/O.
  */
 import {
-  GATEIO_ETH_DECIMAL_CONTRACT_SCALE,
   gateIoEthContractSizeValid,
   type GateIoFuturesExecutionClient as GateIoFuturesExecutionClientPort,
   type GateIoFuturesMarketOrderRequest,
@@ -29,6 +28,8 @@ import {
 import { signGateIoV4ExecutionRequest } from './GateIoV4Signer';
 import { GateIoG3BudgetDenial, GateIoG3RunBudget, type GateIoG3DenialReason } from './GateIoG3RunBudget';
 import { parseGateIoExactInt64Json } from './GateIoExactInt64Recovery';
+import { quantityEqual } from '../../oms/execution-observation';
+import { subtractQuantity } from '../../types/decimal-quantity';
 
 export type GateIoEnvironment = 'testnet' | 'live';
 
@@ -103,7 +104,7 @@ export interface GateIoCurrentRunOrderAttestation {
 
 export interface GateIoFuturesExecutionClientWithAttestation
   extends GateIoFuturesExecutionClientPort {
-  lookupSubmittedOrder(clientText: string): Promise<GateIoCurrentRunOrderAttestation | null>;
+  lookupSubmittedOrder(clientText: string, recoveredRequest?: GateIoFuturesMarketOrderRequest): Promise<GateIoCurrentRunOrderAttestation | null>;
 }
 
 export type GateIoFuturesExecutionClientErrorCode =
@@ -179,19 +180,6 @@ function strictNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function strictContractSize(value: unknown): number | null {
-  const parsed = strictNumber(value);
-  if (parsed === 0) return 0;
-  return parsed !== null && gateIoEthContractSizeValid(parsed)
-    ? Math.round(parsed * GATEIO_ETH_DECIMAL_CONTRACT_SCALE)
-      / GATEIO_ETH_DECIMAL_CONTRACT_SCALE
-    : null;
-}
-
-function contractUnits(value: number): number {
-  return Math.round(value * GATEIO_ETH_DECIMAL_CONTRACT_SCALE);
-}
-
 function safeLabel(value: unknown): string | null {
   return typeof value === 'string' && GATEIO_SAFE_LABEL_PATTERN.test(value) ? value : null;
 }
@@ -207,8 +195,8 @@ function normalizedOrder(
   if (!isRecord(parsed)
       || parsed.contract !== request.contract
       || parsed.text !== request.text) return null;
-  const size = strictContractSize(parsed.size);
-  const left = strictContractSize(parsed.left);
+  const size = strictNumber(parsed.size);
+  const left = strictNumber(parsed.left);
   if (size === null || left === null) return null;
   const exchangeOrderId = typeof parsed.id === 'string' && EXACT_POSITIVE_INTEGER.test(parsed.id)
     ? parsed.id : null;
@@ -216,25 +204,26 @@ function normalizedOrder(
 
   const wireStatus = typeof parsed.status === 'string' ? parsed.status : null;
   const finishAs = typeof parsed.finish_as === 'string' ? parsed.finish_as : null;
-  const sizeUnits = contractUnits(size);
-  const leftUnits = contractUnits(left);
-  const requestUnits = contractUnits(request.size);
+  // Filled/remainder quantities are exchange facts, not rounded to the order-entry lot step.
+  const sizeUnits = size;
+  const leftUnits = left;
+  const requestUnits = request.size;
   // F-09: Gate can return size=0,left=0 for a decimal full fill. Exact attribution plus
   // status=finished and finish_as=filled is the factual full-fill witness for the original request.
   const decimalFullFillWitness = wireStatus === 'finished' && finishAs === 'filled'
     && sizeUnits === 0 && leftUnits === 0;
-  if (!decimalFullFillWitness && sizeUnits !== requestUnits) return null;
+  if (!decimalFullFillWitness && !quantityEqual(sizeUnits, requestUnits)) return null;
   if (Math.abs(leftUnits) > Math.abs(sizeUnits)
       || (leftUnits !== 0 && Math.sign(leftUnits) !== Math.sign(sizeUnits))) return null;
-  const signedFilledUnits = decimalFullFillWitness ? requestUnits : sizeUnits - leftUnits;
+  const signedFilledUnits = decimalFullFillWitness ? requestUnits : subtractQuantity(sizeUnits, leftUnits);
   if (signedFilledUnits !== 0 && Math.sign(signedFilledUnits) !== Math.sign(requestUnits)) return null;
-  const signedFilledSize = signedFilledUnits / GATEIO_ETH_DECIMAL_CONTRACT_SCALE;
+  const signedFilledSize = signedFilledUnits;
   let status: GateIoFuturesMarketOrderResult['status'];
   if (wireStatus === 'open') {
     status = signedFilledSize === 0 ? 'OPEN' : 'PARTIALLY_FILLED';
   } else if (wireStatus === 'finished') {
     if (decimalFullFillWitness
-        || (Math.abs(signedFilledUnits) === Math.abs(sizeUnits)
+        || (quantityEqual(Math.abs(signedFilledUnits), Math.abs(sizeUnits))
           && leftUnits === 0 && finishAs === 'filled')) {
       status = 'FINISHED';
     } else if (signedFilledSize !== 0) {
@@ -250,8 +239,11 @@ function normalizedOrder(
 
   const averagePrice = signedFilledSize === 0 ? null : strictNumber(parsed.fill_price);
   if (signedFilledSize !== 0 && (averagePrice === null || averagePrice <= 0)) return null;
-  const executionTimeCandidate = parsed.finish_time ?? parsed.update_time ?? parsed.create_time;
-  const executedAt = signedFilledSize === 0 ? null : strictNumber(executionTimeCandidate);
+  // Open orders commonly carry finish_time=0; it is not their observation timestamp.
+  const executionTimeCandidate = wireStatus === 'finished'
+    ? parsed.finish_time ?? parsed.update_time ?? parsed.create_time
+    : parsed.update_time ?? parsed.create_time ?? parsed.finish_time;
+  const executedAt = strictNumber(executionTimeCandidate);
   if (signedFilledSize !== 0 && (executedAt === null || executedAt <= 0)) return null;
   const rejectionReason = status === 'REJECTED'
     ? safeLabel(finishAs?.toUpperCase()) ?? 'GATEIO_EXECUTION_REJECTED'
@@ -259,6 +251,7 @@ function normalizedOrder(
 
   return Object.freeze({
     status,
+    terminal: wireStatus === 'finished',
     clientText: request.text,
     contract: request.contract,
     signedFilledSize,
@@ -408,8 +401,11 @@ export function createGateIoFuturesExecutionClient(
   }
 
   return Object.freeze({
-    async lookupSubmittedOrder(clientText: string): Promise<GateIoCurrentRunOrderAttestation | null> {
-      const request = submittedRequests.get(clientText);
+    async lookupSubmittedOrder(clientText: string, recoveredRequest?: GateIoFuturesMarketOrderRequest): Promise<GateIoCurrentRunOrderAttestation | null> {
+      if (recoveredRequest !== undefined && (!requestValid(recoveredRequest) || recoveredRequest.text !== clientText)) return null;
+      const recorded = submittedRequests.get(clientText);
+      if (recorded && recoveredRequest && Object.keys(recorded).some(k => (recorded as any)[k] !== (recoveredRequest as any)[k])) return null;
+      const request = recorded ?? recoveredRequest;
       if (!options.runBudget || request === undefined || !CLIENT_TEXT.test(clientText)) return null;
       options.runBudget.beginCurrentRunOrderAttestation();
       const response = await wire('GET', GATEIO_EXECUTION_ORDER_PATH + '/' + clientText, '');

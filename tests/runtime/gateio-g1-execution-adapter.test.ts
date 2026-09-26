@@ -250,9 +250,14 @@ describe('Gate.io G1 result mapping', () => {
     const partial = fakeClient({ submit: request => finished(request, {
       status: 'PARTIALLY_FILLED', signedFilledSize: 2,
     }) });
-    assert.deepEqual(await new GateIoFuturesExecutionAdapter(partial).submit(order()), {
-      status: 'unknown', reason: 'PARTIAL_FILL_FULL_LIFECYCLE_REQUIRED',
-    });
+    const partialResult = await new GateIoFuturesExecutionAdapter(partial).submit(order());
+    assert.equal(partialResult.status, 'execution');
+    if (partialResult.status === 'execution') {
+      assert.equal(partialResult.observation.status, 'PARTIALLY_FILLED');
+      assert.equal(partialResult.observation.requestedQuantity, 0.005);
+      assert.equal(partialResult.observation.cumulativeFilledQuantity, 0.002);
+      assert.equal(partialResult.observation.remainingQuantity, 0.003);
+    }
 
     const rejected = fakeClient({ submit: request => finished(request, {
       status: 'REJECTED', signedFilledSize: 0, averagePrice: null,
@@ -308,6 +313,15 @@ describe('Gate.io G1 result mapping', () => {
       status: 'unknown', reason: 'MALFORMED_EXCHANGE_RESULT',
     });
   });
+
+  it('partial cumulative observations preserve int64 strings and reject malformed identity', async () => {
+    for (const id of [42, Number.MAX_SAFE_INTEGER + 1, 'not-an-int64', '']) {
+      const partial = fakeClient({ submit: request => finished(request, {
+        status: 'PARTIALLY_FILLED', signedFilledSize: 2, exchangeOrderId: id as any,
+      }) });
+      assert.equal((await new GateIoFuturesExecutionAdapter(partial).submit(order())).status, 'unknown');
+    }
+  });
 });
 
 describe('Gate.io G1 real OMS integration and architecture boundary', () => {
@@ -336,7 +350,7 @@ describe('Gate.io G1 real OMS integration and architecture boundary', () => {
     assert.equal(result.fill?.fillId, TRADE_ID);
     assert.deepEqual(
       kernel.journal().readFromLogicalSequence(1).map(entry => entry.type),
-      ['order.created', 'order.submitted', 'execution.fill.confirmed'],
+      ['order.created', 'order.submitted', 'order.execution.prepared', 'execution.fill.confirmed'],
     );
   });
 

@@ -12,6 +12,7 @@ import type { ConfirmedFill } from '../types/confirmed-fill';
 import type { ConfirmedPositionBaseline } from '../types/position-state';
 import type { OrderCreatedPayload, OrderStatusPayload } from '../oms/oms-events';
 import type { PositionPlan } from '../position/position-plan-types';
+import type { ExecutionPreparation, OrderExecutionObservation } from '../oms/oms-types';
 
 export interface ExternalFlatBaselineEvidence {
   readonly exchange: 'gateio';
@@ -29,7 +30,9 @@ export interface TradingEventPayloadMap {
   'market.kline.closed':         { kline: WsKline; receivedAt: number };
   'research.bias.updated':       { report: MarketBiasReportFull; receivedAt: number };
   'policy.snapshot.published':   { policy: CompiledPolicy };
-  'execution.fill.confirmed':    { fill: ConfirmedFill };
+  'execution.fill.confirmed':    { fill: ConfirmedFill; execution?: OrderExecutionObservation };
+  'order.execution.prepared': { orderId: string; preparation: ExecutionPreparation };
+  'order.execution.observed': { execution: OrderExecutionObservation };
   'position.baseline.confirmed': { baseline: ConfirmedPositionBaseline; evidence?: ExternalFlatBaselineEvidence };
   'order.created':               OrderCreatedPayload;
   'order.submitted':             OrderStatusPayload;

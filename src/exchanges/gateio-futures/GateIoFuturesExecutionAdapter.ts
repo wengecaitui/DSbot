@@ -3,7 +3,11 @@ import type {
   ExecutionResult,
   OmsConfirmedFill,
   OmsOrder,
+  ExecutionPreparation,
+  OrderExecutionObservation,
 } from '../../oms/oms-types';
+import { validateExecutionObservation } from '../../oms/execution-observation';
+import { multiplyQuantity, subtractQuantity } from '../../types/decimal-quantity';
 import {
   GATEIO_L0_INITIAL_CONTRACT,
 } from '../../runtime/gateio/GateIoReadContracts';
@@ -36,6 +40,7 @@ export interface GateIoFuturesMarketOrderRequest {
  * executedAt is factual Gate epoch seconds and is converted explicitly by this adapter.
  */
 export interface GateIoFuturesMarketOrderResult {
+  readonly terminal?: boolean;
   readonly status: 'REJECTED' | 'ACCEPTED' | 'OPEN' | 'PARTIALLY_FILLED' | 'FINISHED';
   readonly clientText: string;
   readonly contract: string;
@@ -163,12 +168,34 @@ function attributionValid(
       || !exchangeOrderIdValid(result.exchangeOrderId)
       || typeof result.signedFilledSize !== 'number'
       || !Number.isFinite(result.signedFilledSize)) return false;
-  if ((result.signedFilledSize !== 0 && !gateIoEthContractSizeValid(result.signedFilledSize))
-      || !gateIoEthContractSizeValid(request.size)) return false;
+  if (!gateIoEthContractSizeValid(request.size)) return false;
   if (result.signedFilledSize !== 0
       && Math.sign(result.signedFilledSize) !== Math.sign(request.size)) return false;
-  return contractSizeUnits(Math.abs(result.signedFilledSize))
-    <= contractSizeUnits(Math.abs(request.size));
+  return Math.abs(result.signedFilledSize) <= Math.abs(request.size);
+}
+
+/** Convert the existing client's attributed cumulative order facts to the common OMS contract. */
+export function gateIoOrderExecutionObservation(orderId: string, p: ExecutionPreparation,
+  result: GateIoFuturesMarketOrderResult): OrderExecutionObservation {
+  const cumulative = multiplyQuantity(Math.abs(result.signedFilledSize), p.quantityMultiplier);
+  const at = gateIoExecutionSecondsToMilliseconds(result.executedAt);
+  if (typeof result.exchangeOrderId !== 'string' || !EXACT_INT64_STRING.test(result.exchangeOrderId)
+      || (result.tradeId !== null && (typeof result.tradeId !== 'string' || !EXACT_INT64_STRING.test(result.tradeId)))
+      || at === null || cumulative > p.requestedQuantity
+      || (cumulative > 0 && (result.averagePrice === null || result.averagePrice <= 0)))
+    throw new Error('GATEIO_CUMULATIVE_EXECUTION_UNPROVABLE');
+  const remaining = cumulative === p.requestedQuantity ? 0 : subtractQuantity(p.requestedQuantity, cumulative);
+  const status = result.status === 'FINISHED' ? 'FILLED'
+    : result.status === 'REJECTED' ? 'REJECTED'
+    : result.terminal === true ? 'CANCELLED'
+    : cumulative > 0 ? 'PARTIALLY_FILLED' : 'SUBMITTED';
+  const observation: OrderExecutionObservation = Object.freeze({ orderId,
+    exchangeOrderId: result.exchangeOrderId, requestedQuantity: p.requestedQuantity,
+    ...(result.tradeId ? { aggregateFillId: result.tradeId } : {}),
+    cumulativeFilledQuantity: cumulative, remainingQuantity: remaining,
+    cumulativeNotional: cumulative * (result.averagePrice ?? 0), executedAt: at, status });
+  validateExecutionObservation(observation);
+  return observation;
 }
 
 /**
@@ -178,7 +205,7 @@ function attributionValid(
 export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
   constructor(private readonly client: GateIoFuturesExecutionClient) {}
 
-  async submit(order: OmsOrder): Promise<ExecutionResult> {
+  async submit(order: OmsOrder, prepared?: (value: ExecutionPreparation) => void): Promise<ExecutionResult> {
     if (order.exchange !== 'gateio') return rejected('EXCHANGE_MISMATCH');
     if (order.symbol !== GATEIO_G1_CANONICAL_SYMBOL) {
       return rejected('MISSING_INSTRUMENT_FACTS');
@@ -228,6 +255,11 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
         || order.action === 'emergency_exit',
       text,
     });
+    const preparation = Object.freeze({ requestedQuantity: multiplyQuantity(contracts, facts.contractMultiplier),
+      venueQuantity: contracts, quantityMultiplier: facts.contractMultiplier,
+      clientOrderId: text, reduceOnly: request.reduceOnly });
+    // Journal failure or an exposure conflict stops BEFORE the client can send a POST.
+    prepared?.(preparation);
 
     let result: GateIoFuturesMarketOrderResult;
     try {
@@ -266,19 +298,20 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
       if (result.signedFilledSize !== 0) return unknown('MALFORMED_EXCHANGE_RESULT');
       return rejected(result.rejectionReason || 'EXCHANGE_REJECTED');
     }
+    if (result.status === 'PARTIALLY_FILLED' || (result.status === 'OPEN' && result.signedFilledSize !== 0)) {
+      try { return { status: 'execution', observation: gateIoOrderExecutionObservation(order.orderId, preparation, result) }; }
+      catch { return unknown('MALFORMED_EXCHANGE_RESULT'); }
+    }
     if (result.status === 'ACCEPTED' || result.status === 'OPEN') {
       return result.signedFilledSize === 0
         ? { status: 'accepted' }
-        : unknown('PARTIAL_FILL_FULL_LIFECYCLE_REQUIRED');
-    }
-    if (result.status === 'PARTIALLY_FILLED') {
-      return unknown('PARTIAL_FILL_FULL_LIFECYCLE_REQUIRED');
+        : unknown('MALFORMED_EXCHANGE_RESULT');
     }
     if (result.status !== 'FINISHED') return unknown('MALFORMED_EXCHANGE_RESULT');
 
     if (contractSizeUnits(Math.abs(result.signedFilledSize))
         < contractSizeUnits(Math.abs(request.size))) {
-      return unknown('PARTIAL_FILL_FULL_LIFECYCLE_REQUIRED');
+      return unknown('GATEIO_FINISHED_QUANTITY_CONFLICT');
     }
     if (!sameContractSize(Math.abs(result.signedFilledSize), Math.abs(request.size))
         || typeof result.averagePrice !== 'number'
@@ -288,7 +321,7 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
     }
     const executedAt = gateIoExecutionSecondsToMilliseconds(result.executedAt);
     if (executedAt === null) return unknown('MALFORMED_EXCHANGE_RESULT');
-    const quantity = Math.abs(result.signedFilledSize) * facts.contractMultiplier;
+    const quantity = multiplyQuantity(Math.abs(result.signedFilledSize), facts.contractMultiplier);
     if (!Number.isFinite(quantity) || quantity <= 0) {
       return unknown('MALFORMED_EXCHANGE_RESULT');
     }
@@ -304,6 +337,7 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
       price: result.averagePrice,
       executedAt,
     });
-    return { status: 'filled', fill };
+    return { status: 'filled', fill,
+      ...(prepared ? { observation: gateIoOrderExecutionObservation(order.orderId, preparation, result) } : {}) };
   }
 }

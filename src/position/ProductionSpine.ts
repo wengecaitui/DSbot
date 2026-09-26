@@ -8,7 +8,7 @@
 //   execution.fill.confirmed → KernelPositionStateStore → PositionManagerRuntime
 
 import { createTradingKernel, type TradingKernel } from '../kernel/TradingKernel';
-import { createKernelPositionStateStore, type KernelPositionStateStore } from '../kernel/KernelPositionStateStore';
+import { createKernelPositionStateStore, applyFillToState, type KernelPositionStateStore } from '../kernel/KernelPositionStateStore';
 import { createKernelMarketStateStore, type KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
 import { createKernelPolicyStore, type KernelPolicyStore } from '../kernel/KernelPolicyStore';
 import { OmsCore } from '../oms/OmsCore';
@@ -184,7 +184,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     truthPort = config.execution.truthPort;
     reconciliationIdentity = { accountId: config.accountId, exchange };
   }
-  const oms = new OmsCore(kernel, adapter);
+  const oms = new OmsCore(kernel, adapter, undefined,
+    (venue, symbol) => positionStore.resolve(venue, symbol));
 
   // ── Position state store ──
   const positionStore = createKernelPositionStateStore();
@@ -214,7 +215,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       executionInFlight = true;
       reconciliationVerified = false;
       try {
-        // The same OMS applies the fill exactly once. Attestation only compares it.
+        // The same OMS applies each factual delta once; later attestation never replays that delta.
         return await oms.submitRequest(intent, action, approvedUsd);
       } finally {
         try { await runCurrentReconciliation(); }
@@ -223,6 +224,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       }
     },
     getStore: () => oms.getStore(),
+    previewExecutionObservation: oms.previewExecutionObservation.bind(oms),
+    applyExecutionObservation: oms.applyExecutionObservation.bind(oms),
   } as typeof oms;
 
   // ── Position protection with REAL OMS ──
@@ -304,7 +307,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
         planStore,
         reconciliationIdentity,
       );
-      const local = gateExecution ? Object.freeze({ ...projected,
+      let local = gateExecution ? Object.freeze({ ...projected,
         fills: Object.freeze(kernel.journal().readFromLogicalSequence(1)
           .filter((event) => event.type === 'execution.fill.confirmed')
           .map((event) => {
@@ -314,6 +317,37 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
           })),
       }) : projected;
       const external: ExecutionTruthSnapshot = await truthPort.acquireTruth();
+      if (gateExecution && external.complete && external.executions?.length) {
+        // Preview with the same OMS transition and position arithmetic. The existing pure
+        // reconciliation engine must accept the proposed financial facts BEFORE any delta event.
+        const plans = external.executions.map(execution => ({ execution,
+          plan: oms.previewExecutionObservation(execution) }));
+        const positions = local.positions.map(p => ({ ...p }));
+        for (const { plan } of plans) if (plan.fill) {
+          const f = plan.fill;
+          const p = positions.find(p => p.exchange === f.exchange && p.symbol === f.symbol);
+          if (!p || p.status === 'missing') throw new Error('RECOVERY_POSITION_BASELINE_MISSING');
+          const next = applyFillToState({ side: p.side, signedQty: p.signedQuantity,
+            avgPrice: p.averageEntryPrice }, f);
+          Object.assign(p, { side: next.side, signedQuantity: next.signedQty,
+            averageEntryPrice: next.avgPrice, status: next.side === 'flat' ? 'flat' : 'open' });
+        }
+        const candidate = { ...local, positions,
+          orders: local.orders.map(order => {
+            const found = plans.find(p => p.execution.orderId === order.orderId);
+            return found ? { ...order, execution: found.execution, status: found.execution.status } : order;
+          }),
+          fills: [...(local.fills ?? []), ...plans.flatMap(p => p.plan.fill ? [p.plan.fill] : [])] };
+        const preview = reconcile(candidate, external);
+        if (preview.issues.some(issue => issue.outcome !== 'MISSING_PROTECTION')) {
+          lastReconciliationReport = preview;
+          return preview;
+        }
+        for (const { execution } of plans) oms.applyExecutionObservation(execution);
+        await Promise.resolve(); // Existing protection subscribers may project the new factual position.
+        local = { ...buildLocalReconciliationSnapshot(oms.getStore(), positionStore, planStore, reconciliationIdentity),
+          fills: candidate.fills };
+      }
       const report = reconcile(local, external);
       lastReconciliationReport = report;
       reconciliationVerified = report.reconciliationVerified;
@@ -341,6 +375,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       if (!recoveryVerified || !reconciliationVerified || executionInFlight || reconciliationInFlight)
         return 'RECONCILIATION_NOT_VERIFIED';
       if (!gateMarketFresh()) return 'MARKET_STALE';
+      if (oms.getStore().list().some(o => o.preparation &&
+          !['FILLED', 'CANCELLED', 'REJECTED'].includes(o.status))) return 'ORDER_EXECUTION_UNRESOLVED';
       try {
         if (!(await runCurrentReconciliation()).reconciliationVerified) return 'RECONCILIATION_NOT_VERIFIED';
       } catch { return 'RECONCILIATION_NOT_VERIFIED'; }
@@ -451,6 +487,8 @@ function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
   m.set('order.submitted', [spine.oms.getStore()]);
   m.set('order.rejected', [spine.oms.getStore()]);
   m.set('order.submission.unknown', [spine.oms.getStore()]);
+  m.set('order.execution.prepared', [spine.oms.getStore()]);
+  m.set('order.execution.observed', [spine.oms.getStore()]);
   m.set('position.plan.created', [spine.planStore]);
   m.set('position.plan.updated', [spine.planStore]);
   m.set('position.plan.archived', [spine.planStore]);

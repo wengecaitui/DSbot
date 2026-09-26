@@ -476,7 +476,7 @@ describe('Gate.io G2 real OMS-to-wire integration and static boundary', () => {
     assert.equal(fake.captured.length, 0);
     const events = kernel.journal().readFromLogicalSequence(1);
     assert.deepEqual(events.map(entry => entry.type),
-      ['order.created', 'order.submitted', 'order.rejected']);
+      ['order.created', 'order.submitted', 'order.execution.prepared', 'order.rejected']);
     assert.equal(JSON.stringify(events).includes('MUTATION_CAP_EXCEEDED'), true);
     assert.deepEqual(budget.snapshot(), { proof: 2, cleanup: 0, total: 2 });
   });
@@ -493,7 +493,7 @@ describe('Gate.io G2 real OMS-to-wire integration and static boundary', () => {
       const kernel = createTradingKernel({ exchange: 'gateio' });
       const oms = new OmsCore(kernel, new GateIoFuturesExecutionAdapter(
         client({ fetchImpl: fake.fetchImpl }),
-      ));
+      ), undefined, () => ({ status: 'open', signedQuantity: 0.005 }));
       const result = await oms.submitRequest({
         intentId: 'gateio-g2-' + scenario.action,
         exchange: 'gateio',
@@ -513,7 +513,7 @@ describe('Gate.io G2 real OMS-to-wire integration and static boundary', () => {
       assert.equal(body.reduce_only, scenario.reduceOnly);
       assert.deepEqual(
         kernel.journal().readFromLogicalSequence(1).map(entry => entry.type),
-        ['order.created', 'order.submitted', 'execution.fill.confirmed'],
+        ['order.created', 'order.submitted', 'order.execution.prepared', 'execution.fill.confirmed'],
       );
     }
   });
