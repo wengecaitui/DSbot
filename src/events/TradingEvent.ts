@@ -13,13 +13,24 @@ import type { ConfirmedPositionBaseline } from '../types/position-state';
 import type { OrderCreatedPayload, OrderStatusPayload } from '../oms/oms-events';
 import type { PositionPlan } from '../position/position-plan-types';
 
+export interface ExternalFlatBaselineEvidence {
+  readonly exchange: 'gateio';
+  readonly accountId: string;
+  readonly symbol: 'ETH/USDT';
+  readonly capturedAt: number;
+  readonly source: string;
+  readonly digest: string;
+  readonly positionMode: 'single' | 'dual';
+  readonly baseline: 'flat';
+}
+
 export interface TradingEventPayloadMap {
   'market.ticker.updated':       { ticker: WsTicker; receivedAt: number };
   'market.kline.closed':         { kline: WsKline; receivedAt: number };
   'research.bias.updated':       { report: MarketBiasReportFull; receivedAt: number };
   'policy.snapshot.published':   { policy: CompiledPolicy };
   'execution.fill.confirmed':    { fill: ConfirmedFill };
-  'position.baseline.confirmed': { baseline: ConfirmedPositionBaseline };
+  'position.baseline.confirmed': { baseline: ConfirmedPositionBaseline; evidence?: ExternalFlatBaselineEvidence };
   'order.created':               OrderCreatedPayload;
   'order.submitted':             OrderStatusPayload;
   'order.rejected':              OrderStatusPayload;

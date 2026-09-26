@@ -21,11 +21,15 @@ import {
   createGateIoReadClock,
   gateIoFreshnessFromObservation,
   observeGateIoServerTime,
+  signedGateIoTimestamp,
   type GateIoReadClock,
   type GateIoReadFreshness,
   type GateIoServerTimeObservation,
 } from './GateIoReadClock';
-import { hasProductionGateIoReadTransportProvenance } from './GateIoReadTransport';
+import { gateIoReadTransportBudget, hasProductionGateIoReadTransportProvenance } from './GateIoReadTransport';
+import { GateIoG3BudgetDenial, type GateIoG3RunBudget } from './GateIoG3RunBudget';
+import { gateIoExactDecimalSource } from './GateIoExactInt64Recovery';
+import { gateIoExactSecondsToMilliseconds } from './GateIoExactTradeTime';
 
 export const MAX_GATEIO_ACCOUNT_TRUTH_GETS = 5 as const;
 export const MAX_GATEIO_INSTRUMENT_FACTS_GETS = 3 as const;
@@ -55,14 +59,23 @@ export interface GateIoCanonicalAccount {
   readonly orderMargin: number | null;
   readonly inDualMode: boolean | null;
   readonly positionMode: string | null;
-  readonly marginMode: string | null;
+  readonly marginMode: GateIoAccountMarginMode | null;
 }
+
+/**
+ * Gate reports the account margin mode as a numeric code, not as text:
+ * 0 classic | 1 multi-currency | 2 portfolio | 3 single-currency. The code is kept as a number — it is
+ * never rendered as a string — and any other value or type fails closed rather than being coerced.
+ */
+export type GateIoAccountMarginMode = 0 | 1 | 2 | 3;
 
 export type GateIoPositionMode = 'single' | 'dual_long' | 'dual_short';
 
 export interface GateIoCanonicalPosition {
   readonly contract: typeof GATEIO_L0_INITIAL_CONTRACT;
   readonly signedSize: number;
+  /** Factual Gate quote-value exposure witness; F-09 proved size alone can be zero after decimal fills. */
+  readonly quoteValue: number;
   readonly mode: GateIoPositionMode;
   readonly marginMode: string | null;
   readonly leverage: number | null;
@@ -103,9 +116,14 @@ export interface GateIoCanonicalTrade {
   readonly fee: number;
   readonly pointFee: number;
   readonly role: 'maker' | 'taker';
-  readonly tradeValue: number;
-  /** Gate epoch seconds; fractional seconds are preserved exactly as reported. */
+  /** Optional exchange metadata. Null means omitted; supplied decimal text remains exact. */
+  readonly tradeValue: string | number | null;
+  /** Legacy numeric Gate epoch seconds; not an exact lexical representation. */
   readonly createdAt: number;
+  /** Exact source token when available; null for directly injected numeric values without raw JSON. */
+  readonly createdAtSecondsExact: string | null;
+  /** Exact decimal floor projection into canonical safe-integer milliseconds. */
+  readonly createdAtMs: number;
 }
 
 export interface GateIoCanonicalAccountTruth {
@@ -139,6 +157,12 @@ export interface GateIoCanonicalInstrumentFacts {
   readonly markPrice: number;
   readonly indexPrice: number;
   readonly lastPrice: number;
+  /** Optional factual ticker fields; a G3 market projection must reject missing values. */
+  readonly bestBid?: number | null;
+  readonly bestAsk?: number | null;
+  readonly volume24h?: number | null;
+  readonly high24h?: number | null;
+  readonly low24h?: number | null;
   readonly makerFeeRate: number;
   readonly takerFeeRate: number;
   readonly fundingRate: number;
@@ -168,6 +192,8 @@ export interface GateIoAuthenticatedReadStatus {
 export interface GateIoAuthenticatedReadFoundation {
   accountTruth(): Promise<GateIoFoundationReadResult<GateIoCanonicalAccountTruth>>;
   instrumentFacts(): Promise<GateIoFoundationReadResult<GateIoCanonicalInstrumentFacts>>;
+  /** Uses only the latest bounded public server-time observation; no new I/O. */
+  signedTimestamp(): string;
   status(): GateIoAuthenticatedReadStatus;
 }
 
@@ -176,6 +202,7 @@ export interface GateIoAuthenticatedReadFoundationOptions {
   readonly identity: GateIoReadIdentity;
   readonly now: () => number;
   readonly credential: GateIoReadCredential | null;
+  readonly runBudget?: GateIoG3RunBudget;
 }
 
 class GateIoMalformedPayload extends Error {
@@ -226,6 +253,13 @@ function optionalDecimal(value: unknown): number | null {
   return decimal(value);
 }
 
+function optionalTradeValue(raw: Record<string, unknown>): string | number | null {
+  if (!Object.prototype.hasOwnProperty.call(raw, 'trade_value')) return null;
+  // A present null, blank, object or non-finite value is malformed, not "unavailable".
+  decimal(raw.trade_value);
+  return raw.trade_value as string | number;
+}
+
 /**
  * Strict Gate epoch-time parser. Gate reports create/update times as doubles, so fractional seconds
  * are legitimate facts and are preserved exactly — never rounded, floored or truncated. Only a finite
@@ -250,9 +284,26 @@ function identifier(value: unknown): string {
   malformed('ACCOUNT_TRUTH_MALFORMED');
 }
 
+const MAX_GATEIO_TRADE_INT64 = '9223372036854775807';
+function tradeIdentifier(value: unknown): string {
+  const id = identifier(value);
+  if (!/^[1-9][0-9]*$/.test(id) || id.length > MAX_GATEIO_TRADE_INT64.length
+      || (id.length === MAX_GATEIO_TRADE_INT64.length && id > MAX_GATEIO_TRADE_INT64)) {
+    malformed('TRADES_MALFORMED');
+  }
+  return id;
+}
+
 function optionalText(value: unknown): string | null {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value === 'string' && value.length > 0) return value;
+  malformed('ACCOUNT_TRUTH_MALFORMED');
+}
+
+/** Gate reports the account margin mode as a numeric code; anything else fails closed instead of coercing. */
+function accountMarginMode(value: unknown): GateIoAccountMarginMode | null {
+  if (value === undefined || value === null) return null;
+  if (value === 0 || value === 1 || value === 2 || value === 3) return value;
   malformed('ACCOUNT_TRUTH_MALFORMED');
 }
 
@@ -295,7 +346,7 @@ export function normalizeGateIoAccount(raw: unknown): GateIoCanonicalAccount {
       orderMargin: optionalDecimal(raw.order_margin),
       inDualMode: optionalBoolean(raw.in_dual_mode),
       positionMode: optionalText(raw.position_mode),
-      marginMode: optionalText(raw.margin_mode),
+      marginMode: accountMarginMode(raw.margin_mode),
     });
   });
 }
@@ -304,19 +355,21 @@ export function normalizeGateIoPosition(raw: unknown): GateIoCanonicalPosition {
   return tagged('POSITION_TRUTH_MALFORMED', () => {
     if (!isRecord(raw)) malformed('POSITION_TRUTH_MALFORMED');
     const signedSize = decimal(raw.size);
+    const quoteValue = decimal(raw.value);
     const mode = positionMode(raw.mode ?? raw.hedge_status);
     if ((mode === 'dual_long' && signedSize < 0) || (mode === 'dual_short' && signedSize > 0)) {
       malformed('POSITION_TRUTH_MALFORMED');
     }
     const entryPrice = optionalDecimal(raw.entry_price);
     const markPrice = optionalDecimal(raw.mark_price);
-    if (signedSize !== 0 && (entryPrice === null || entryPrice <= 0
+    if ((signedSize !== 0 || quoteValue !== 0) && (entryPrice === null || entryPrice <= 0
       || markPrice === null || markPrice <= 0)) {
       malformed('POSITION_TRUTH_MALFORMED');
     }
     return Object.freeze({
       contract: contract(raw.contract),
       signedSize,
+      quoteValue,
       mode,
       marginMode: optionalText(raw.pos_margin_mode),
       leverage: optionalDecimal(raw.leverage ?? raw.lever),
@@ -357,9 +410,16 @@ export function normalizeGateIoTrade(raw: unknown): GateIoCanonicalTrade {
   return tagged('TRADES_MALFORMED', () => {
     if (!isRecord(raw)) malformed('TRADES_MALFORMED');
     if (raw.role !== 'maker' && raw.role !== 'taker') malformed('TRADES_MALFORMED');
+    const createdAt = timestamp(raw.create_time);
+    const createdAtSecondsExact = gateIoExactDecimalSource(raw, 'create_time')
+      ?? (typeof raw.create_time === 'string' ? raw.create_time : null);
+    // Directly injected numeric fixtures have no raw token. Their finite numeric value remains
+    // supported for L1A compatibility, but is not mislabeled as the exchange's exact source.
+    const createdAtMs = gateIoExactSecondsToMilliseconds(createdAtSecondsExact ?? String(createdAt));
+    if (createdAtMs === null) malformed('TRADES_MALFORMED');
     return Object.freeze({
-      tradeId: identifier(raw.id),
-      orderId: identifier(raw.order_id),
+      tradeId: tradeIdentifier(raw.id),
+      orderId: tradeIdentifier(raw.order_id),
       contract: contract(raw.contract),
       signedSize: decimal(raw.size),
       // Gate reports close_size as a signed factual value: 0, positive and negative are all legal.
@@ -370,8 +430,10 @@ export function normalizeGateIoTrade(raw: unknown): GateIoCanonicalTrade {
       fee: decimal(raw.fee),
       pointFee: decimal(raw.point_fee),
       role: raw.role,
-      tradeValue: decimal(raw.trade_value),
-      createdAt: timestamp(raw.create_time),
+      tradeValue: optionalTradeValue(raw),
+      createdAt,
+      createdAtSecondsExact,
+      createdAtMs,
     });
   });
 }
@@ -427,6 +489,11 @@ interface GateIoTickerFacts {
   readonly indexPrice: number;
   readonly lastPrice: number;
   readonly fundingRate: number;
+  readonly bestBid: number | null;
+  readonly bestAsk: number | null;
+  readonly volume24h: number | null;
+  readonly high24h: number | null;
+  readonly low24h: number | null;
 }
 
 export function normalizeGateIoTicker(raw: unknown): GateIoTickerFacts {
@@ -440,6 +507,11 @@ export function normalizeGateIoTicker(raw: unknown): GateIoTickerFacts {
       indexPrice: decimal(entry.index_price, { positive: true }),
       lastPrice: decimal(entry.last, { positive: true }),
       fundingRate: decimal(entry.funding_rate),
+      bestBid: optionalDecimal(entry.highest_bid),
+      bestAsk: optionalDecimal(entry.lowest_ask),
+      volume24h: optionalDecimal(entry.volume_24h),
+      high24h: optionalDecimal(entry.high_24h),
+      low24h: optionalDecimal(entry.low_24h),
     });
   });
 }
@@ -459,6 +531,7 @@ function available<T>(value: T): GateIoFoundationReadResult<T> {
 }
 
 function failed<T>(error: unknown, fallback: GateIoReadFailureReason): GateIoFoundationReadResult<T> {
+  if (error instanceof GateIoG3BudgetDenial) return result<T>('UNKNOWN', null, error.reasonCode);
   if (error instanceof GateIoReadClientError) {
     const availability = error.reason === 'GATEIO_READ_CREDENTIALS_UNAVAILABLE'
       || error.reason === 'GATEIO_AUTH_READ_NOT_CONFIGURED' ? 'UNAVAILABLE' : 'UNKNOWN';
@@ -521,6 +594,9 @@ export function evaluateGateIoEntryReadiness(input: {
 export function createGateIoAuthenticatedReadFoundation(
   options: GateIoAuthenticatedReadFoundationOptions,
 ): GateIoAuthenticatedReadFoundation {
+  const transportBudget = gateIoReadTransportBudget(options.transport);
+  if (transportBudget !== null && options.runBudget !== transportBudget)
+    throw new GateIoReadClientError('GATEIO_AUTH_READ_NOT_CONFIGURED');
   const identity = validateIdentity(options.identity);
   const clock: GateIoReadClock = createGateIoReadClock(options.now);
   const credential = options.credential ?? null;
@@ -564,6 +640,8 @@ export function createGateIoAuthenticatedReadFoundation(
         'UNAVAILABLE', null, 'GATEIO_READ_CREDENTIALS_UNAVAILABLE',
       ));
     }
+    try { options.runBudget?.beginAccountTruth(); }
+    catch (error) { return remember(failed(error, 'ACCOUNT_TRUTH_UNKNOWN')); }
     const time = await synchronizeTime();
     if (time.value === null) return remember(result<GateIoCanonicalAccountTruth>(
       time.availability, null, time.reason ?? 'GATEIO_SERVER_TIME_INVALID', time.failureProvenance,
@@ -573,6 +651,16 @@ export function createGateIoAuthenticatedReadFoundation(
       const positions = array(
         await client.getPositions(), 'POSITION_TRUTH_MALFORMED',
       ).map(normalizeGateIoPosition);
+      // The L1A canonical scope accepts only ETH_USDT, so prove both factual legs.
+      const modes = positions.map((entry) => entry.mode);
+      if (account.inDualMode === null
+          || (account.inDualMode && (modes.length !== 2
+            || modes.filter((mode) => mode === 'dual_long').length !== 1
+            || modes.filter((mode) => mode === 'dual_short').length !== 1))
+          || (!account.inDualMode && modes.some((mode) => mode !== 'single'))
+          || (!account.inDualMode && modes.length > 1)) {
+        malformed('POSITION_TRUTH_MALFORMED');
+      }
       const openOrders = array(
         await client.getOpenOrders(), 'OPEN_ORDERS_MALFORMED',
       ).map(normalizeGateIoOpenOrder);
@@ -592,7 +680,8 @@ export function createGateIoAuthenticatedReadFoundation(
         freshness: gateIoFreshnessFromObservation(observedAtMs, time.value),
         source: GATEIO_L1A_SOURCE,
         schemaVersion: GATEIO_L1A_SCHEMA_VERSION,
-        accountState: positions.some((entry) => Math.abs(entry.signedSize) > 0) ? 'OPEN' : 'FLAT',
+        accountState: positions.some((entry) => Math.abs(entry.signedSize) > 0
+          || Math.abs(entry.quoteValue) > 0) ? 'OPEN' : 'FLAT',
         accountStateBasis: 'FACTUAL_POSITIONS_RESPONSE' as const,
       });
       return remember(available(value));
@@ -602,6 +691,8 @@ export function createGateIoAuthenticatedReadFoundation(
   }
 
   async function instrumentFacts(): Promise<GateIoFoundationReadResult<GateIoCanonicalInstrumentFacts>> {
+    try { options.runBudget?.beginInstrumentFacts(); }
+    catch (error) { return remember(failed(error, 'INSTRUMENT_FACTS_UNKNOWN')); }
     const time = await synchronizeTime();
     if (time.value === null) return remember(result<GateIoCanonicalInstrumentFacts>(
       time.availability, null, time.reason ?? 'GATEIO_SERVER_TIME_INVALID', time.failureProvenance,
@@ -627,6 +718,11 @@ export function createGateIoAuthenticatedReadFoundation(
         markPrice: ticker.markPrice,
         indexPrice: ticker.indexPrice,
         lastPrice: ticker.lastPrice,
+        bestBid: ticker.bestBid,
+        bestAsk: ticker.bestAsk,
+        volume24h: ticker.volume24h,
+        high24h: ticker.high24h,
+        low24h: ticker.low24h,
         makerFeeRate: rule.makerFeeRate,
         takerFeeRate: rule.takerFeeRate,
         fundingRate: ticker.fundingRate,
@@ -645,6 +741,7 @@ export function createGateIoAuthenticatedReadFoundation(
   return Object.freeze({
     accountTruth,
     instrumentFacts,
+    signedTimestamp: () => signedGateIoTimestamp(clock, observation),
     status(): GateIoAuthenticatedReadStatus {
       return Object.freeze({
         configured: credential !== null,

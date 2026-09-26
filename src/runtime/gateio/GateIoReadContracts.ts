@@ -6,6 +6,7 @@
  */
 
 export const GATEIO_L0_LIVE_ORIGIN = 'https://api.gateio.ws' as const;
+export const GATEIO_L0_TESTNET_ORIGIN = 'https://api-testnet.gateapi.io' as const;
 export const GATEIO_API_PREFIX = '/api/v4' as const;
 export const GATEIO_L0_SETTLE = 'usdt' as const;
 export const GATEIO_L0_INITIAL_CONTRACT = 'ETH_USDT' as const;

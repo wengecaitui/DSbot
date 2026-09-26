@@ -28,7 +28,7 @@ export function bridgeMarketToKernel(
           low24h: ticker.low24h,
           ts: ticker.ts,
         },
-        receivedAt: Date.now(),
+        receivedAt: event.receivedAt,
       });
     } catch (_) {
       // Fail-closed

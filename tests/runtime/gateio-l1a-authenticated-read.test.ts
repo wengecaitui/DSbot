@@ -54,10 +54,11 @@ const identity: GateIoReadIdentity = Object.freeze({
 
 const accountFixture = Object.freeze({
   currency: 'USDT', total: '1000.5', available: '900.25', unrealised_pnl: '4.5',
-  order_margin: '10', in_dual_mode: false, position_mode: 'single', margin_mode: 'cross',
+  order_margin: '10', in_dual_mode: false, position_mode: 'single', margin_mode: 0,
 });
 const positionFixture = Object.freeze({
-  contract: GATEIO_L0_INITIAL_CONTRACT, size: '2', mode: 'single', pos_margin_mode: 'cross',
+  contract: GATEIO_L0_INITIAL_CONTRACT, size: '2', value: '4020', mode: 'single',
+  pos_margin_mode: 'cross',
   leverage: '10', entry_price: '2000', mark_price: '2010', liq_price: '1600',
   unrealised_pnl: '20', realised_pnl: '1', margin: '400', update_time: '1800000000',
 });
@@ -267,7 +268,7 @@ describe('Gate.io L1A strict canonical normalization', () => {
   it('normalizes classic and unified-account-compatible facts without inventing zeroes', () => {
     assert.deepEqual(normalizeGateIoAccount(accountFixture), {
       currency: 'USDT', total: 1000.5, available: 900.25, unrealizedPnl: 4.5,
-      orderMargin: 10, inDualMode: false, positionMode: 'single', marginMode: 'cross',
+      orderMargin: 10, inDualMode: false, positionMode: 'single', marginMode: 0,
     });
     assert.deepEqual(normalizeGateIoAccount({
       currency: 'usdt', total: '8', available: '7', in_dual_mode: true, position_mode: 'dual',
@@ -283,6 +284,22 @@ describe('Gate.io L1A strict canonical normalization', () => {
     }));
   });
 
+  it('accepts only the reported numeric account margin modes and fails closed on anything else', () => {
+    const withMarginMode = (margin_mode: unknown) => ({ ...accountFixture, margin_mode });
+    for (const margin_mode of [0, 1, 2, 3]) {
+      assert.equal(normalizeGateIoAccount(withMarginMode(margin_mode)).marginMode, margin_mode);
+    }
+    for (const absent of [null, undefined]) {
+      assert.equal(normalizeGateIoAccount(withMarginMode(absent)).marginMode, null);
+    }
+    const withoutField: Record<string, unknown> = { ...accountFixture };
+    delete withoutField.margin_mode;
+    assert.equal(normalizeGateIoAccount(withoutField).marginMode, null);
+    for (const rejected of [-1, 4, '0', '', Number.NaN, 'cross', 1.5, true]) {
+      assert.throws(() => normalizeGateIoAccount(withMarginMode(rejected)));
+    }
+  });
+
   it('preserves signed single/dual positions and validates nonzero prices', () => {
     assert.equal(normalizeGateIoPosition(positionFixture).signedSize, 2);
     assert.equal(normalizeGateIoPosition({ ...positionFixture, size: '-2' }).signedSize, -2);
@@ -291,7 +308,7 @@ describe('Gate.io L1A strict canonical normalization', () => {
       ...positionFixture, size: '-2', mode: 'dual_short', hedge_status: 'ignored',
     }).mode, 'dual_short');
     const zero = normalizeGateIoPosition({
-      ...positionFixture, size: '0', entry_price: null, mark_price: null,
+      ...positionFixture, size: '0', value: '0', entry_price: null, mark_price: null,
     });
     assert.equal(zero.signedSize, 0);
     assert.throws(() => normalizeGateIoPosition({ ...positionFixture, mode: 'unknown' }));
@@ -341,7 +358,8 @@ describe('Gate.io L1A strict canonical normalization', () => {
     assert.equal(signed.signedSize, -2, 'signedSize stays exchange-native');
     assert.equal(Object.isFrozen(signed), true);
     assert.deepEqual(Object.keys(signed).sort(), [
-      'clientText', 'closeSize', 'contract', 'createdAt', 'fee', 'orderId', 'pointFee', 'price',
+      'clientText', 'closeSize', 'contract', 'createdAt', 'createdAtMs',
+      'createdAtSecondsExact', 'fee', 'orderId', 'pointFee', 'price',
       'role', 'signedSize', 'tradeId', 'tradeValue',
     ], 'no open/close direction may be invented');
     for (const bad of ['', ' ', null, undefined, Number.NaN, Number.POSITIVE_INFINITY, 'abc']) {
@@ -448,7 +466,9 @@ describe('Gate.io L1A foundation truth and readiness', () => {
   it('derives FLAT only from a factual valid all-zero positions response', async () => {
     const flat = foundation({ respond(request) {
       if (request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS) {
-        return [{ ...positionFixture, size: '0', entry_price: null, mark_price: null }];
+        return [{
+          ...positionFixture, size: '0', value: '0', entry_price: null, mark_price: null,
+        }];
       }
       return fixtureFor(request.endpoint);
     } });
@@ -466,6 +486,67 @@ describe('Gate.io L1A foundation truth and readiness', () => {
       } });
       const result = await read.value.accountTruth();
       assert.notEqual(result.value?.accountState, 'FLAT');
+      assert.equal(result.value, null);
+    }
+  });
+
+  it('uses Gate value as an exposure witness and never turns an F-09 decimal position into FLAT', async () => {
+    const fractional = foundation({ respond(request) {
+      if (request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS) {
+        return [{ ...positionFixture, size: '0', value: '2' }];
+      }
+      return fixtureFor(request.endpoint);
+    } });
+    const observed = await fractional.value.accountTruth();
+    assert.equal(observed.availability, 'AVAILABLE');
+    assert.equal(observed.value?.positions[0]?.signedSize, 0);
+    assert.equal(observed.value?.positions[0]?.quoteValue, 2);
+    assert.equal(observed.value?.accountState, 'OPEN');
+
+    const missingExposureWitness = foundation({ respond(request) {
+      if (request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS) {
+        const { value: _value, ...withoutValue } = positionFixture;
+        return [{ ...withoutValue, size: '0' }];
+      }
+      return fixtureFor(request.endpoint);
+    } });
+    const unknown = await missingExposureWitness.value.accountTruth();
+    assert.equal(unknown.availability, 'UNKNOWN');
+    assert.equal(unknown.value, null);
+    assert.notEqual(unknown.value?.accountState, 'FLAT');
+  });
+
+  it('requires both dual legs and never nets opposite exposures into FLAT', async () => {
+    const dualAccount = { ...accountFixture, in_dual_mode: true, position_mode: 'dual' };
+    const long = { ...positionFixture, mode: 'dual_long', size: '1', value: '2010' };
+    const short = { ...positionFixture, mode: 'dual_short', size: '-1', value: '-2010' };
+    const zeroLong = {
+      ...long, size: '0', value: '0', entry_price: null, mark_price: null,
+    };
+    const zeroShort = {
+      ...short, size: '0', value: '0', entry_price: null, mark_price: null,
+    };
+    const read = (legs: unknown) => foundation({ respond(request) {
+      if (request.endpoint === GATEIO_READ_ENDPOINTS.ACCOUNTS) return dualAccount;
+      if (request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS) return legs;
+      return fixtureFor(request.endpoint);
+    } }).value.accountTruth();
+
+    const opposed = await read([long, short]);
+    assert.equal(opposed.availability, 'AVAILABLE');
+    assert.equal(opposed.value?.accountState, 'OPEN');
+    assert.equal(opposed.value?.positions.length, 2);
+    assert.equal(opposed.value?.positions.reduce((sum, leg) => sum + leg.signedSize, 0), 0);
+    assert.equal(opposed.value?.positions.reduce((sum, leg) => sum + Math.abs(leg.signedSize), 0), 2);
+
+    const flat = await read([zeroLong, zeroShort]);
+    assert.equal(flat.availability, 'AVAILABLE');
+    assert.equal(flat.value?.accountState, 'FLAT');
+
+    for (const legs of [[zeroLong], [zeroShort], [], [zeroLong, zeroLong],
+      [zeroLong, { ...zeroShort, value: 'bad' }]]) {
+      const result = await read(legs);
+      assert.equal(result.availability, 'UNKNOWN');
       assert.equal(result.value, null);
     }
   });

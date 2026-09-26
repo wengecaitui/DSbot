@@ -137,6 +137,8 @@ export interface LocalPlan {
 }
 
 export interface LocalReconciliationSnapshot {
+  /** Optional exact Kernel fill projection; never reconstructed from notional or net exposure. */
+  readonly fills?: readonly ExternalFill[];
   readonly identity: ReconciliationIdentity;
   readonly orders: readonly LocalOrder[];
   readonly positions: readonly LocalPosition[];

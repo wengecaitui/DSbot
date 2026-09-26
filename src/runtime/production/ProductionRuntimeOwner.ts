@@ -17,6 +17,7 @@ import type { RecoveryResult } from '../../recovery/RecoveryManager';
 import type { ReconciliationReport } from '../../reconciliation/reconciliation-types';
 import type { ExecutionTruthPort } from '../../reconciliation/reconciliation-types';
 import type { ExecutionAdapter } from '../../oms/oms-types';
+import { createGateIoProductionBinding, type GateIoProductionDependencies } from '../gateio/GateIoProductionBinding';
 import {
   createBinanceAuthenticatedReadFoundation,
   type BinanceAuthenticatedReadFoundation,
@@ -57,6 +58,8 @@ export interface ProductionRuntimeMarketEntry {
 }
 
 export interface ProductionRuntimeConfig {
+  /** Gate requires an explicit environment; it is never inferred from credentials or URLs. */
+  readonly environment?: 'testnet' | 'live';
   readonly enabled: boolean;
   readonly mode?: 'paper' | 'limited-live';
   readonly exchange?: ExchangeId;
@@ -124,6 +127,8 @@ export interface ApplicationProductionRuntimeOwner {
 type RecoveryEvidence = RecoveryResult & { readonly errors?: readonly unknown[] };
 
 export interface ProductionRuntimeOwnerDependencies {
+  /** Explicit capabilities only. Absent by default; no secret discovery or ambient fetch. */
+  readonly gateIo?: GateIoProductionDependencies;
   createJournal(path: string): FileEventJournal;
   createPaperPersistence(config: PaperAccountConfig, baseDir: string): PaperBrokerPersistence;
   createMarketRuntime(
@@ -151,6 +156,7 @@ export interface ProductionRuntimeOwnerDependencies {
 }
 
 interface ValidatedProductionRuntimeConfig {
+  readonly environment?: 'testnet' | 'live';
   readonly mode: 'paper' | 'limited-live';
   readonly identity: ProductionRuntimeIdentity;
   readonly journalPath: string;
@@ -295,8 +301,12 @@ function validateConfig(config: ProductionRuntimeConfig): ValidatedProductionRun
   if (config.mode !== 'paper' && config.mode !== 'limited-live') {
     throw new Error('mode must be explicitly paper or limited-live');
   }
-  if (!isExchangeId(config.exchange)) throw new Error('exchange must be explicitly bitget or binance');
-  if (config.mode === 'limited-live' && config.exchange !== 'binance') {
+  if (!isExchangeId(config.exchange)) throw new Error('exchange must be explicitly bitget, binance or gateio');
+  if (config.exchange === 'gateio' && (config.mode !== 'limited-live'
+      || (config.environment !== 'testnet' && config.environment !== 'live'))) {
+    throw new Error('GATEIO_EXPLICIT_LIMITED_LIVE_ENVIRONMENT_REQUIRED');
+  }
+  if (config.mode === 'limited-live' && config.exchange !== 'binance' && config.exchange !== 'gateio') {
     throw new Error('LIMITED_LIVE_L0_REQUIRES_BINANCE');
   }
   if (typeof config.accountId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(config.accountId)) {
@@ -320,6 +330,11 @@ function validateConfig(config: ProductionRuntimeConfig): ValidatedProductionRun
   if (!config.hardRisk) throw new Error('hardRisk facts are required');
   createConfiguredCanonicalHardRiskSource(identity, config.hardRisk);
   const marketPlan = validateMarketPlan(config.market);
+  if (config.exchange === 'gateio' && (marketPlan.entries.length !== 1
+      || marketPlan.entries[0]!.symbol !== 'ETH/USDT'
+      || marketPlan.entries[0]!.exchangeSymbol !== 'ETH_USDT')) {
+    throw new Error('GATEIO_ETH_USDT_SCOPE_REQUIRED');
+  }
   const marketStaleAfterMs = config.market?.staleAfterMs;
   if (
     marketStaleAfterMs !== undefined
@@ -328,6 +343,7 @@ function validateConfig(config: ProductionRuntimeConfig): ValidatedProductionRun
     throw new Error('market.staleAfterMs must be finite and positive');
   }
   return {
+    environment: config.environment,
     mode: config.mode,
     identity,
     journalPath,
@@ -356,6 +372,7 @@ function createOwnerMarketRuntime(
   plan: SubscriptionPlan,
   staleAfterMs: number | undefined,
 ): MarketDataRuntime {
+  if (identity.exchange === 'gateio') throw new Error('GATEIO_FACTUAL_MARKET_BINDING_REQUIRED');
   const provider = identity.exchange === 'bitget'
     ? createBitgetMarketDataProvider({})
     : createBinanceMarketDataProvider({});
@@ -464,7 +481,13 @@ export function createApplicationProductionRuntimeOwner(
     },
     identity: () => (validated ? copyIdentity(validated.identity) : null),
     recovery: () => recoveryEvidence,
-    reconciliation: () => reconciliationEvidence,
+    reconciliation: () => {
+      if (!authoritativeSpine) return reconciliationEvidence;
+      const current = authoritativeSpine.lastReconciliationReport;
+      // A later failed/in-flight acquisition must not display the successful boot report.
+      return !authoritativeSpine.reconciliationVerified && current?.reconciliationVerified
+        ? null : current;
+    },
     binanceAuthenticatedReadStatus: binanceAuthenticatedRead.status,
   });
 
@@ -482,8 +505,19 @@ export function createApplicationProductionRuntimeOwner(
         const hardRiskSource = dependencies.createHardRiskSource(validated.identity, validated.hardRisk);
         assertCanonicalHardRiskSource(validated.identity, hardRiskSource);
 
+        let gateBinding: ReturnType<typeof createGateIoProductionBinding> | null = null;
+        if (validated.identity.exchange === 'gateio') {
+          const gate = dependencies.gateIo;
+          if (!gate || gate.environment !== validated.environment
+              || gate.accountId !== validated.identity.accountId) {
+            throw new Error('GATEIO_EXECUTION_DEPENDENCY_MISMATCH');
+          }
+          gateBinding = createGateIoProductionBinding(gate, validated.hardRisk, validated.marketStaleAfterMs);
+        }
         const limitedLiveExecution = validated.mode === 'limited-live'
-          ? dependencies.createLimitedLiveExecution(validated.identity)
+          ? gateBinding
+            ? { adapter: gateBinding.adapter, truthPort: gateBinding.truthPort }
+            : dependencies.createLimitedLiveExecution(validated.identity)
           : null;
         if (validated.mode === 'limited-live' && limitedLiveExecution === null) {
           throw new Error('LIVE_EXECUTION_NOT_ACTIVATED_L0');
@@ -493,13 +527,14 @@ export function createApplicationProductionRuntimeOwner(
         const persistence = validated.mode === 'paper'
           ? dependencies.createPaperPersistence(validated.paperAccount!, validated.paperLedgerDir!)
           : undefined;
-        marketRuntime = dependencies.createMarketRuntime(
+        marketRuntime = gateBinding?.marketRuntime ?? dependencies.createMarketRuntime(
           validated.identity,
           validated.marketPlan,
           validated.marketStaleAfterMs,
         );
-        const readHardRisk = (): AccountBoundHardRiskSnapshot =>
-          assertCanonicalHardRiskSource(validated!.identity, hardRiskSource);
+        const readHardRisk = (): AccountBoundHardRiskSnapshot => gateBinding
+          ? gateBinding.hardRisk()
+          : assertCanonicalHardRiskSource(validated!.identity, hardRiskSource);
 
         authoritativeSpine = await dependencies.createSpine({
           exchange: validated.identity.exchange,
@@ -512,7 +547,11 @@ export function createApplicationProductionRuntimeOwner(
           journal,
           hardRisk: readHardRisk,
           marketRuntime,
+          ...(gateBinding === null ? {} : {
+            clock: gateBinding.clock, marketStaleAfterMs: gateBinding.staleAfterMs,
+          }),
         });
+        gateBinding?.bindSpine(authoritativeSpine);
         spineCreations += 1;
         if (spineCreations !== 1) throw new Error('SECOND_PRODUCTION_SPINE_FORBIDDEN');
         binding.owner.bind(authoritativeSpine);

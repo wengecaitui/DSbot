@@ -17,6 +17,7 @@ import {
   GateIoReadTransportError,
   type GateIoReadTransportErrorCode,
 } from './GateIoReadTransport';
+import { GateIoG3BudgetDenial, type GateIoG3DenialReason } from './GateIoG3RunBudget';
 import {
   GateIoReadClockError,
   signedGateIoTimestamp,
@@ -26,6 +27,7 @@ import {
 } from './GateIoReadClock';
 
 export type GateIoReadFailureReason =
+  | GateIoG3DenialReason
   | GateIoReadTransportErrorCode
   | GateIoReadClockFailureReason
   | 'GATEIO_AUTH_READ_NOT_CONFIGURED'
@@ -101,6 +103,7 @@ function requireCredential(credential: GateIoReadCredential | null): GateIoReadC
 }
 
 function throwTransportFailure(error: unknown, expectedEndpoint: GateIoReadEndpoint): never {
+  if (error instanceof GateIoG3BudgetDenial) throw error;
   if (!(error instanceof GateIoReadTransportError)) {
     throw new GateIoReadClientError('GATEIO_READ_NETWORK_FAILED');
   }
