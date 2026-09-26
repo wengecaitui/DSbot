@@ -4,8 +4,8 @@ import type { OmsOrderSnapshot } from '../oms/oms-types';
 import type { OrderExecutionObservation } from '../oms/oms-types';
 import { gateIoOrderExecutionObservation } from '../exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 import { planExecutionObservation, quantityEqual } from '../oms/execution-observation';
-import { multiplyQuantity } from '../types/decimal-quantity';
-import type { GateIoAuthenticatedReadFoundation, GateIoCanonicalAccountTruth, GateIoCanonicalInstrumentFacts, GateIoCanonicalTrade } from '../runtime/gateio/GateIoAuthenticatedReadFoundation';
+import { multiplyQuantity, subtractQuantity } from '../types/decimal-quantity';
+import type { GateIoAuthenticatedReadFoundation, GateIoCanonicalAccountTruth, GateIoCanonicalInstrumentFacts, GateIoCanonicalTrade, GateIoCanonicalOpenOrder } from '../runtime/gateio/GateIoAuthenticatedReadFoundation';
 import type { GateIoReadTransport } from '../runtime/gateio/GateIoReadContracts';
 import { gateIoReadTransportBudget, gateIoReadTransportEnvironment } from '../runtime/gateio/GateIoReadTransport';
 import { GateIoG3RunBudget } from '../runtime/gateio/GateIoG3RunBudget';
@@ -43,6 +43,42 @@ export interface GateIoExecutionTruthPort extends ExecutionTruthPort {
 
 function tradeFingerprint(trade: GateIoCanonicalTrade): string {
   return JSON.stringify(trade);
+}
+
+/** Compare native contract units BEFORE discarding the earlier open-list projection.
+ * Remaining is an unsigned magnitude in the canonical open-order contract. Only a
+ * factually newer exact observation may reduce it; equal/unknown time is not progress proof.
+ */
+function openOrdersAgreeWithAttestation(
+  openOrders: readonly GateIoCanonicalOpenOrder[], attested: GateIoCurrentRunOrderAttestation,
+): boolean {
+  const { request, result } = attested;
+  const requested = Math.abs(request.size);
+  const filled = Math.abs(result.signedFilledSize);
+  if (!Number.isFinite(filled) || filled > requested) return false;
+  const remaining = subtractQuantity(requested, filled);
+  return openOrders.every(order => {
+    if (order.clientText !== request.text && order.orderId !== result.exchangeOrderId) return true;
+    if (order.orderId !== result.exchangeOrderId || order.clientText !== request.text
+        || order.clientText !== result.clientText || order.contract !== request.contract
+        || order.contract !== result.contract || !quantityEqual(order.signedSize, request.size)
+        || order.reduceOnly !== request.reduceOnly || order.close
+        || order.timeInForce !== request.tif
+        || (order.price !== null && order.price !== Number(request.price))
+        || !Number.isFinite(order.remainingSize) || order.remainingSize < 0
+        || order.remainingSize > requested) return false;
+    const listedAt = order.updatedAt === null ? null : gateIoExecutionSecondsToMilliseconds(order.updatedAt);
+    const exactAt = gateIoExecutionSecondsToMilliseconds(result.executedAt);
+    if (listedAt !== null && exactAt !== null && listedAt > exactAt
+        && (result.terminal === true || result.status === 'FINISHED' || result.status === 'REJECTED'))
+      return false; // A later open fact cannot silently revive a cached terminal order.
+    if (quantityEqual(remaining, order.remainingSize)) {
+      return filled === 0 || order.fillPrice === null
+        || (result.averagePrice !== null && quantityEqual(order.fillPrice, result.averagePrice));
+    }
+    return listedAt !== null && exactAt !== null && exactAt > listedAt
+      && remaining < order.remainingSize;
+  });
 }
 
 export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPortOptions): GateIoExecutionTruthPort {
@@ -234,6 +270,9 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
       const lifecycleIds = new Set<string>();
       for (const order of localOrders) {
         if (order.preparation && (order.status === 'SUBMITTED'
+            || (order.status === 'FILLED' && account.openOrders.some(open =>
+              open.clientText === order.preparation!.clientOrderId
+              || open.orderId === order.execution?.exchangeOrderId))
             || (order.execution && (order.execution.status !== 'FILLED'
               || (order.fills?.length ?? 0) > 1 || order.fillId?.includes(':cumulative:'))))) {
           lifecycleIds.add(order.orderId);
@@ -255,6 +294,10 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
                 || (attested.result.signedFilledSize !== 0
                   && Math.sign(attested.result.signedFilledSize) !== (order.side === 'buy' ? 1 : -1)))
               throw new Error('ATTRIBUTION');
+            if (!openOrdersAgreeWithAttestation(account.openOrders, attested)) {
+              incomplete ??= 'GATEIO_OPEN_ORDER_ATTESTATION_CONFLICT';
+              continue; // Keep the conflicting open-list evidence; never turn it into MATCH.
+            }
             const observation = gateIoOrderExecutionObservation(order.orderId, p, attested.result);
             planExecutionObservation(order, observation);
             const trades = tradeGroups.get(observation.exchangeOrderId);
@@ -265,7 +308,7 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
             if (observation.cumulativeFilledQuantity > 0) currentRunFilledOrders += 1;
             expectedSignedPosition += (order.side === 'buy' ? 1 : -1) * observation.cumulativeFilledQuantity;
             executions.push(observation);
-            // Replace the open-list representation with the exact order's cumulative facts.
+            // Merge only after the overlapping facts agree (or prove forward progress).
             const existingIndex = orders.findIndex(o => o.orderId === order.orderId);
             if (existingIndex >= 0) orders.splice(existingIndex, 1);
             orders.push(Object.freeze({ orderId: order.orderId, exchange: 'gateio', symbol: 'ETH/USDT',
@@ -328,6 +371,10 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
           incomplete ??= result?.status === 'PARTIALLY_FILLED'
             ? 'GATEIO_FILLED_ORDER_ATTESTATION_CONFLICT'
             : 'GATEIO_ORDER_ATTESTATION_UNPROVABLE';
+          continue;
+        }
+        if (!openOrdersAgreeWithAttestation(account.openOrders, attested!)) {
+          incomplete ??= 'GATEIO_OPEN_ORDER_ATTESTATION_CONFLICT';
           continue;
         }
         const executedAt = gateIoExecutionSecondsToMilliseconds(result.executedAt);

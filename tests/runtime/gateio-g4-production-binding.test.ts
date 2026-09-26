@@ -18,7 +18,9 @@ const NOW = 1_800_000_000_000;
 let nextAccount = 0;
 function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   overrideConfig?: Partial<ProductionRuntimeConfig>; omitGate?: boolean; wrongEnvironment?: boolean;
-  wrongAccount?: boolean; denyRecovery?: boolean; budget?: GateIoG3RunBudget } = {}) {
+  wrongAccount?: boolean; denyRecovery?: boolean; budget?: GateIoG3RunBudget;
+  lostAcknowledgement?: boolean;
+  openOrderFact?: (order: Record<string, any>) => Record<string, any> } = {}) {
   let now = NOW;
   let exposure = 0;
   let posts = 0;
@@ -36,6 +38,7 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   let splitHistory = false;
   let externalActivity = false;
   let available = '900';
+  let lookupCount = 0;
   const requests: { method: string; url: string; body?: any }[] = [];
   const orders = new Map<string, any>();
   const environment = options.environment ?? 'testnet';
@@ -68,9 +71,11 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
         finish_as: partial ? 'ioc' : 'filled', fill_price: '2000',
         finish_time: pendingPartial ? 0 : now / 1000, update_time: now / 1000 };
       orders.set(body.text, order);
-      return response(order);
+      return response(options.lostAcknowledgement ? {} : order);
     }
     if (path.startsWith(GATEIO_READ_ENDPOINTS.OPEN_ORDERS + '/')) {
+      lookupCount += 1;
+      if (options.lostAcknowledgement && lookupCount === 1) return response({ label: 'ORDER_NOT_FOUND' }, 404);
       if (missingOrder) return response({ label: 'ORDER_NOT_FOUND' }, 404);
       const order = orders.get(path.split('/').at(-1)!);
       return response(mismatchOrder ? { ...order, size: Number(order.size) * 2 } : order);
@@ -86,7 +91,10 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
       value: String(exposure * 2), entry_price: exposure === 0 ? null : '2000',
       mark_price: exposure === 0 ? null : '2000', update_time: String(now / 1000),
     }]);
-    if (path === GATEIO_READ_ENDPOINTS.OPEN_ORDERS) return response([]);
+    if (path === GATEIO_READ_ENDPOINTS.OPEN_ORDERS) return response(options.openOrderFact
+      ? [...orders.values()].map(o => options.openOrderFact!({ ...o, status: 'open',
+        left: Math.abs(Number(o.left)), is_reduce_only: o.reduce_only,
+        is_close: false, create_time: now / 1000 })) : []);
     if (path === GATEIO_READ_ENDPOINTS.MY_TRADES) {
       const trades = history ? [...orders.values()].map((o, i) => ({
         id: String(3000 + i), order_id: o.id, contract: 'ETH_USDT',
@@ -182,6 +190,84 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
       .filter((e) => e.type === 'execution.fill.confirmed'); },
   };
 }
+
+describe('Gate G5R1 cross-source order facts', () => {
+  for (const [name, patch] of Object.entries({
+    quantity: { size: 3 }, side: { size: -2 }, reduceOnly: { is_reduce_only: true },
+    identity: { id: '77777777777777777' }, clientText: { text: 't-unrelated' },
+    remainingRegression: { left: 0.5, update_time: NOW / 1000 - 1 },
+    remainingSameTime: { left: 2 }, remainingRange: { left: 3 },
+    remainingUnknownTime: { left: 2, update_time: null, create_time: NOW / 1000 - 10 },
+    price: { price: '100' }, tif: { tif: 'gtc' }, close: { is_close: true },
+    fillPrice: { fill_price: '2100' },
+  })) {
+    it(name + ' contradiction fails closed before replacing factual evidence', async t => {
+      const h = harness({ openOrderFact: o => ({ ...o, ...patch }) });
+      t.after(() => h.owner.stop()); await h.start(); await h.activate();
+      h.pendingPartial = true;
+      await h.trade('open', 'gateio', 4);
+      assert.equal(h.spine.reconciliationVerified, false);
+      assert.notEqual(h.spine.lastReconciliationReport?.outcome, 'MATCH');
+      assert.equal(h.fills().length, 1, 'no attestation delta is applied on conflicting truth');
+      assert.equal((await h.trade()).admitted, false);
+      assert.equal(h.posts, 1);
+    });
+  }
+  it('consistent overlapping facts reconcile without double application', async t => {
+    const h = harness({ openOrderFact: o => o }); t.after(() => h.owner.stop());
+    await h.start(); await h.activate(); h.pendingPartial = true;
+    await h.trade('open', 'gateio', 4);
+    assert.equal(h.spine.reconciliationVerified, true);
+    assert.equal((await reconcileRecoveredState(h.spine)).outcome, 'MATCH');
+    assert.equal(h.fills().length, 1);
+  });
+  for (const terminal of ['pending', 'cancelled', 'filled'] as const) {
+    it('earlier open list can advance to a newer exact ' + terminal + ' observation', async t => {
+      const h = harness({ openOrderFact: o => ({ ...o, left: 2, fill_price: null,
+        update_time: NOW / 1000 - 1, create_time: NOW / 1000 - 2 }) });
+      t.after(() => h.owner.stop()); await h.start(); await h.activate();
+      if (terminal === 'pending') h.pendingPartial = true;
+      if (terminal === 'cancelled') h.partial = true;
+      await h.trade('open', 'gateio', 4);
+      assert.equal(h.spine.reconciliationVerified, true);
+      assert.equal(h.fills().length, 1);
+    });
+  }
+  it('a later open observation cannot revive a cached terminal partial order', async t => {
+    const h = harness({ openOrderFact: o => ({ ...o, update_time: NOW / 1000 + 1 }) });
+    t.after(() => h.owner.stop()); await h.start(); await h.activate(); h.partial = true;
+    await h.trade('open', 'gateio', 4);
+    assert.equal(h.spine.reconciliationVerified, false);
+  });
+  it('production re-arm never bypasses the unchanged Gate proof mutation budget', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    await h.trade('open', 'gateio', 4); h.partial = true;
+    function tick(price: number) {
+      h.spine.kernel.publish('market.ticker.updated', { ticker: {
+        exchange: 'gateio', instId: 'ETH/USDT', channel: 'ticker', last: price,
+        bestBid: price - 1, bestAsk: price + 1, volume24h: 100, high24h: 2100,
+        low24h: 1800, ts: NOW }, receivedAt: NOW });
+    }
+    tick(1890); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.spine.oms.getStore().list().find(o => o.action === 'close')!.status, 'CANCELLED');
+    assert.equal(h.spine.protection.getSubmittedCount(), 0);
+    assert.equal(h.posts, 2);
+    tick(1880); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.posts, 2, 're-arm grants neither an extra mutation slot nor POST retry');
+    assert.equal(h.budget.snapshot().proofUsed, 2);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').status, 'open');
+  });
+  it('overlapping open-list facts do not widen F15 submission_unknown recovery authority', async t => {
+    const h = harness({ openOrderFact: o => o, lostAcknowledgement: true });
+    t.after(() => h.owner.stop()); await h.start(); await h.activate(); h.pendingPartial = true;
+    assert.equal((await h.trade('open', 'gateio', 4)).omsResult?.status, 'submission_unknown');
+    assert.equal(h.spine.oms.getStore().list()[0]!.status, 'SUBMISSION_UNKNOWN');
+    assert.equal(h.spine.reconciliationVerified, false);
+    assert.equal(h.fills().length, 0);
+    assert.equal(h.budget.snapshot().attestationUsed, 0);
+    assert.equal(h.posts, 1);
+  });
+});
 
 describe('Gate G5 — cumulative lifecycle through the sole production Owner/Spine/OMS', () => {
   it('fractional CLOSE 0.3 -> fill 0.1 -> residual 0.2 uses decimal quantities without dust or false flat', async (t) => {
