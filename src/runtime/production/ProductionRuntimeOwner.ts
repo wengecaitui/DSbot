@@ -119,6 +119,8 @@ export interface ApplicationProductionRuntimeOwner {
    * never exposed through the public AppGateway.productionRuntime surface.
    */
   readonly authoritativeSpine: () => ProductionSpine | null;
+  /** Internal Gate observation from the same binding used by reconciliation. No I/O or mutation. */
+  readonly gateIoObservation: () => ReturnType<ReturnType<typeof createGateIoProductionBinding>['readObservation']> | null;
   readonly legacyWrites: LegacyWriteAuthorityPolicy;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -414,6 +416,7 @@ export function createApplicationProductionRuntimeOwner(
   let state: ProductionRuntimeState = config?.enabled === false ? 'DISABLED' : 'NOT_CONFIGURED';
   let reason: string | null = null;
   let authoritativeSpine: ProductionSpine | null = null;
+  let gateBinding: ReturnType<typeof createGateIoProductionBinding> | null = null;
   let marketRuntime: MarketDataRuntime | null = null;
   let journal: FileEventJournal | null = null;
   let recoveryEvidence: RecoveryResult | null = null;
@@ -505,7 +508,6 @@ export function createApplicationProductionRuntimeOwner(
         const hardRiskSource = dependencies.createHardRiskSource(validated.identity, validated.hardRisk);
         assertCanonicalHardRiskSource(validated.identity, hardRiskSource);
 
-        let gateBinding: ReturnType<typeof createGateIoProductionBinding> | null = null;
         if (validated.identity.exchange === 'gateio') {
           const gate = dependencies.gateIo;
           if (!gate || gate.environment !== validated.environment
@@ -618,6 +620,7 @@ export function createApplicationProductionRuntimeOwner(
     read,
     binanceAuthenticatedRead,
     authoritativeSpine: binding.provider.productionSpine,
+    gateIoObservation: () => gateBinding?.readObservation() ?? null,
     legacyWrites,
     start,
     stop,
