@@ -442,6 +442,30 @@ export function reconcile(
   reconcilePositions(local.positions, external.positions, sink);
   reconcileProtection(activePlansIdx.map, external.positions, sink);
 
+  // A net-flat position cannot hide conflicting OPEN/CLOSE fills. This is the
+  // existing comparison engine, not a venue-specific repair or fill application.
+  if (local.fills !== undefined) {
+    const localFills = indexKeyed(local.fills, (f) => f.fillId);
+    if (localFills.conflictKey !== null) return untrusted(local, external, 'conflicting Kernel fill facts');
+    for (const [id, fill] of localFills.map) {
+      const factual = externalFillsIdx.map.get(id);
+      if (!factual || factual.orderId !== fill.orderId || factual.exchange !== fill.exchange
+          || factual.symbol !== fill.symbol || factual.side !== fill.side
+          || !Number.isFinite(fill.quantity) || fill.quantity <= 0
+          || !Number.isFinite(fill.price) || fill.price <= 0
+          || !Number.isFinite(factual.quantity) || !Number.isFinite(factual.price)
+          || Math.abs(factual.quantity - fill.quantity) > 1e-10
+          || Math.abs(factual.price - fill.price) > 1e-8) {
+        sink.push({ outcome: 'UNTRUSTED_STATE', reason: 'Kernel fill disagrees with factual execution truth',
+          fillId: id, orderId: fill.orderId, exchange: fill.exchange, symbol: fill.symbol });
+      }
+    }
+    for (const id of externalFillsIdx.map.keys()) {
+      if (!localFills.map.has(id)) sink.push({ outcome: 'MISSING_FILL',
+        reason: 'factual fill absent from Kernel journal', fillId: id });
+    }
+  }
+
   return buildReport(local, external, sortIssues(issues));
 }
 

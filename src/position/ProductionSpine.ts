@@ -34,6 +34,7 @@ import type {
   ReconciliationReport,
   ExecutionTruthPort,
   ExecutionTruthSnapshot,
+  ExternalFill,
 } from '../reconciliation/reconciliation-types';
 import { createPaperExecutionTruthPort } from '../reconciliation/PaperExecutionTruthPort';
 import { buildLocalReconciliationSnapshot } from '../reconciliation/local-snapshot';
@@ -141,6 +142,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   kernel.subscribe('market.ticker.updated', (e) => { marketStore.apply(e); });
 
   const executionMode = config.execution?.mode ?? 'paper';
+  const gateExecution = executionMode === 'limited-live' && config.exchange === 'gateio';
+  let executionInFlight = false;
+  let reconciliationInFlight = false;
 
   // ── Execution adapter + factual truth port ──
   const defaultExecuteParams: ExecuteParams = {
@@ -192,7 +196,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // ── Dynamic-price OMS ──
   const dynamicPriceOms = {
     ...oms,
-    submitRequest: (intent: TradeIntent, action: any, approvedUsd: number) => {
+    submitRequest: async (intent: TradeIntent, action: any, approvedUsd: number) => {
       if (executionMode === 'paper') {
         const snapshot = marketStore.getSnapshot(intent.exchange as any, intent.symbol);
         const paperAdapter = adapter as PaperExecutionAdapter;
@@ -201,7 +205,22 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
         p.markPriceUsd = price;
         p.executedAtMs = Date.now();
       }
-      return oms.submitRequest(intent, action, approvedUsd);
+      if (!gateExecution) return oms.submitRequest(intent, action, approvedUsd);
+      if (!recoveryVerified || protection.getMode() !== 'live' || executionInFlight || reconciliationInFlight
+          || intent.exchange !== exchange || intent.symbol !== 'ETH/USDT'
+          || (action === 'open' && !reconciliationVerified)) {
+        return { status: 'conflict' as const, reason: 'GATEIO_EXECUTION_STATE_NOT_VERIFIED' };
+      }
+      executionInFlight = true;
+      reconciliationVerified = false;
+      try {
+        // The same OMS applies the fill exactly once. Attestation only compares it.
+        return await oms.submitRequest(intent, action, approvedUsd);
+      } finally {
+        try { await runCurrentReconciliation(); }
+        catch { reconciliationVerified = false; }
+        executionInFlight = false;
+      }
     },
     getStore: () => oms.getStore(),
   } as typeof oms;
@@ -232,7 +251,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // provenance comes ONLY from collector ingestion — never a direct bus write.
   if (config.marketRuntime) {
     bridgeMarketToKernel(config.marketRuntime.bus, kernel);
-    config.marketRuntime.onTickerIngested(() => { freshMarketObserved = true; });
+    config.marketRuntime.onTickerIngested((ticker) => {
+      if (ticker.exchange === exchange) freshMarketObserved = true;
+    });
   }
 
   const spine = {
@@ -274,24 +295,57 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // authority first; grants reconciliationVerified only on a genuine current MATCH.
   async function runCurrentReconciliation(): Promise<ReconciliationReport> {
     reconciliationVerified = false; // revoke stale authority before each attempt
-    const local = buildLocalReconciliationSnapshot(
-      oms.getStore(),
-      positionStore,
-      planStore,
-      reconciliationIdentity,
-    );
-    let external: ExecutionTruthSnapshot;
+    if (gateExecution && reconciliationInFlight) throw new Error('RECONCILIATION_IN_PROGRESS');
+    reconciliationInFlight = true;
     try {
-      external = await truthPort.acquireTruth();
-    } catch (err) {
-      reconciliationVerified = false; // fail closed on acquisition failure
+      const projected = buildLocalReconciliationSnapshot(
+        oms.getStore(),
+        positionStore,
+        planStore,
+        reconciliationIdentity,
+      );
+      const local = gateExecution ? Object.freeze({ ...projected,
+        fills: Object.freeze(kernel.journal().readFromLogicalSequence(1)
+          .filter((event) => event.type === 'execution.fill.confirmed')
+          .map((event) => {
+            const f = (event.payload as { fill: ExternalFill }).fill;
+            return Object.freeze({ fillId: f.fillId, orderId: f.orderId, exchange: f.exchange,
+              symbol: f.symbol, side: f.side, quantity: f.quantity, price: f.price, executedAt: f.executedAt });
+          })),
+      }) : projected;
+      const external: ExecutionTruthSnapshot = await truthPort.acquireTruth();
+      const report = reconcile(local, external);
+      lastReconciliationReport = report;
+      reconciliationVerified = report.reconciliationVerified;
+      return report;
+    } catch (error) {
+      reconciliationVerified = false;
       lastReconciliationReport = null;
-      throw err;
-    }
-    const report = reconcile(local, external);
-    lastReconciliationReport = report;
-    reconciliationVerified = report.reconciliationVerified;
-    return report;
+      throw error;
+    } finally { reconciliationInFlight = false; }
+  }
+
+  function gateMarketFresh(): boolean {
+    const market = marketStore.getSnapshot(exchange, 'ETH/USDT');
+    const at = market?.ticker?.receivedAt;
+    const now = clock.now();
+    return freshMarketObserved && !!market && !market.isStale
+      && market.ticker?.ticker.exchange === exchange
+      && typeof at === 'number' && Number.isSafeInteger(now) && Number.isSafeInteger(at)
+      && now >= at && now - at <= (config.marketStaleAfterMs ?? 30_000);
+  }
+
+  if (gateExecution) {
+    (spine as any)[ENTRY_TOKEN] = async (intent: TradeIntent): Promise<string | null> => {
+      if (intent.exchange !== exchange || intent.symbol !== 'ETH/USDT') return 'GATEIO_VENUE_MISMATCH';
+      if (!recoveryVerified || !reconciliationVerified || executionInFlight || reconciliationInFlight)
+        return 'RECONCILIATION_NOT_VERIFIED';
+      if (!gateMarketFresh()) return 'MARKET_STALE';
+      try {
+        if (!(await runCurrentReconciliation()).reconciliationVerified) return 'RECONCILIATION_NOT_VERIFIED';
+      } catch { return 'RECONCILIATION_NOT_VERIFIED'; }
+      return gateMarketFresh() ? null : 'MARKET_STALE';
+    };
   }
 
   (spine as any)[VERIFY_TOKEN] = async function() {
@@ -312,6 +366,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     if (!recoveryVerified) throw new Error('LIVE_READY_REQUIRES_RECOVERY');
     if (!reconciliationVerified) throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
     if (!freshMarketObserved) throw new Error('LIVE_READY_REQUIRES_FRESH_MARKET');
+    if (gateExecution && !gateMarketFresh()) throw new Error('LIVE_READY_REQUIRES_FRESH_MARKET');
     // P0: current facts must still MATCH at the point LIVE_READY is granted.
     let report: ReconciliationReport;
     try {
@@ -320,6 +375,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
     }
     if (!report.reconciliationVerified) throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
+    if (gateExecution && !gateMarketFresh()) throw new Error('LIVE_READY_REQUIRES_FRESH_MARKET');
     _setLive();
   };
 
@@ -329,6 +385,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 const VERIFY_TOKEN = Symbol('verifyToken');
 const LIVE_TOKEN = Symbol('liveToken');
 const RECONCILE_TOKEN = Symbol('reconcileToken');
+const ENTRY_TOKEN = Symbol('entryToken');
 
 /**
  * Full recovery: journal → replay → verify → RECOVERY_VERIFIED.
@@ -419,6 +476,10 @@ export async function executeThroughGateway(
   }
 
   const { kernel, positionStore, marketStore, oms, adapter, policyStore } = spine;
+  if (action === 'open' && typeof (spine as any)[ENTRY_TOKEN] === 'function') {
+    const reason = await (spine as any)[ENTRY_TOKEN](intent);
+    if (reason) return { admitted: false, riskCode: reason, action };
+  }
   const exchange = intent.exchange as any;
   const symbol = intent.symbol;
 

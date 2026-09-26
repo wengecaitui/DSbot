@@ -386,8 +386,9 @@ function createReadTransport(
 }
 
 /** Simulation/test constructor. An injected fetch can never receive production provenance. */
-export function createGateIoReadTransport(fetchImpl: GateIoReadFetch): GateIoReadTransport {
-  return createReadTransport(fetchImpl, 'live', null);
+export function createGateIoReadTransport(fetchImpl: GateIoReadFetch, budget?: GateIoG3RunBudget): GateIoReadTransport {
+  if (budget !== undefined && !(budget instanceof GateIoG3RunBudget)) fail('GATEIO_READ_REQUEST_INVALID');
+  return createReadTransport(fetchImpl, 'live', budget ?? null);
 }
 
 /** Explicit TestNet binding; the same L0 validation, signer and parser own every GET. */
