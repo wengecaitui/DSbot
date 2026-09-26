@@ -1,5 +1,6 @@
 // Phase 1B3: KernelPositionStateStore — event-backed, immutable position state
 import type { DomainClock } from '../runtime/Clock';
+import { addQuantity, subtractQuantity } from '../types/decimal-quantity';
 import type { ExchangeId } from '../data/MarketIdentity';
 import { isExchangeId } from '../data/MarketIdentity';
 import type { ConfirmedFill } from '../types/confirmed-fill';
@@ -42,7 +43,7 @@ function fillEqual(a: ConfirmedFill, b: ConfirmedFill): boolean {
 
 interface PosState { side: 'long' | 'short' | 'flat'; signedQty: number; avgPrice: number; }
 
-function applyFillToState(current: PosState, fill: ConfirmedFill): PosState {
+export function applyFillToState(current: PosState, fill: ConfirmedFill): PosState {
   const isBuy = fill.side === 'buy';
   if (current.side === 'flat') {
     return isBuy
@@ -51,35 +52,35 @@ function applyFillToState(current: PosState, fill: ConfirmedFill): PosState {
   }
   if (current.side === 'long') {
     if (isBuy) {
-      const totalQty = current.signedQty + fill.quantity;
+      const totalQty = addQuantity(current.signedQty, fill.quantity);
       const totalCost = current.avgPrice * current.signedQty + fill.price * fill.quantity;
       return { side: 'long', signedQty: totalQty, avgPrice: totalCost / totalQty };
     }
     // sell vs long
     if (fill.quantity < current.signedQty) {
-      return { side: 'long', signedQty: current.signedQty - fill.quantity, avgPrice: current.avgPrice };
+      return { side: 'long', signedQty: subtractQuantity(current.signedQty, fill.quantity), avgPrice: current.avgPrice };
     }
     if (fill.quantity === current.signedQty) {
       return { side: 'flat', signedQty: 0, avgPrice: 0 };
     }
-    const remaining = fill.quantity - current.signedQty;
+    const remaining = subtractQuantity(fill.quantity, current.signedQty);
     return { side: 'short', signedQty: -remaining, avgPrice: fill.price };
   }
   // short
   if (!isBuy) {
-    const totalQty = Math.abs(current.signedQty) + fill.quantity;
+    const totalQty = addQuantity(Math.abs(current.signedQty), fill.quantity);
     const totalCost = current.avgPrice * Math.abs(current.signedQty) + fill.price * fill.quantity;
     return { side: 'short', signedQty: -totalQty, avgPrice: totalCost / totalQty };
   }
   // buy vs short
   const absQty = Math.abs(current.signedQty);
   if (fill.quantity < absQty) {
-    return { side: 'short', signedQty: -(absQty - fill.quantity), avgPrice: current.avgPrice };
+    return { side: 'short', signedQty: -subtractQuantity(absQty, fill.quantity), avgPrice: current.avgPrice };
   }
   if (fill.quantity === absQty) {
     return { side: 'flat', signedQty: 0, avgPrice: 0 };
   }
-  const remaining = fill.quantity - absQty;
+  const remaining = subtractQuantity(fill.quantity, absQty);
   return { side: 'long', signedQty: remaining, avgPrice: fill.price };
 }
 

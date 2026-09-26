@@ -66,7 +66,11 @@ export function createGateIoProductionBinding(
       if (!spine) throw new Error('GATEIO_PRODUCTION_SPINE_NOT_BOUND');
       return spine.oms.getStore().list();
     },
-    attestCurrentRunOrder: (text) => client.lookupSubmittedOrder(text),
+    attestCurrentRunOrder: (text, order) => client.lookupSubmittedOrder(text, order?.preparation ? {
+      text, contract: 'ETH_USDT', price: '0', tif: 'ioc',
+      size: (order.side === 'buy' ? 1 : -1) * order.preparation.venueQuantity,
+      reduceOnly: order.preparation.reduceOnly,
+    } : undefined),
   });
 
   function facts() {

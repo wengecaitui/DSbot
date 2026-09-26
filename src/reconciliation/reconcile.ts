@@ -24,6 +24,7 @@ import type {
   IssueOutcome,
 } from './reconciliation-types';
 import { OUTCOME_PRIORITY } from './reconciliation-types';
+import { quantityEqual } from '../oms/execution-observation';
 
 // ─── Deterministic serialization (for evidence digests + equality) ──────────
 
@@ -91,6 +92,26 @@ function reconcileOrders(
   for (const lo of localOrders) {
     const extOrder = externalOrders.get(lo.orderId);
     const extFills = externalFills.get(lo.orderId) ?? [];
+
+    if (lo.execution) {
+      const execution = lo.execution;
+      const quantity = extFills.reduce((sum, f) => sum + f.quantity, 0);
+      const notional = extFills.reduce((sum, f) => sum + f.quantity * f.price, 0);
+      if ((!extOrder && execution.status !== 'FILLED')
+          || (extOrder && (extOrder.exchange !== lo.exchange || extOrder.symbol !== lo.symbol
+            || extOrder.side !== lo.side
+            || extOrder.status !== (execution.status === 'SUBMITTED' ? 'OPEN' : execution.status)
+            || !quantityEqual(extOrder.quantity, execution.requestedQuantity)
+            || !quantityEqual(extOrder.filledQuantity, execution.cumulativeFilledQuantity)))
+          || !quantityEqual(quantity, execution.cumulativeFilledQuantity)
+          || !quantityEqual(notional, execution.cumulativeNotional)
+          || extFills.some(f => f.exchange !== lo.exchange || f.symbol !== lo.symbol || f.side !== lo.side
+            || f.fillId !== execution.exchangeOrderId)) {
+        sink.push({ outcome: 'UNTRUSTED_STATE', orderId: lo.orderId,
+          reason: 'cumulative order execution disagrees with exchange truth' });
+      }
+      continue;
+    }
 
     // P0-2 attribution: a correlated orderId must agree on exchange/symbol/side.
     if (extOrder && (extOrder.exchange !== lo.exchange || extOrder.symbol !== lo.symbol || extOrder.side !== lo.side)) {
@@ -445,9 +466,20 @@ export function reconcile(
   // A net-flat position cannot hide conflicting OPEN/CLOSE fills. This is the
   // existing comparison engine, not a venue-specific repair or fill application.
   if (local.fills !== undefined) {
+    const cumulativeOrders = new Map(local.orders.filter(o => o.execution).map(o => [o.orderId, o.execution!]));
     const localFills = indexKeyed(local.fills, (f) => f.fillId);
     if (localFills.conflictKey !== null) return untrusted(local, external, 'conflicting Kernel fill facts');
+    for (const [orderId, execution] of cumulativeOrders) {
+      const order = local.orders.find(o => o.orderId === orderId)!;
+      const deltas = [...localFills.map.values()].filter(f => f.orderId === orderId);
+      if (!quantityEqual(deltas.reduce((sum, f) => sum + f.quantity, 0), execution.cumulativeFilledQuantity)
+          || !quantityEqual(deltas.reduce((sum, f) => sum + f.quantity * f.price, 0), execution.cumulativeNotional)
+          || deltas.some(f => f.exchange !== order.exchange || f.symbol !== order.symbol || f.side !== order.side
+            || !Number.isFinite(f.quantity) || f.quantity <= 0 || !Number.isFinite(f.price) || f.price <= 0))
+        sink.push({ outcome: 'MISSING_FILL', orderId, reason: 'Kernel delta fills disagree with cumulative OMS quantity' });
+    }
     for (const [id, fill] of localFills.map) {
+      if (cumulativeOrders.has(fill.orderId)) continue;
       const factual = externalFillsIdx.map.get(id);
       if (!factual || factual.orderId !== fill.orderId || factual.exchange !== fill.exchange
           || factual.symbol !== fill.symbol || factual.side !== fill.side
@@ -460,7 +492,8 @@ export function reconcile(
           fillId: id, orderId: fill.orderId, exchange: fill.exchange, symbol: fill.symbol });
       }
     }
-    for (const id of externalFillsIdx.map.keys()) {
+    for (const [id, factual] of externalFillsIdx.map) {
+      if (cumulativeOrders.has(factual.orderId)) continue;
       if (!localFills.map.has(id)) sink.push({ outcome: 'MISSING_FILL',
         reason: 'factual fill absent from Kernel journal', fillId: id });
     }

@@ -18,7 +18,9 @@ const NOW = 1_800_000_000_000;
 let nextAccount = 0;
 function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   overrideConfig?: Partial<ProductionRuntimeConfig>; omitGate?: boolean; wrongEnvironment?: boolean;
-  wrongAccount?: boolean; denyRecovery?: boolean; budget?: GateIoG3RunBudget } = {}) {
+  wrongAccount?: boolean; denyRecovery?: boolean; budget?: GateIoG3RunBudget;
+  lostAcknowledgement?: boolean;
+  openOrderFact?: (order: Record<string, any>) => Record<string, any> } = {}) {
   let now = NOW;
   let exposure = 0;
   let posts = 0;
@@ -29,9 +31,14 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   let corruptPositions = false;
   let failPostTruth = false;
   let partial = false;
+  let pendingPartial = false;
+  let partialContracts: number | null = null;
+  let tradeConflict = false;
   let history = false;
+  let splitHistory = false;
   let externalActivity = false;
   let available = '900';
+  let lookupCount = 0;
   const requests: { method: string; url: string; body?: any }[] = [];
   const orders = new Map<string, any>();
   const environment = options.environment ?? 'testnet';
@@ -56,16 +63,19 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     if (method === 'POST') {
       posts += 1;
       if (failPostTruth) corruptPositions = true;
-      const size = partial ? Number(body.size) / 2 : Number(body.size);
+      const size = partialContracts !== null ? Math.sign(Number(body.size)) * partialContracts
+        : partial ? Number(body.size) / 2 : Number(body.size);
       exposure = Math.round((exposure + size) * 100) / 100;
       const order = { ...body, id: '1234567890123456' + posts,
-        left: partial ? Number(body.size) - size : 0, status: 'finished',
+        left: partial ? Number((Number(body.size) - size).toFixed(8)) : 0, status: pendingPartial ? 'open' : 'finished',
         finish_as: partial ? 'ioc' : 'filled', fill_price: '2000',
-        finish_time: now / 1000 };
+        finish_time: pendingPartial ? 0 : now / 1000, update_time: now / 1000 };
       orders.set(body.text, order);
-      return response(order);
+      return response(options.lostAcknowledgement ? {} : order);
     }
     if (path.startsWith(GATEIO_READ_ENDPOINTS.OPEN_ORDERS + '/')) {
+      lookupCount += 1;
+      if (options.lostAcknowledgement && lookupCount === 1) return response({ label: 'ORDER_NOT_FOUND' }, 404);
       if (missingOrder) return response({ label: 'ORDER_NOT_FOUND' }, 404);
       const order = orders.get(path.split('/').at(-1)!);
       return response(mismatchOrder ? { ...order, size: Number(order.size) * 2 } : order);
@@ -81,17 +91,24 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
       value: String(exposure * 2), entry_price: exposure === 0 ? null : '2000',
       mark_price: exposure === 0 ? null : '2000', update_time: String(now / 1000),
     }]);
-    if (path === GATEIO_READ_ENDPOINTS.OPEN_ORDERS) return response([]);
+    if (path === GATEIO_READ_ENDPOINTS.OPEN_ORDERS) return response(options.openOrderFact
+      ? [...orders.values()].map(o => options.openOrderFact!({ ...o, status: 'open',
+        left: Math.abs(Number(o.left)), is_reduce_only: o.reduce_only,
+        is_close: false, create_time: now / 1000 })) : []);
     if (path === GATEIO_READ_ENDPOINTS.MY_TRADES) {
       const trades = history ? [...orders.values()].map((o, i) => ({
-        id: String(3000 + i), order_id: o.id, contract: 'ETH_USDT', size: String(o.size),
+        id: String(3000 + i), order_id: o.id, contract: 'ETH_USDT',
+        size: String((Number(o.size) - Number(o.left)) * (tradeConflict ? 2 : 1)),
         close_size: '0', price: '2000', text: o.text, fee: '0', point_fee: '0',
         role: 'taker', create_time: String(now / 1000),
       })) : [];
       if (externalActivity) trades.push({ id: '9999', order_id: '8888', contract: 'ETH_USDT',
         size: '0.1', close_size: '0', price: '2000', text: 't-unrelated', fee: '0',
         point_fee: '0', role: 'taker', create_time: String(now / 1000) });
-      return response(trades);
+      return response(splitHistory ? trades.flatMap(trade => [
+        { ...trade, id: trade.id + '1', size: String(Number(trade.size) / 2) },
+        { ...trade, id: trade.id + '2', size: String(Number(trade.size) / 2) },
+      ]) : trades);
     }
     if (path === GATEIO_READ_ENDPOINTS.CONTRACT) return response({
       name: 'ETH_USDT', status: 'trading', in_delisting: false, quanto_multiplier: '0.001',
@@ -117,7 +134,7 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     ...options.overrideConfig,
   };
   let spine: ProductionSpine;
-  const owner = createApplicationProductionRuntimeOwner(config, {
+  const createOwner = () => createApplicationProductionRuntimeOwner(config, {
     ...(options.omitGate ? {} : { gateIo: { environment: options.wrongEnvironment
       ? environment === 'testnet' ? 'live' as const : 'testnet' as const : environment,
     accountId: options.wrongAccount ? 'other-account' : accountId,
@@ -128,6 +145,7 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     createSpine: async (cfg) => { creations += 1; spine = await createProductionSpine(cfg); return spine; },
     ...(options.denyRecovery ? { recover: async () => { throw new Error('FIXTURE_RECOVERY_DENIED'); } } : {}),
   });
+  let owner = createOwner();
   function publishPolicy(allow = true) {
     spine.kernel.publish('policy.snapshot.published', { policy: {
       exchange: 'gateio', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
@@ -138,7 +156,7 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     } });
   }
   return {
-    owner, requests, budget, get spine() { return spine; }, get posts() { return posts; },
+    get owner() { return owner; }, requests, budget, get spine() { return spine; }, get posts() { return posts; },
     get creations() { return creations; }, get accounts() { return accounts; },
     get exposure() { return exposure; }, set exposure(v: number) { exposure = v; },
     set missingOrder(v: boolean) { missingOrder = v; },
@@ -146,6 +164,17 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     set corruptPositions(v: boolean) { corruptPositions = v; },
     set failPostTruth(v: boolean) { failPostTruth = v; },
     set partial(v: boolean) { partial = v; }, set history(v: boolean) { history = v; },
+    set splitHistory(v: boolean) { splitHistory = v; },
+    set pendingPartial(v: boolean) { pendingPartial = v; partial = v; },
+    set partialContracts(v: number) { partialContracts = v; partial = true; },
+    set tradeConflict(v: boolean) { tradeConflict = v; },
+    finishRemaining() {
+      const order = [...orders.values()].at(-1)!;
+      exposure += Number(order.left);
+      order.left = 0; order.status = 'finished'; order.finish_as = 'filled';
+      order.finish_time = now / 1000;
+    },
+    async restart() { await owner.stop(); owner = createOwner(); await owner.start(); publishPolicy(); },
     set externalActivity(v: boolean) { externalActivity = v; },
     set available(v: string) { available = v; },
     advance(ms: number) { now += ms; }, publishPolicy,
@@ -161,6 +190,179 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
       .filter((e) => e.type === 'execution.fill.confirmed'); },
   };
 }
+
+describe('Gate G5R1 cross-source order facts', () => {
+  for (const [name, patch] of Object.entries({
+    quantity: { size: 3 }, side: { size: -2 }, reduceOnly: { is_reduce_only: true },
+    identity: { id: '77777777777777777' }, clientText: { text: 't-unrelated' },
+    remainingRegression: { left: 0.5, update_time: NOW / 1000 - 1 },
+    remainingSameTime: { left: 2 }, remainingRange: { left: 3 },
+    remainingUnknownTime: { left: 2, update_time: null, create_time: NOW / 1000 - 10 },
+    price: { price: '100' }, tif: { tif: 'gtc' }, close: { is_close: true },
+    fillPrice: { fill_price: '2100' },
+  })) {
+    it(name + ' contradiction fails closed before replacing factual evidence', async t => {
+      const h = harness({ openOrderFact: o => ({ ...o, ...patch }) });
+      t.after(() => h.owner.stop()); await h.start(); await h.activate();
+      h.pendingPartial = true;
+      await h.trade('open', 'gateio', 4);
+      assert.equal(h.spine.reconciliationVerified, false);
+      assert.notEqual(h.spine.lastReconciliationReport?.outcome, 'MATCH');
+      assert.equal(h.fills().length, 1, 'no attestation delta is applied on conflicting truth');
+      assert.equal((await h.trade()).admitted, false);
+      assert.equal(h.posts, 1);
+    });
+  }
+  it('consistent overlapping facts reconcile without double application', async t => {
+    const h = harness({ openOrderFact: o => o }); t.after(() => h.owner.stop());
+    await h.start(); await h.activate(); h.pendingPartial = true;
+    await h.trade('open', 'gateio', 4);
+    assert.equal(h.spine.reconciliationVerified, true);
+    assert.equal((await reconcileRecoveredState(h.spine)).outcome, 'MATCH');
+    assert.equal(h.fills().length, 1);
+  });
+  for (const terminal of ['pending', 'cancelled', 'filled'] as const) {
+    it('earlier open list can advance to a newer exact ' + terminal + ' observation', async t => {
+      const h = harness({ openOrderFact: o => ({ ...o, left: 2, fill_price: null,
+        update_time: NOW / 1000 - 1, create_time: NOW / 1000 - 2 }) });
+      t.after(() => h.owner.stop()); await h.start(); await h.activate();
+      if (terminal === 'pending') h.pendingPartial = true;
+      if (terminal === 'cancelled') h.partial = true;
+      await h.trade('open', 'gateio', 4);
+      assert.equal(h.spine.reconciliationVerified, true);
+      assert.equal(h.fills().length, 1);
+    });
+  }
+  it('a later open observation cannot revive a cached terminal partial order', async t => {
+    const h = harness({ openOrderFact: o => ({ ...o, update_time: NOW / 1000 + 1 }) });
+    t.after(() => h.owner.stop()); await h.start(); await h.activate(); h.partial = true;
+    await h.trade('open', 'gateio', 4);
+    assert.equal(h.spine.reconciliationVerified, false);
+  });
+  it('production re-arm never bypasses the unchanged Gate proof mutation budget', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    await h.trade('open', 'gateio', 4); h.partial = true;
+    function tick(price: number) {
+      h.spine.kernel.publish('market.ticker.updated', { ticker: {
+        exchange: 'gateio', instId: 'ETH/USDT', channel: 'ticker', last: price,
+        bestBid: price - 1, bestAsk: price + 1, volume24h: 100, high24h: 2100,
+        low24h: 1800, ts: NOW }, receivedAt: NOW });
+    }
+    tick(1890); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.spine.oms.getStore().list().find(o => o.action === 'close')!.status, 'CANCELLED');
+    assert.equal(h.spine.protection.getSubmittedCount(), 0);
+    assert.equal(h.posts, 2);
+    tick(1880); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.posts, 2, 're-arm grants neither an extra mutation slot nor POST retry');
+    assert.equal(h.budget.snapshot().proofUsed, 2);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').status, 'open');
+  });
+  it('overlapping open-list facts do not widen F15 submission_unknown recovery authority', async t => {
+    const h = harness({ openOrderFact: o => o, lostAcknowledgement: true });
+    t.after(() => h.owner.stop()); await h.start(); await h.activate(); h.pendingPartial = true;
+    assert.equal((await h.trade('open', 'gateio', 4)).omsResult?.status, 'submission_unknown');
+    assert.equal(h.spine.oms.getStore().list()[0]!.status, 'SUBMISSION_UNKNOWN');
+    assert.equal(h.spine.reconciliationVerified, false);
+    assert.equal(h.fills().length, 0);
+    assert.equal(h.budget.snapshot().attestationUsed, 0);
+    assert.equal(h.posts, 1);
+  });
+});
+
+describe('Gate G5 — cumulative lifecycle through the sole production Owner/Spine/OMS', () => {
+  it('fractional CLOSE 0.3 -> fill 0.1 -> residual 0.2 uses decimal quantities without dust or false flat', async (t) => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    await h.trade('open', 'gateio', 0.6);
+    h.partialContracts = 0.1;
+    assert.equal((await h.trade('close', 'gateio', 0.6)).omsResult?.status, 'cancelled');
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.0002);
+    assert.equal(h.spine.reconciliationVerified, true);
+  });
+  it('A/B/C/G: OPEN 2 -> fill 1 -> fill 1; duplicates and delayed history never apply twice', async (t) => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    h.pendingPartial = true;
+    const result = await h.trade('open', 'gateio', 4);
+    assert.equal(result.omsResult?.status, 'partially_filled');
+    let order = h.spine.oms.getStore().list()[0]!;
+    assert.equal(order.requestedQuantity, 0.002);
+    assert.equal(order.cumulativeFilledQuantity, 0.001);
+    assert.equal(order.remainingQuantity, 0.001);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.001);
+    assert.equal(h.spine.reconciliationVerified, true);
+    assert.equal(h.fills().length, 1);
+    h.finishRemaining();
+    assert.equal((await reconcileRecoveredState(h.spine)).outcome, 'MATCH');
+    order = h.spine.oms.getStore().list()[0]!;
+    assert.equal(order.status, 'FILLED');
+    assert.equal(order.cumulativeFilledQuantity, 0.002);
+    assert.equal(order.remainingQuantity, 0);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.002);
+    assert.equal(h.fills().length, 2);
+    assert.equal((await reconcileRecoveredState(h.spine)).outcome, 'MATCH');
+    h.history = true; h.splitHistory = true;
+    assert.equal((await reconcileRecoveredState(h.spine)).outcome, 'MATCH');
+    assert.equal(h.fills().length, 2); assert.equal(h.posts, 1);
+  });
+  it('D/E/I: CLOSE 2 -> IOC fill 1 preserves residual 1, then closes only that residual', async (t) => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    await h.trade('open', 'gateio', 4);
+    h.partial = true;
+    assert.equal((await h.trade('close', 'gateio', 4)).omsResult?.status, 'cancelled');
+    const close = h.spine.oms.getStore().list().find(o => o.action === 'close')!;
+    assert.equal(close.preparation?.reduceOnly, true);
+    assert.equal(close.requestedQuantity, 0.002);
+    assert.equal(close.cumulativeFilledQuantity, 0.001);
+    assert.equal(close.remainingQuantity, 0.001);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.001);
+    assert.equal(h.spine.reconciliationVerified, true);
+    assert.equal(h.requests.filter(r => r.method === 'POST')[1]!.body.reduce_only, true);
+    // Proof mutation budget remains two: any further submission must fail without a third POST.
+    h.partial = false;
+    assert.equal((await h.trade('close', 'gateio', 2)).omsResult?.status, 'rejected');
+    assert.equal(h.posts, 2);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.001);
+  });
+  it('F: restart replays the first partial, then recovers only the new factual cumulative delta', async (t) => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    h.pendingPartial = true; await h.trade('open', 'gateio', 4);
+    await h.restart();
+    assert.equal(h.spine.recoveryVerified, true);
+    assert.equal(h.spine.reconciliationVerified, true);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.001);
+    assert.equal(h.fills().length, 1);
+    h.finishRemaining();
+    assert.equal((await reconcileRecoveredState(h.spine)).outcome, 'MATCH');
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.002);
+    assert.equal(h.fills().length, 2);
+    h.history = true;
+    assert.equal((await reconcileRecoveredState(h.spine)).outcome, 'MATCH');
+    assert.equal(h.fills().length, 2); assert.equal(h.posts, 1);
+  });
+  it('H: contradictory trade aggregation cannot authorize a second delta or a new entry', async (t) => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    h.pendingPartial = true; await h.trade('open', 'gateio', 4);
+    h.finishRemaining(); h.history = true; h.tradeConflict = true;
+    assert.equal((await reconcileRecoveredState(h.spine)).reconciliationVerified, false);
+    assert.equal(h.fills().length, 1);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.001);
+    assert.equal((await h.trade()).admitted, false); assert.equal(h.posts, 1);
+  });
+  it('a new cumulative delta with contradictory fresh position is not applied', async (t) => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    h.pendingPartial = true; await h.trade('open', 'gateio', 4);
+    h.finishRemaining(); h.exposure = 0;
+    assert.equal((await reconcileRecoveredState(h.spine)).reconciliationVerified, false);
+    assert.equal(h.fills().length, 1);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').status, 'open');
+  });
+  it('unrelated activity during partial-fill history lag remains fail closed', async (t) => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    h.pendingPartial = true; await h.trade('open', 'gateio', 4);
+    h.finishRemaining(); h.externalActivity = true;
+    assert.equal((await reconcileRecoveredState(h.spine)).reconciliationVerified, false);
+    assert.equal(h.fills().length, 1); assert.equal(h.posts, 1);
+  });
+});
 
 describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', () => {
   for (const environment of ['testnet', 'live'] as const) {
@@ -316,11 +518,13 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
     assert.equal((await reconcileRecoveredState(h.spine)).reconciliationVerified, false);
     assert.equal((await h.trade()).admitted, false); assert.equal(h.posts, 1);
   });
-  it('partial fill remains inherited P1, never a fabricated full fill or verified FLAT', async (t) => {
+  it('IOC partial fill terminates the order without discarding its factual residual exposure', async (t) => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); h.partial = true;
-    assert.equal((await h.trade()).omsResult?.status, 'submission_unknown');
-    assert.equal(h.exposure, 0.05); assert.equal(h.fills().length, 0);
-    assert.equal(h.spine.reconciliationVerified, false);
+    assert.equal((await h.trade()).omsResult?.status, 'cancelled');
+    assert.equal(h.exposure, 0.05); assert.equal(h.fills().length, 1);
+    assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.00005);
+    assert.equal(h.spine.reconciliationVerified, true);
+    assert.equal(h.spine.oms.getStore().list()[0]!.remainingQuantity, 0.00005);
     assert.equal((await h.trade()).admitted, false);
   });
   it('wrong venue intent and reference ticker cannot become Gate order/position truth', async (t) => {

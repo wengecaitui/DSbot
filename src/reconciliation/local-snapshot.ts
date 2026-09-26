@@ -25,6 +25,7 @@ export function buildLocalReconciliationSnapshot(
     symbol: o.symbol,
     side: o.side,
     status: o.status,
+    ...(o.preparation ? { requestedQuantity: o.preparation.requestedQuantity, execution: o.execution } : {}),
     fillId: o.fillId,
     orderVersion: o.orderVersion,
     sourceKernelEventId: o.sourceKernelEventId,

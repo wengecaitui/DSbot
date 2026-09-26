@@ -108,13 +108,28 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
   const positionStore = createKernelPositionStateStore();
   kernel.subscribe('position.baseline.confirmed', (event) => { positionStore.apply(event); });
   kernel.subscribe('execution.fill.confirmed', (event) => { positionStore.apply(event); });
-  const oms = new OmsCore(kernel, new GateIoFuturesExecutionAdapter(client));
+  const oms = new OmsCore(kernel, new GateIoFuturesExecutionAdapter(client), undefined,
+    (exchange, symbol) => {
+      // The existing G3 emergency path sizes from a fresh, factual Gate leg even when
+      // local execution acknowledgement is missing. This is a read projection, not a store.
+      const facts = truthPort.currentInstrument();
+      const leg = latestAccount?.positions.filter(p => p.signedSize !== 0);
+      if (latestAccount?.freshness === 'FRESH' && facts && leg?.length === 1
+          && options.now() >= latestAccount.observedAtMs
+          && options.now() - latestAccount.observedAtMs <= 30_000)
+        return { status: 'open', signedQuantity: leg[0]!.signedSize * facts.contractMultiplier };
+      return positionStore.resolve(exchange, symbol);
+    });
   const planStore = new PositionPlanStore();
   truthPort = createGateIoExecutionTruthPort({
     environment: 'testnet', transport, runBudget: budget, foundation,
     accountId: options.accountId, now: options.now,
     listOmsOrders: () => oms.getStore().list(),
-    attestCurrentRunOrder: (clientText) => client.lookupSubmittedOrder(clientText),
+    attestCurrentRunOrder: (clientText, order) => client.lookupSubmittedOrder(clientText, order?.preparation ? {
+      text: clientText, contract: 'ETH_USDT', price: '0', tif: 'ioc',
+      size: (order.side === 'buy' ? 1 : -1) * order.preparation.venueQuantity,
+      reduceOnly: order.preparation.reduceOnly,
+    } : undefined),
   });
   let started = false;
   let openOmsStatus: string | null = null;
@@ -204,7 +219,7 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
     return captureValue.facts.account.accountState === 'OPEN'
       && factualFillsMatchKernel(captureValue.truth)
       && captureValue.truth.positions.length === 1
-      && captureValue.truth.orders.length === 0
+      && !captureValue.truth.orders.some(o => o.status === 'OPEN' || o.status === 'PARTIALLY_FILLED')
       && captureValue.truth.positions[0]!.side === 'long'
       && local.status === 'open' && local.side === 'long'
       && Math.abs(captureValue.truth.positions[0]!.signedQuantity - local.signedQuantity) < 1e-10;
@@ -216,14 +231,15 @@ export function createGateIoTestnetOmsE2ERunner(options: GateIoG3RunnerOptions):
     return reconcile(local, captureValue.truth).outcome === 'MATCH'
       && factualFillsMatchKernel(captureValue.truth)
       && captureValue.facts.account.accountState === 'FLAT'
-      && captureValue.truth.positions.length === 0 && captureValue.truth.orders.length === 0
+      && captureValue.truth.positions.length === 0
+      && !captureValue.truth.orders.some(o => o.status === 'OPEN' || o.status === 'PARTIALLY_FILLED')
       && positionStore.resolve('gateio', 'ETH/USDT').status === 'flat';
   }
 
   type Capture = NonNullable<Awaited<ReturnType<typeof capture>>>;
   function classifyExposure(value: Capture): 'FACTUAL_FLAT' | 'FACTUAL_NON_FLAT' | 'EXPOSURE_UNKNOWN' {
     const { account, instrument } = value.facts;
-    if (value.truth.orders.length !== 0 || account.identity.accountId !== options.accountId
+    if (value.truth.orders.some(o => o.status === 'OPEN' || o.status === 'PARTIALLY_FILLED') || account.identity.accountId !== options.accountId
         || account.identity.exchange !== 'gateio' || account.freshness !== 'FRESH'
         || instrument.freshness !== 'FRESH') return 'EXPOSURE_UNKNOWN';
     if (account.accountState === 'FLAT' && value.truth.positions.length === 0

@@ -16,7 +16,7 @@
 // adapters are OUT OF SCOPE.
 
 import type { ExchangeId } from '../data/MarketIdentity';
-import type { OmsOrderStatus } from '../oms/oms-types';
+import type { OmsOrderStatus, OrderExecutionObservation } from '../oms/oms-types';
 
 // ─── Identity ────────────────────────────────────────────────────────────────
 
@@ -32,6 +32,8 @@ export interface ReconciliationIdentity {
 // its native truth into these shapes.
 
 export type ExternalOrderStatus =
+  | 'PARTIALLY_FILLED'
+  | 'REJECTED'
   | 'OPEN' // broker holds the order, not yet filled
   | 'FILLED' // broker reports the order filled
   | 'CANCELLED' // broker reports the order cancelled
@@ -79,6 +81,8 @@ export interface ExternalPosition {
 }
 
 export interface ExecutionTruthSnapshot {
+  /** Attributed cumulative observations; OMS owns applying any new delta. */
+  readonly executions?: readonly OrderExecutionObservation[];
   readonly identity: ReconciliationIdentity;
   readonly orders: readonly ExternalOrder[];
   readonly fills: readonly ExternalFill[];
@@ -103,6 +107,8 @@ export interface ExecutionTruthPort {
 // Immutable, read-only projection of recovered local durable state.
 
 export interface LocalOrder {
+  readonly execution?: OrderExecutionObservation;
+  readonly requestedQuantity?: number | null;
   readonly orderId: string;
   readonly intentId: string;
   readonly exchange: ExchangeId;

@@ -9,6 +9,8 @@ import type { ProtectiveContext } from './ProtectiveExecutor';
 import type { PositionPlan } from './position-plan-types';
 import type { HardRiskSnapshot } from '../risk/pretrade-risk-types';
 import type { OmsCore } from '../oms/OmsCore';
+import { quantityEqual } from '../oms/execution-observation';
+import { subtractQuantity } from '../types/decimal-quantity';
 
 export type RuntimeMode = 'replay' | 'live';
 
@@ -116,6 +118,9 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
   }
 
   function onMarketEvent(envelope: any): void {
+    // A tick received while locked stays suppressed even if a terminal callback
+    // re-arms before this deferred handler runs. Only a later NEW tick may submit.
+    const lockedAtReceipt = new Set(submittedIntents);
     queueMicrotask(() => {
       if (mode !== 'live') return;
       const ticker = envelope.payload?.ticker;
@@ -138,8 +143,8 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
       const position = config.positionStore.resolve(exchange as any, symbol);
       if (!position || position.status !== 'open') return;
 
-      // Idempotency: one economic exit per plan incarnation
-      if (submittedIntents.has(plan.planId)) return;
+      // Idempotency: one in-flight protective order per plan incarnation.
+      if (lockedAtReceipt.has(plan.planId) || submittedIntents.has(plan.planId)) return;
 
       const marketSnapshot = config.marketStore?.getSnapshot?.(exchange as any, symbol) as any;
 
@@ -161,6 +166,30 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
         if (omsResult?.status === 'rejected' || omsResult?.status === 'conflict') {
           // Allow future protection retries
           submittedIntents.delete(plan.planId);
+        }
+        if (omsResult?.status === 'cancelled') {
+          // A terminal IOC partial is not submission ambiguity. Re-arm only after the
+          // sole OMS and Kernel prove this order's reduction and the factual residual.
+          // Never submit here: a NEW market event must traverse protection + Risk + OMS.
+          try {
+            if (typeof oms.getStore !== 'function' || !omsResult.order?.orderId) return;
+            const order = oms.getStore().get(omsResult.order.orderId);
+            if (!order || order.exchange !== exchange || order.symbol !== symbol) return;
+            const filled = order.execution?.cumulativeFilledQuantity;
+            const residual = config.positionStore.resolve(order.exchange, symbol);
+            if (order.status === 'CANCELLED' && order.execution?.status === 'CANCELLED'
+                && order.action === 'close'
+                && order.preparation?.reduceOnly && typeof filled === 'number'
+                && Number.isFinite(filled) && filled > 0 && filled < Math.abs(position.signedQuantity)
+                && residual.status === 'open' && residual.side === position.side
+                && residual.snapshot !== null && position.snapshot !== null
+                && residual.snapshot.positionVersion > position.snapshot.positionVersion
+                && quantityEqual(Math.abs(residual.signedQuantity),
+                  subtractQuantity(Math.abs(position.signedQuantity), filled))
+                && planStore.getActive(exchange, symbol)?.planId === plan.planId) {
+              submittedIntents.delete(plan.planId);
+            }
+          } catch { /* Unprovable cancellation/projection keeps the lock, never retries. */ }
         }
         // submission_unknown: leave submitted state - NO retry
       }).catch(() => {
