@@ -482,6 +482,9 @@ function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
   m.set('position.baseline.confirmed', [spine.positionStore]);
   m.set('execution.fill.confirmed', [spine.positionStore, spine.oms.getStore()]);
   m.set('market.ticker.updated', [spine.marketStore]);
+  // Research remains journal evidence, not market/position truth. This existing projector
+  // explicitly treats research as irrelevant, preserving its digest and all readiness gates.
+  m.set('research.bias.updated', [spine.marketStore]);
   m.set('policy.snapshot.published', [spine.policyStore]);
   m.set('order.created', [spine.oms.getStore()]);
   m.set('order.submitted', [spine.oms.getStore()]);

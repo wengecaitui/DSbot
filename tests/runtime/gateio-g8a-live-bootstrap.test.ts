@@ -7,7 +7,9 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { createKernelPositionStateStore } from '../../src/kernel/KernelPositionStateStore';
 import { createKernelPolicyStore } from '../../src/kernel/KernelPolicyStore';
-import { createProductionSpine, type ProductionSpine } from '../../src/position/ProductionSpine';
+import { createKernelMarketStateStore } from '../../src/kernel/KernelMarketStateStore';
+import { createTradingKernel } from '../../src/kernel/TradingKernel';
+import { createProductionSpine, recoverAndStart, type ProductionSpine } from '../../src/position/ProductionSpine';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
 import { recoverFromJournal } from '../../src/recovery/RecoveryManager';
 import type { ProjectorMap } from '../../src/recovery/ReplayCoordinator';
@@ -20,15 +22,30 @@ import { GateIoG3RunBudget, GATEIO_G3_LIMITS } from '../../src/runtime/gateio/Ga
 import { establishVerifiedExternalFlatBaseline } from '../../src/runtime/gateio/establishVerifiedExternalFlatBaseline';
 import { establishVerifiedLiveFlatBaseline, verifyGateIoLiveFlatBaseline } from '../../src/runtime/gateio/establishVerifiedLiveFlatBaseline';
 import { bootstrapGateIoLiveJournal } from '../../src/runtime/gateio/GateIoLiveBootstrap';
+import { runGateIoProductionLiveCanary } from '../../src/runtime/gateio/GateIoProductionLiveCanary';
 import type { CompiledPolicy } from '../../src/types/policy-snapshot';
+import type { MarketBiasReportFull } from '../../src/types/market-bias';
 
 const NOW = 1_800_000_000_000;
 const ACCOUNT = 'g8a-offline-account';
 const LIFETIME = 3_600_000;
 
-// Operator-supplied TEST policy only. No production launcher constructs these values.
-function operatorPolicy(): CompiledPolicy {
-  return { exchange: 'gateio', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
+// Explicit TEST inputs only. Production bootstrap neither generates content nor computes IDs.
+function operatorResearchReport(): MarketBiasReportFull {
+  return { exchange: 'gateio', timestamp: NOW, updatedAt: NOW, globalBias: 'neutral', confidence: 60,
+    assets: [], globalLongShortRatio: 1, globalVolatility: 30, fearGreedIndex: 50,
+    fundingStatus: 'neutral', whitelist: ['ETH/USDT'], blacklist: [], riskEvents: [],
+    meta: { source: 'manual', modelVersion: 'offline-research-fixture', generationTimeMs: 1,
+      inputSummary: 'Explicit offline research for provenance regression' } };
+}
+function operatorPolicy(report: MarketBiasReportFull, receivedAt: number): CompiledPolicy {
+  // The existing Kernel, not a copied hash algorithm, supplies the upstream fixture identity.
+  const upstream = createTradingKernel({ exchange: 'gateio', clock: { now: () => NOW } });
+  upstream.publish('position.baseline.confirmed', { baseline: { exchange: 'gateio', symbol: 'ETH/USDT',
+    side: 'flat', signedQuantity: 0, averageEntryPrice: 0 } });
+  const research = upstream.publish('research.bias.updated', { report, receivedAt }).envelope;
+  return { exchange: 'gateio', sourceResearchEventId: research.kernelEventId,
+    sourceResearchSequence: research.kernelLogicalSequence,
     compilerVersion: 'explicit-operator-fixture', compiledAt: NOW, effectiveAt: NOW, expiresAt: NOW + LIFETIME,
     allowNewEntries: true, allowedSymbols: ['ETH/USDT'], blockedSymbols: [],
     allowedStrategyIds: ['approved-strategy'], blockedStrategyIds: [], maxPositionMultiplier: 0.25,
@@ -82,7 +99,8 @@ async function harness(options: {
       order_price_round: '0.01', mark_price_round: '0.01', leverage_min: '1', leverage_max: '100',
       maker_fee_rate: '0', taker_fee_rate: '0' });
     if (path === E.TICKERS) return response([{ contract: 'ETH_USDT', last: '2000', mark_price: '2000',
-      index_price: '2000', funding_rate: '0' }]);
+      index_price: '2000', funding_rate: '0', highest_bid: '1999', lowest_ask: '2001',
+      high_24h: '2100', low_24h: '1900', volume_24h: '100' }]);
     assert.fail('Unexpected offline endpoint');
   };
   const transport = environment === 'live' ? createGateIoReadTransport(fetchImpl, budget)
@@ -105,9 +123,13 @@ async function harness(options: {
   const truth = await port.acquireTruth();
   const baseline = { truthPort: port, truth, kernel: spine.kernel, positionStore: spine.positionStore,
     oms: spine.oms, accountId, symbol: 'ETH/USDT', now };
+  const researchReport = operatorResearchReport();
+  const researchReceivedAt = NOW;
   const input = { spine, journal, journalPath, truthPort: port, truth, accountId, now,
-    policy: operatorPolicy(), policyMaxLifetimeMs: LIFETIME };
+    researchReport, researchReceivedAt,
+    policy: operatorPolicy(researchReport, researchReceivedAt), policyMaxLifetimeMs: LIFETIME };
   return { spine, port, truth, baseline, input, journal, journalPath, requests,
+    fetchImpl,
     setTime(value: number) { time = value; }, changeHistoricalTrade() { historicalPrice = '2001'; },
     addExternalTrade() { newExternalTrade = true; } };
 }
@@ -227,23 +249,28 @@ describe('Gate G8A LIVE-only factual baseline', () => {
 });
 
 describe('Gate G8A explicit policy and durable one-shot journal', () => {
-  it('two real Kernel events only; integrity reopen and RecoveryManager replay actual canonical stores', async () => {
+  it('three real Kernel events only; integrity reopen and RecoveryManager replay actual canonical stores', async () => {
     const h = await harness();
     const receipt = bootstrapGateIoLiveJournal(h.input);
-    assert.equal(receipt.eventCount, 2); assert.equal(receipt.integrityVerified, true);
+    assert.equal(receipt.eventCount, 3); assert.equal(receipt.integrityVerified, true);
     assert.equal(receipt.policySynthesized, false); assert.equal(receipt.liveReady, false);
     assert.equal(receipt.executionAuthority, false);
     const reopened = createFileEventJournal(h.journalPath);
     const events = reopened.readFromLogicalSequence(1);
-    assert.deepEqual(events.map(e => e.type), ['position.baseline.confirmed', 'policy.snapshot.published']);
-    assert.deepEqual(events[1]!.payload, { policy: h.input.policy });
+    assert.deepEqual(events.map(e => e.type), ['position.baseline.confirmed', 'research.bias.updated', 'policy.snapshot.published']);
+    assert.deepEqual(events[1]!.payload, { report: h.input.researchReport, receivedAt: h.input.researchReceivedAt });
+    assert.deepEqual(events[2]!.payload, { policy: h.input.policy });
     const positions = createKernelPositionStateStore();
     const policies = createKernelPolicyStore({ clock: { now: () => NOW }, maxLifetimeMs: LIFETIME, maxVersionsPerExchange: 10 });
+    const market = createKernelMarketStateStore({ clock: { now: () => NOW }, staleAfterMs: 30_000 });
+    const marketBefore = market.digest();
     const projectors: ProjectorMap = new Map([
       ['position.baseline.confirmed', [positions]], ['policy.snapshot.published', [policies]],
+      ['research.bias.updated', [market]],
     ]);
     const recovered = recoverFromJournal(reopened, projectors);
-    assert.equal(recovered.recoveryVerified, true); assert.equal(recovered.replayReport.eventsReplayed, 2);
+    assert.equal(recovered.recoveryVerified, true); assert.equal(recovered.replayReport.eventsReplayed, 3);
+    assert.equal(market.digest(), marketBefore); // Research is not a market observation.
     assert.equal(positions.resolve('gateio', 'ETH/USDT').status, 'flat');
     assert.equal(policies.resolve('gateio', 'ETH/USDT').status, 'active');
     assert.equal(policies.resolve('gateio', 'ETH/USDT').allowNewEntries, true);
@@ -251,7 +278,7 @@ describe('Gate G8A explicit policy and durable one-shot journal', () => {
     assert.equal(h.spine.recoveryVerified, false); // This helper does not arm the Spine.
     assert.equal(h.spine.reconciliationVerified, false);
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /JOURNAL_DENIED/);
-    assert.equal(createFileEventJournal(h.journalPath).eventCount, 2);
+    assert.equal(createFileEventJournal(h.journalPath).eventCount, 3);
     for (const forbidden of ['G8A_OFFLINE_FIXTURE_KEY', 'G8A_OFFLINE_FIXTURE_SECRET', 'SIGN', 'order.created', 'execution.fill.confirmed'])
       assert.equal(readFileSync(h.journalPath, 'utf8').includes(forbidden), false);
   });
@@ -260,7 +287,7 @@ describe('Gate G8A explicit policy and durable one-shot journal', () => {
     future: { effectiveAt: NOW + 1 }, denied: { allowNewEntries: false }, zero: { maxPositionMultiplier: 0 },
     nan: { maxPositionMultiplier: NaN }, infinity: { maxPositionMultiplier: Infinity },
     wrongScope: { allowedSymbols: ['BTC/USDT'] }, blockedScope: { allowedSymbols: [], blockedSymbols: ['ETH/USDT'] },
-    incompatibleResearchSequence: { sourceResearchSequence: 2 },
+    incompatibleResearchSequence: { sourceResearchSequence: 3 },
     malformedResearchId: { sourceResearchEventId: 'fake' },
     symbolRuleDenied: { symbolRules: { 'ETH/USDT': { allowNewEntries: false, maxPositionMultiplier: 1,
       directionBias: 'neutral', riskLevel: 'low', allowedStrategyIds: [], blockedStrategyIds: [], reasonCodes: [] } } },
@@ -279,7 +306,7 @@ describe('Gate G8A explicit policy and durable one-shot journal', () => {
     assert.throws(() => bootstrapGateIoLiveJournal({ ...h.input, journalPath: h.journalPath + '.other' }), /JOURNAL_DENIED/);
     writeFileSync(h.journalPath, '');
     bootstrapGateIoLiveJournal(h.input);
-    assert.equal(createFileEventJournal(h.journalPath).eventCount, 2);
+    assert.equal(createFileEventJournal(h.journalPath).eventCount, 3);
   });
   it('nonempty on-disk journal cannot hide behind empty cached journal', async () => {
     const h = await harness(); writeFileSync(h.journalPath, 'unrelated-existing-data');
@@ -299,14 +326,14 @@ describe('Gate G8A explicit policy and durable one-shot journal', () => {
     const h = await harness();
     h.spine.kernel.subscribe('policy.snapshot.published', () => { throw new Error('fixture projection failure'); });
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /POLICY_NOT_APPLIED/);
-    assert.equal(h.journal.eventCount, 2);
+    assert.equal(h.journal.eventCount, 3);
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /JOURNAL_DENIED/);
     assert.equal(h.spine.reconciliationVerified, false);
   });
   it('Kernel still enforces its own policy validator; no bypass on configuration mismatch', async () => {
     const h = await harness({ kernelPolicyLifetime: 1000 });
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /POLICY_INVALID/);
-    assert.equal(h.journal.eventCount, 1);
+    assert.equal(h.journal.eventCount, 2);
     assert.equal(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /JOURNAL_DENIED/);
   });
@@ -315,7 +342,7 @@ describe('Gate G8A explicit policy and durable one-shot journal', () => {
     h.spine.kernel.subscribe('policy.snapshot.published', () => {
       const lines = readFileSync(h.journalPath, 'utf8').trim().split('\n');
       const entry = JSON.parse(lines[0]!); entry.checksum = '0'.repeat(64);
-      writeFileSync(h.journalPath, JSON.stringify(entry) + '\n' + lines[1] + '\n');
+      writeFileSync(h.journalPath, [JSON.stringify(entry), ...lines.slice(1)].join('\n') + '\n');
     });
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /JOURNAL_CHECKSUM_MISMATCH/);
   });
@@ -327,5 +354,158 @@ describe('Gate G8A explicit policy and durable one-shot journal', () => {
     assert.notEqual(d, verifyGateIoLiveFlatBaseline(dual.baseline).digest);
     assert.notEqual(d, verifyGateIoLiveFlatBaseline(later.baseline).digest);
     assert.equal(h.journal.eventCount, 0); // Checking a digest never publishes a baseline.
+  });
+});
+
+describe('Gate G8A R1 journal-backed research provenance', () => {
+  it('policy identifies the actual seq2 research envelope, never the seq1 baseline', async () => {
+    const h = await harness();
+    const suppliedResearch = structuredClone(h.input.researchReport);
+    const suppliedPolicy = structuredClone(h.input.policy);
+    const receipt = bootstrapGateIoLiveJournal(h.input);
+    const journal = createFileEventJournal(h.journalPath);
+    const [baseline, research, policyEvent] = journal.readFromLogicalSequence(1);
+    assert.deepEqual(journal.readFromLogicalSequence(1).map(e => [e.kernelLogicalSequence, e.type]), [
+      [1, 'position.baseline.confirmed'], [2, 'research.bias.updated'], [3, 'policy.snapshot.published'],
+    ]);
+    assert.equal(research!.kernelEventId, suppliedPolicy.sourceResearchEventId);
+    assert.equal(research!.kernelLogicalSequence, suppliedPolicy.sourceResearchSequence);
+    assert.notEqual(baseline!.kernelEventId, suppliedPolicy.sourceResearchEventId);
+    assert.equal(journal.getByEventId(suppliedPolicy.sourceResearchEventId)!.type, 'research.bias.updated');
+    assert.equal(receipt.researchEventId, research!.kernelEventId);
+    assert.equal(receipt.researchSequence, 2);
+    assert.equal(receipt.researchSynthesized, false);
+    assert.equal(receipt.policySynthesized, false);
+    assert.deepEqual(research!.payload, { report: suppliedResearch, receivedAt: NOW });
+    assert.deepEqual(policyEvent!.payload, { policy: suppliedPolicy });
+    assert.deepEqual(h.input.researchReport, suppliedResearch);
+    assert.deepEqual(h.input.policy, suppliedPolicy);
+    assert.equal(journal.eventCount, 3);
+  });
+
+  for (const which of ['fake ID', 'wrong sequence', 'baseline ID and sequence', 'baseline ID at seq2',
+    'different research content', 'different research receipt time'] as const)
+    it(`${which}: fail closed, preserve partial journal and never rewrite policy`, async () => {
+      const h = await harness();
+      let policy = { ...h.input.policy };
+      if (which === 'fake ID') policy.sourceResearchEventId = 'f'.repeat(64);
+      if (which === 'wrong sequence') policy.sourceResearchSequence = 1;
+      if (which.startsWith('baseline ID')) {
+        const reference = createTradingKernel({ exchange: 'gateio', clock: { now: () => NOW } });
+        const baseline = reference.publish('position.baseline.confirmed', {
+          baseline: { exchange: 'gateio', symbol: 'ETH/USDT', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 },
+          evidence: verifyGateIoLiveFlatBaseline(h.baseline),
+        }).envelope;
+        policy.sourceResearchEventId = baseline.kernelEventId;
+        if (which === 'baseline ID and sequence') policy.sourceResearchSequence = baseline.kernelLogicalSequence;
+      }
+      const researchReport = which === 'different research content'
+        ? { ...h.input.researchReport, confidence: 61 } : h.input.researchReport;
+      const researchReceivedAt = which === 'different research receipt time' ? NOW - 1 : NOW;
+      const before = structuredClone(policy);
+      const input = { ...h.input, researchReport, researchReceivedAt, policy };
+      assert.throws(() => bootstrapGateIoLiveJournal(input), /POLICY_PROVENANCE_MISMATCH/);
+      assert.deepEqual(policy, before);
+      const partial = createFileEventJournal(h.journalPath);
+      assert.deepEqual(partial.readFromLogicalSequence(1).map(e => e.type),
+        ['position.baseline.confirmed', 'research.bias.updated']);
+      if (which.startsWith('baseline ID'))
+        assert.equal(partial.readFromLogicalSequence(1)[0]!.kernelEventId, policy.sourceResearchEventId);
+      assert.equal(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
+      assert.equal(h.spine.oms.getStore().list().length, 0);
+      assert.equal(h.spine.recoveryVerified, false);
+      assert.equal(h.spine.reconciliationVerified, false);
+      const partialBytes = readFileSync(h.journalPath, 'utf8');
+      assert.throws(() => bootstrapGateIoLiveJournal(input), /JOURNAL_DENIED/);
+      assert.equal(readFileSync(h.journalPath, 'utf8'), partialBytes);
+    });
+
+  for (const [name, report] of [['missing', undefined], ['null', null], ['empty', {}],
+    ['invalid exchange', { exchange: 'not-a-venue' }], ['wrong venue', { ...operatorResearchReport(), exchange: 'binance' }]] as const)
+    it(`${name} explicit research denied by the existing payload contract before file creation`, async () => {
+      const h = await harness();
+      assert.throws(() => bootstrapGateIoLiveJournal({ ...h.input, researchReport: report as MarketBiasReportFull }), /RESEARCH_DENIED/);
+      assert.equal(h.journal.eventCount, 0); assert.equal(existsSync(h.journalPath), false);
+    });
+  for (const researchReceivedAt of [undefined, NaN, Infinity, -1, NOW + 1])
+    it(`invalid/missing research receipt time ${researchReceivedAt} is not defaulted`, async () => {
+      const h = await harness();
+      assert.throws(() => bootstrapGateIoLiveJournal({ ...h.input, researchReceivedAt: researchReceivedAt as number }), /RESEARCH_DENIED/);
+      assert.equal(h.journal.eventCount, 0);
+    });
+  it('non-JSON research is rejected by the real Kernel, leaving no policy publication', async () => {
+    const h = await harness();
+    assert.throws(() => bootstrapGateIoLiveJournal({ ...h.input,
+      researchReport: { ...h.input.researchReport, confidence: NaN } }), /CANONICAL_NON_FINITE/);
+    assert.equal(h.journal.eventCount, 1);
+    assert.equal(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
+  });
+  it('research subscriber failure stops before policy and preserves factual partial evidence', async () => {
+    const h = await harness();
+    h.spine.kernel.subscribe('research.bias.updated', () => { throw new Error('offline projector failure'); });
+    assert.throws(() => bootstrapGateIoLiveJournal(h.input), /RESEARCH_NOT_APPLIED/);
+    assert.equal(createFileEventJournal(h.journalPath).eventCount, 2);
+    assert.equal(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
+  });
+  it('reentrant extra research event cannot shift the authorized seq3 policy publication', async () => {
+    const h = await harness();
+    h.spine.kernel.subscribe('research.bias.updated', e => {
+      if (e.kernelLogicalSequence === 2) h.spine.kernel.publish('research.bias.updated',
+        { report: { ...h.input.researchReport, confidence: 62 }, receivedAt: NOW });
+    });
+    assert.throws(() => bootstrapGateIoLiveJournal(h.input), /RESEARCH_NOT_APPLIED/);
+    assert.equal(h.journal.eventCount, 3);
+    assert.equal(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
+  });
+  it('publication callback cannot silently repair the already supplied policy provenance', async () => {
+    const h = await harness();
+    const policy = { ...h.input.policy, sourceResearchEventId: 'f'.repeat(64) };
+    h.spine.kernel.subscribe('research.bias.updated', e => { policy.sourceResearchEventId = e.kernelEventId; });
+    assert.throws(() => bootstrapGateIoLiveJournal({ ...h.input, policy }), /POLICY_PROVENANCE_MISMATCH/);
+    assert.equal(h.journal.eventCount, 2);
+  });
+  it('real ProductionSpine recovery preserves research evidence without market or execution authority', async () => {
+    const h = await harness(); bootstrapGateIoLiveJournal(h.input);
+    const reopened = createFileEventJournal(h.journalPath);
+    const bytes = readFileSync(h.journalPath, 'utf8');
+    const restored = await createProductionSpine({ exchange: 'gateio', accountId: ACCOUNT,
+      journal: reopened, clock: { now: () => NOW }, policyMaxLifetimeMs: LIFETIME,
+      hardRisk: () => { assert.fail('Recovery cannot evaluate execution risk'); },
+      execution: { mode: 'limited-live', truthPort: h.port,
+        adapter: { submit: async () => { assert.fail('Recovery cannot submit orders'); } } } });
+    const marketDigest = restored.marketStore.digest();
+    const recovery = await recoverAndStart(restored, reopened);
+    assert.equal(recovery.recoveryVerified, true, JSON.stringify(recovery));
+    assert.equal(recovery.replayReport.eventsReplayed, 3);
+    assert.equal(restored.positionStore.resolve('gateio', 'ETH/USDT').status, 'flat');
+    assert.equal(restored.policyStore.resolve('gateio', 'ETH/USDT').status, 'active');
+    assert.equal(restored.policyStore.resolve('gateio', 'ETH/USDT').allowNewEntries, true);
+    assert.equal(restored.marketStore.digest(), marketDigest);
+    assert.equal(restored.reconciliationVerified, false);
+    assert.equal(restored.oms.getStore().list().length, 0);
+    assert.equal(readFileSync(h.journalPath, 'utf8'), bytes);
+  });
+  it('G6 accepts the three-event bootstrap journal through formal offline recovery, without an order', async () => {
+    const h = await harness(); bootstrapGateIoLiveJournal(h.input);
+    const bootstrapEvents = createFileEventJournal(h.journalPath).readFromLogicalSequence(1);
+    assert.equal(bootstrapEvents.length, 3);
+    const head = 'c'.repeat(40);
+    const receipt = await runGateIoProductionLiveCanary({ execute: true, recoveryOnly: true,
+      expectedHead: head, environment: 'live', symbol: 'ETH_USDT', accountId: ACCOUNT,
+      journalPath: h.journalPath, maxNotionalUsd: 10,
+      permissions: { READ: true, TRADE: true, WITHDRAW: false, ROTATED: true } }, {
+      inspectRepository: async () => ({ head, clean: true }), now: () => NOW,
+      credentialProvider: async () => ({ apiKey: 'R1_OFFLINE_FIXTURE_KEY', secretKey: 'R1_OFFLINE_FIXTURE_SECRET' }),
+      fetchImpl: h.fetchImpl, // Throws if anything except GET reaches the offline wire fixture.
+    });
+    assert.equal(receipt.status, 'RECOVERY_FLAT', JSON.stringify(receipt));
+    assert.equal(receipt.baselineVerified, true);
+    assert.equal(receipt.ownerSpineCreations, 1);
+    assert.equal(receipt.finalExposure, 'FACTUAL_FLAT');
+    assert.equal(receipt.budget.totalUsed, 0);
+    const afterRecovery = createFileEventJournal(h.journalPath).readFromLogicalSequence(1);
+    assert.deepEqual(afterRecovery.slice(0, 3), bootstrapEvents);
+    // Owner startup ingests a factual fixture ticker; bootstrap itself did not manufacture it.
+    assert.ok(afterRecovery.slice(3).every(e => e.type === 'market.ticker.updated'));
   });
 });
