@@ -174,7 +174,9 @@ describe('Gate.io L0 read foundation', () => {
       authenticatedRequest(GATEIO_READ_ENDPOINTS.ACCOUNTS),
     );
     const headers = fake.captured[0]?.init.headers as Readonly<Record<string, string>>;
-    assert.deepEqual(Object.keys(headers).sort(), ['Accept', 'Content-Type', 'KEY', 'SIGN', 'Timestamp']);
+    assert.deepEqual(Object.keys(headers).sort(),
+      ['Accept', 'Content-Type', 'KEY', 'SIGN', 'Timestamp', 'X-Gate-Size-Decimal']);
+    assert.equal(headers['X-Gate-Size-Decimal'], '1');
     assert.equal(headers.KEY, FIXTURE_API_KEY);
     assert.equal(headers.Timestamp, FIXTURE_TIMESTAMP);
     assert.match(headers.SIGN ?? '', /^[0-9a-f]{128}$/);
