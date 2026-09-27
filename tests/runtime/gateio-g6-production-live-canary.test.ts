@@ -11,6 +11,11 @@ import { runGateIoProductionLiveCanary, GATEIO_LIVE_CANARY_LIMITS,
   type GateIoLiveCanaryOptions } from '../../src/runtime/gateio/GateIoProductionLiveCanary';
 import { parseGateIoLiveCanaryArguments } from '../../src/bin/gateio-production-live-canary';
 import { GATEIO_READ_ENDPOINTS as E } from '../../src/runtime/gateio/GateIoReadContracts';
+import { createApplicationProductionRuntimeOwner } from '../../src/runtime/production/ProductionRuntimeOwner';
+import { activateLiveReadiness, executeThroughGateway } from '../../src/position/ProductionSpine';
+import { createTradeIntent } from '../../src/types/trade-intent';
+import { GateIoG3RunBudget } from '../../src/runtime/gateio/GateIoG3RunBudget';
+import { GateIoCanaryCredentialError } from '../../src/runtime/gateio/GateIoCanaryCredentialFile';
 
 const NOW = 1_800_000_000_000;
 const HEAD = 'a'.repeat(40);
@@ -20,7 +25,8 @@ let sequence = 0;
 function fixture(setup: { rejectOpen?: boolean; rejectClose?: boolean; rejectCleanup?: boolean;
   truthFailure?: 'once' | 'always'; unknown?: boolean; pending?: boolean; baselineSource?: string;
   partial?: 'open' | 'close'; missingPolicy?: boolean; missingBaseline?: boolean;
-  initialExposure?: number; externalTrade?: boolean } = {}) {
+  initialExposure?: number; externalTrade?: boolean; minOrderSize?: number; decimalSizeEnabled?: boolean;
+  rejectRecovery?: boolean; openOrderConflict?: boolean } = {}) {
   const accountId = 'g6-offline-' + ++sequence;
   const journalPath = join(mkdtempSync(join(tmpdir(), 'gate-g6-')), 'events.jsonl');
   const journal = createFileEventJournal(journalPath);
@@ -65,6 +71,7 @@ function fixture(setup: { rejectOpen?: boolean; rejectClose?: boolean; rejectCle
         if (posts === 1 && setup.rejectOpen) return response({ label: 'ORDER_REJECTED', message: SECRET }, 400);
         if ((posts === 2 && setup.rejectClose) || (posts === 3 && setup.rejectCleanup))
           return response({ label: 'ORDER_REJECTED', message: SECRET }, 400);
+        if (posts >= 4 && setup.rejectRecovery) return response({ label: 'ORDER_REJECTED', message: SECRET }, 400);
         const partial = (setup.partial === 'open' && posts === 1) || (setup.partial === 'close' && posts === 2);
         const filled = partial ? body.size / 2 : body.size;
         exposure = Number((exposure + filled).toFixed(8));
@@ -90,14 +97,18 @@ function fixture(setup: { rejectOpen?: boolean; rejectClose?: boolean; rejectCle
         value: String(exposure * 2), entry_price: exposure ? '2000' : null,
         mark_price: exposure ? '2000' : null, update_time: String(NOW / 1000),
       }]);
-      if (path === E.OPEN_ORDERS) return response([]);
+      if (path === E.OPEN_ORDERS) return response(setup.openOrderConflict && posts > 0 ? [{
+        id: '99999', text: 't-external-open-order', contract: 'ETH_USDT', size: 1, left: 1,
+        price: '0', fill_price: '0', tif: 'ioc', status: 'open', is_reduce_only: false,
+        is_close: false, create_time: NOW / 1000, update_time: NOW / 1000,
+      }] : []);
       if (path === E.MY_TRADES) return response(setup.externalTrade && posts > 0 ? [{
         id: '9999', order_id: '8888', contract: 'ETH_USDT', size: '0.1', close_size: '0',
         price: '2000', text: 't-unrelated', fee: '0', point_fee: '0', role: 'taker', create_time: String(NOW / 1000),
       }] : []); // History lag on both sides must retain G3H semantics.
       if (path === E.CONTRACT) return response({ name: 'ETH_USDT', status: 'trading', in_delisting: false,
-        quanto_multiplier: '0.001', order_size_min: setup.partial ? '2' : '0.1',
-        order_size_max: '10000', enable_decimal: !setup.partial, order_price_round: '0.01', mark_price_round: '0.01',
+        quanto_multiplier: '0.001', order_size_min: String(setup.minOrderSize ?? (setup.partial ? 2 : 0.1)),
+        order_size_max: '10000', enable_decimal: setup.decimalSizeEnabled ?? !setup.partial, order_price_round: '0.01', mark_price_round: '0.01',
         leverage_min: '1', leverage_max: '100', maker_fee_rate: '0', taker_fee_rate: '0' });
       if (path === E.TICKERS) return response([{ contract: 'ETH_USDT', last: '2000', mark_price: '2000',
         index_price: '2000', funding_rate: '0', highest_bid: '1999', lowest_ask: '2001',
@@ -108,6 +119,30 @@ function fixture(setup: { rejectOpen?: boolean; rejectClose?: boolean; rejectCle
   return { options, host, calls, get posts() { return posts; }, get exposure() { return exposure; },
     get credentialReads() { return credentialReads; }, get repositoryReads() { return repositoryReads; },
     events() { return readFileSync(journalPath, 'utf8').trim().split('\n').map(s => JSON.parse(s).envelope); } };
+}
+
+/** Build a real pre-existing partial order on the SAME Owner/Spine/OMS, not synthetic fill events.
+ * A minimum=quantum canary OPEN has no positive sub-quantum partial on the proven lattice.
+ * This larger legitimate order proves recovery of partial exposure in the allowed configuration.
+ */
+async function seedPartialOpen(f: ReturnType<typeof fixture>) {
+  const owner = createApplicationProductionRuntimeOwner({ enabled: true, mode: 'limited-live',
+    exchange: 'gateio', environment: 'live', accountId: f.options.accountId!, journalPath: f.options.journalPath!,
+    hardRisk: { enabled: true, locked: false, totalCapitalUsd: 10, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: 10 },
+    market: { entries: [{ symbol: 'ETH/USDT', exchangeSymbol: 'ETH_USDT', intervals: ['1m'], ticker: true }], staleAfterMs: 30_000 },
+  }, { gateIo: { environment: 'live', accountId: f.options.accountId!, credential: { apiKey: KEY, secretKey: SECRET },
+    fetchImpl: f.host.fetchImpl, now: f.host.now, runBudget: GateIoG3RunBudget.create(GATEIO_LIVE_CANARY_LIMITS) } });
+  try {
+    await owner.start(); const spine = owner.authoritativeSpine()!;
+    await activateLiveReadiness(spine);
+    const intent = createTradeIntent({ exchange: 'gateio', symbol: 'ETH/USDT', direction: 'long',
+      positionUsd: 4, source: 'offline-recovery-fixture', reason: 'existing-partial-order', createdAt: NOW, biasUpdatedAt: NOW });
+    await executeThroughGateway(spine, intent, 'open', 4);
+    assert.equal(spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity, 0.001);
+    const order = spine.oms.getStore().list()[0]!;
+    assert.equal(order.requestedQuantity, 0.002); assert.equal(order.cumulativeFilledQuantity, 0.001);
+    return order;
+  } finally { await owner.stop(); }
 }
 
 describe('Gate G6 production one-shot arming', () => {
@@ -121,8 +156,9 @@ describe('Gate G6 production one-shot arming', () => {
     ['no trade', { permissions: { READ: true, TRADE: false, WITHDRAW: false, ROTATED: true } }],
     ['no journal', { journalPath: undefined }], ['no notional cap', { maxNotionalUsd: undefined }],
   ];
-  for (const [name, patch] of denials) it(name + ': no credential load or network', async () => {
-    const f = fixture(); const r = await runGateIoProductionLiveCanary({ ...f.options, ...patch }, f.host);
+  for (const recoveryOnly of [false, true]) for (const [name, patch] of denials)
+    it(`${recoveryOnly ? 'recovery' : 'normal'} ${name}: no credential load or network`, async () => {
+    const f = fixture(); const r = await runGateIoProductionLiveCanary({ ...f.options, recoveryOnly, ...patch }, f.host);
     assert.equal(r.status, 'STOP'); assert.equal(r.budget.networkUsed, 0);
     assert.equal(f.credentialReads, 0); assert.equal(f.calls.length, 0);
     if (name === 'no execute') assert.equal(f.repositoryReads, 0);
@@ -144,6 +180,13 @@ describe('Gate G6 production one-shot arming', () => {
     assert.equal(r.reason, 'CREDENTIAL_UNAVAILABLE'); assert.equal(f.calls.length, 0);
     assert.equal(JSON.stringify(r).includes(SECRET), false);
   });
+  it('typed containment denial survives without path/secret leakage or network', async () => {
+    const f = fixture(); const r = await runGateIoProductionLiveCanary(f.options, { ...f.host,
+      credentialProvider: async () => { throw new GateIoCanaryCredentialError('CREDENTIAL_INSIDE_GIT_WORKTREE'); } });
+    assert.equal(r.reason, 'CREDENTIAL_INSIDE_GIT_WORKTREE'); assert.equal(f.calls.length, 0);
+    for (const forbidden of [KEY, SECRET, 'SIGN', 'apiKey', 'secretKey', 'headers', 'raw body', f.options.journalPath!])
+      assert.equal((JSON.stringify(r) + JSON.stringify(f.events())).includes(forbidden), false);
+  });
   it('TestNet journal is not a production baseline; stops before credential loading', async () => {
     const f = fixture({ baselineSource: 'gateio-testnet-read:capture-1' });
     const r = await runGateIoProductionLiveCanary(f.options, f.host);
@@ -158,6 +201,9 @@ describe('Gate G6 production one-shot arming', () => {
   });
   it('CLI rejects unknown/duplicate flags and requires literal withdraw=false', () => {
     assert.throws(() => parseGateIoLiveCanaryArguments(['--execute', '--execute']));
+    assert.throws(() => parseGateIoLiveCanaryArguments(['--recovery-only', '--recovery-only']));
+    assert.equal(parseGateIoLiveCanaryArguments(['--recovery-only']).options.execute, false);
+    assert.equal(parseGateIoLiveCanaryArguments(['--execute', '--recovery-only']).options.recoveryOnly, true);
     assert.throws(() => parseGateIoLiveCanaryArguments(['--secret=do-not-echo']));
     assert.equal(parseGateIoLiveCanaryArguments([]).options.permissions!.WITHDRAW, true);
     assert.equal(parseGateIoLiveCanaryArguments(['--permission-withdraw=false']).options.permissions!.WITHDRAW, false);
@@ -226,23 +272,18 @@ describe('Gate G6 formal production path (offline injected wire)', () => {
     assert.ok(f.calls.some(c => c.path.startsWith(E.OPEN_ORDERS + '/')));
     assert.equal(r.cleanupAttempted, false); assert.equal(r.postRetryCount, 0);
   });
-  for (const partial of ['open', 'close'] as const) it('partial ' + partial + ' retains cumulative factual residual', async () => {
+  for (const partial of ['open', 'close'] as const) it('G6R1 rejects minimum=2 before possible partial ' + partial, async () => {
     const f = fixture({ partial }); const r = await runGateIoProductionLiveCanary(f.options, f.host);
-    assert.equal(r.status, 'STOP', JSON.stringify(r)); assert.equal(r.finalExposure, 'FACTUAL_NON_FLAT');
-    const order = partial === 'open' ? r.open : r.close;
-    assert.equal(order?.status, 'CANCELLED'); assert.equal(order?.requestedQuantity, 0.002);
-    assert.equal(order?.cumulativeFilledQuantity, 0.001); assert.equal(order?.remainingQuantity, 0.001);
-    assert.equal(f.exposure, 1);
-    // Residual below factual minimum is not enlarged to make cleanup "pass".
-    assert.equal(f.posts, partial === 'open' ? 1 : 2);
-    const fills = f.events().filter(e => e.type === 'execution.fill.confirmed');
-    assert.equal(fills.length, partial === 'open' ? 1 : 2);
+    assert.equal(r.status, 'STOP', JSON.stringify(r)); assert.equal(r.reason, 'CANARY_PARTIAL_RESIDUAL_NOT_CLOSEABLE');
+    assert.equal(f.posts, 0); assert.equal(r.budget.totalUsed, 0); assert.equal(f.exposure, 0);
+    assert.equal(r.open, null); assert.ok(f.calls.some(c => c.path === E.CONTRACT));
+    assert.equal(f.events().filter(e => e.type === 'order.created').length, 0);
   });
   it('nonterminal partial cannot start a CLOSE or cleanup while the original order remains active', async () => {
-    const f = fixture({ partial: 'open', pending: true });
-    const r = await runGateIoProductionLiveCanary(f.options, f.host);
-    assert.equal(r.status, 'STOP'); assert.equal(r.open?.status, 'PARTIALLY_FILLED');
-    assert.equal(r.open?.cumulativeFilledQuantity, 0.001);
+    const f = fixture({ partial: 'open', pending: true, minOrderSize: 1 });
+    const order = await seedPartialOpen(f); assert.equal(order.status, 'PARTIALLY_FILLED');
+    const r = await runGateIoProductionLiveCanary({ ...f.options, recoveryOnly: true }, f.host);
+    assert.equal(r.status, 'STOP'); assert.equal(r.budget.totalUsed, 0);
     assert.equal(r.finalExposure, 'UNKNOWN'); assert.equal(r.cleanupAttempted, false); assert.equal(f.posts, 1);
   });
   for (const missing of ['missingBaseline', 'missingPolicy'] as const) it(missing + ' never invented by launcher', async () => {
@@ -264,5 +305,67 @@ describe('Gate G6 formal production path (offline injected wire)', () => {
       assert.doesNotMatch(source, /submitMarketOrder|\.submitRequest\(|new OmsCore|\.kernel\.publish\(|trustBaseline\(/);
       assert.doesNotMatch(source, /process\.env|setInterval\(|setTimeout\(|TestnetOmsE2E|V4Signer/);
     }
+  });
+});
+
+describe('Gate G6R1 closeability and explicit recovery-only', () => {
+  for (const [minOrderSize, decimalSizeEnabled] of [[1, false], [0.1, true]] as const)
+    it(`minimum ${minOrderSize} on the supported lattice is allowed`, async () => {
+      const f = fixture({ minOrderSize, decimalSizeEnabled });
+      const r = await runGateIoProductionLiveCanary(f.options, f.host);
+      assert.equal(r.status, 'PASS', JSON.stringify(r)); assert.equal(r.budget.totalUsed, 2);
+      assert.deepEqual(f.calls.filter(c => c.method === 'POST').map(c => c.body.size), [minOrderSize, -minOrderSize]);
+    });
+  it('failed canary journal blocks normal OPEN but explicit recovery closes exactly the residual once', async () => {
+    const f = fixture({ rejectClose: true, rejectCleanup: true });
+    const failed = await runGateIoProductionLiveCanary(f.options, f.host);
+    assert.equal(failed.finalExposure, 'FACTUAL_NON_FLAT'); assert.equal(f.posts, 3);
+    const before = f.calls.length;
+    const rerun = await runGateIoProductionLiveCanary(f.options, f.host);
+    assert.equal(rerun.reason, 'CANARY_JOURNAL_ALREADY_USED'); assert.equal(f.calls.length, before);
+    const r = await runGateIoProductionLiveCanary({ ...f.options, recoveryOnly: true }, f.host);
+    assert.equal(r.status, 'RECOVERY_CLEANED_UP', JSON.stringify(r)); assert.equal(r.finalExposure, 'FACTUAL_FLAT');
+    assert.equal(r.open, null); assert.equal(r.close, null); assert.equal(r.budget.proofUsed, 0);
+    assert.equal(r.budget.cleanupUsed, 1); assert.equal(r.limits.proofMutations, 0); assert.equal(r.limits.totalMutations, 1);
+    const newPosts = f.calls.slice(before).filter(c => c.method === 'POST');
+    assert.deepEqual(newPosts.map(c => [c.body.size, c.body.reduce_only]), [[-0.1, true]]);
+    assert.equal(f.exposure, 0); assert.equal(r.postRetryCount, 0);
+    const after = f.calls.length;
+    assert.equal((await runGateIoProductionLiveCanary(f.options, f.host)).reason, 'CANARY_JOURNAL_ALREADY_USED');
+    assert.equal(f.calls.length, after); // Recovery never grants permission for a new normal OPEN.
+  });
+  it('allowed lattice partial OPEN recovers factual delta then exact reduce-only closure (no replay)', async () => {
+    const f = fixture({ partial: 'open', minOrderSize: 1 });
+    assert.equal((await seedPartialOpen(f)).status, 'CANCELLED');
+    const before = f.calls.length;
+    const r = await runGateIoProductionLiveCanary({ ...f.options, recoveryOnly: true }, f.host);
+    assert.equal(r.status, 'RECOVERY_CLEANED_UP', JSON.stringify(r)); assert.equal(f.exposure, 0);
+    assert.deepEqual(f.calls.slice(before).filter(c => c.method === 'POST').map(c => [c.body.size, c.body.reduce_only]), [[-1, true]]);
+    assert.equal(f.events().filter(e => e.type === 'execution.fill.confirmed').length, 2);
+    assert.equal(r.budget.proofUsed, 0); assert.equal(r.budget.cleanupUsed, 1);
+  });
+  it('recovery of a completed FLAT journal has zero POST and is not canary PASS', async () => {
+    const f = fixture(); await runGateIoProductionLiveCanary(f.options, f.host);
+    const before = f.posts;
+    const r = await runGateIoProductionLiveCanary({ ...f.options, recoveryOnly: true }, f.host);
+    assert.equal(r.status, 'RECOVERY_FLAT', JSON.stringify(r)); assert.equal(r.finalExposure, 'FACTUAL_FLAT');
+    assert.equal(f.posts, before); assert.equal(r.budget.totalUsed, 0); assert.equal(r.open, null);
+  });
+  for (const failure of ['truthFailure', 'openOrderConflict', 'externalTrade'] as const)
+    it(`recovery ${failure} fails closed without POST`, async () => {
+      const setup: Parameters<typeof fixture>[0] = { rejectClose: true, rejectCleanup: true };
+      const f = fixture(setup); await runGateIoProductionLiveCanary(f.options, f.host);
+      if (failure === 'truthFailure') setup.truthFailure = 'always'; else setup[failure] = true;
+      const before = f.posts;
+      const r = await runGateIoProductionLiveCanary({ ...f.options, recoveryOnly: true }, f.host);
+      assert.equal(r.status, 'STOP'); assert.equal(r.finalExposure, 'UNKNOWN'); assert.equal(f.posts, before);
+      assert.equal(r.budget.totalUsed, 0); assert.equal(r.cleanupAttempted, false);
+    });
+  it('recovery cleanup rejection is not retried and retains factual NONFLAT', async () => {
+    const f = fixture({ rejectClose: true, rejectCleanup: true, rejectRecovery: true });
+    await runGateIoProductionLiveCanary(f.options, f.host); const before = f.posts;
+    const r = await runGateIoProductionLiveCanary({ ...f.options, recoveryOnly: true }, f.host);
+    assert.equal(r.status, 'STOP'); assert.equal(r.finalExposure, 'FACTUAL_NON_FLAT');
+    assert.equal(f.posts, before + 1); assert.equal(r.budget.cleanupUsed, 1); assert.equal(r.postRetryCount, 0);
   });
 });
