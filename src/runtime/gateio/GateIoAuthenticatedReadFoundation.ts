@@ -648,17 +648,24 @@ export function createGateIoAuthenticatedReadFoundation(
     ));
     try {
       const account = normalizeGateIoAccount(await client.getAccount());
-      const positions = array(
-        await client.getPositions(), 'POSITION_TRUTH_MALFORMED',
-      ).map(normalizeGateIoPosition);
-      // The L1A canonical scope accepts only ETH_USDT, so prove both factual legs.
+      // The endpoint is account-wide. Prove every row's identity before selecting ETH;
+      // foreign contracts neither enter ETH normalization nor establish its exposure/legs.
+      const scopedPositionRows: Record<string, unknown>[] = [];
+      for (const row of array(await client.getPositions(), 'POSITION_TRUTH_MALFORMED')) {
+        if (!isRecord(row) || typeof row.contract !== 'string' || row.contract.trim() === '') {
+          malformed('POSITION_TRUTH_MALFORMED');
+        }
+        if (row.contract === GATEIO_L0_INITIAL_CONTRACT) scopedPositionRows.push(row);
+      }
+      const positions = scopedPositionRows.map(normalizeGateIoPosition);
+      // Prove exactly the required ETH legs; missing ETH rows are not evidence of FLAT.
       const modes = positions.map((entry) => entry.mode);
       if (account.inDualMode === null
           || (account.inDualMode && (modes.length !== 2
             || modes.filter((mode) => mode === 'dual_long').length !== 1
             || modes.filter((mode) => mode === 'dual_short').length !== 1))
           || (!account.inDualMode && modes.some((mode) => mode !== 'single'))
-          || (!account.inDualMode && modes.length > 1)) {
+          || (!account.inDualMode && modes.length !== 1)) {
         malformed('POSITION_TRUTH_MALFORMED');
       }
       const openOrders = array(

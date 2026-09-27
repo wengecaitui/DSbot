@@ -477,7 +477,10 @@ describe('Gate.io L1A foundation truth and readiness', () => {
     const empty = foundation({ respond(request) {
       return request.endpoint === GATEIO_READ_ENDPOINTS.POSITIONS ? [] : fixtureFor(request.endpoint);
     } });
-    assert.equal((await empty.value.accountTruth()).value?.accountState, 'FLAT');
+    const missing = await empty.value.accountTruth();
+    assert.equal(missing.availability, 'UNKNOWN');
+    assert.equal(missing.reason, 'POSITION_TRUTH_MALFORMED');
+    assert.equal(missing.value, null);
 
     for (const invalid of [null, {}, [{ ...positionFixture, mark_price: '' }]]) {
       const read = foundation({ respond(request) {
