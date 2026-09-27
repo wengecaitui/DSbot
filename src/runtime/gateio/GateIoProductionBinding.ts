@@ -3,6 +3,7 @@ import type { WsTicker } from '../../data/types';
 import { createMarketSnapshotStore } from '../../data/MarketSnapshotStore';
 import { GateIoFuturesExecutionAdapter } from '../../exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 import type { ProductionSpine } from '../../position/ProductionSpine';
+import type { ExecutionTruthSnapshot } from '../../reconciliation/reconciliation-types';
 import { createGateIoExecutionTruthPort } from '../../reconciliation/GateIoExecutionTruthPort';
 import type { AccountBoundHardRiskSnapshot } from '../../risk/pretrade-risk-types';
 import { createMarketDataRuntime } from '../market/MarketDataRuntime';
@@ -45,6 +46,7 @@ export function createGateIoProductionBinding(
     now: options.now, identity: { exchange: 'gateio', accountId: options.accountId, settle: 'USDT' },
   });
   let spine: ProductionSpine | null = null;
+  let lastTruth: ExecutionTruthSnapshot | null = null;
   let emitTicker: ((ticker: WsTicker) => void) | null = null;
   let collecting = false;
   const client = createGateIoFuturesExecutionClient({
@@ -114,17 +116,25 @@ export function createGateIoProductionBinding(
   const truthPort = Object.freeze({
     async acquireTruth() {
       if (!spine) throw new Error('GATEIO_PRODUCTION_SPINE_NOT_BOUND');
+      lastTruth = null; // Never expose an earlier successful capture after an acquisition failure.
       const truth = await gateTruth.acquireTruth();
       if (truth.complete && gateTruth.captureSequence() === 1
           && spine.oms.getStore().list().length === 0) {
         // This fixes historical observation scope only. Never publishes FLAT or repairs positions.
         gateTruth.establishVerifiedTradeBoundary(truth);
       }
+      lastTruth = truth;
       return truth;
     },
   });
   return Object.freeze({
     adapter, truthPort, marketRuntime, clock, staleAfterMs,
+    /** Internal observation only: no acquisition, baseline, execution or reconciliation authority. */
+    readObservation() {
+      return Object.freeze({ sequence: gateTruth.captureSequence(), truth: lastTruth,
+        canonical: lastTruth === null ? null : gateTruth.canonicalForCapture(gateTruth.captureSequence()),
+        history: gateTruth.currentRunTradeHistory() });
+    },
     currentRunTradeHistory: gateTruth.currentRunTradeHistory,
     bindSpine(value: ProductionSpine) {
       if (spine !== null || value.adapter !== adapter || value.executionMode !== 'limited-live')
