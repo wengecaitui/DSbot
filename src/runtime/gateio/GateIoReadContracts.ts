@@ -11,6 +11,11 @@ export const GATEIO_API_PREFIX = '/api/v4' as const;
 export const GATEIO_L0_SETTLE = 'usdt' as const;
 export const GATEIO_L0_INITIAL_CONTRACT = 'ETH_USDT' as const;
 
+/** Futures wire negotiation only; not caller-controlled and not part of the v4 signature input. */
+export const GATEIO_FUTURES_DECIMAL_SIZE_HEADERS = Object.freeze({
+  'X-Gate-Size-Decimal': '1',
+} as const);
+
 export const GATEIO_READ_ENDPOINTS = Object.freeze({
   SERVER_TIME: '/api/v4/spot/time',
   CONTRACT: '/api/v4/futures/usdt/contracts/ETH_USDT',

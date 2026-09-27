@@ -11,6 +11,7 @@ import {
   type GateIoFuturesMarketOrderResult,
 } from '../../exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 import {
+  GATEIO_FUTURES_DECIMAL_SIZE_HEADERS,
   GATEIO_L0_INITIAL_CONTRACT,
   GATEIO_SAFE_LABEL_PATTERN,
   gateIoTimestampValid,
@@ -351,6 +352,7 @@ export function createGateIoFuturesExecutionClient(
           KEY: credential.apiKey,
           Timestamp: timestamp,
           SIGN: signature,
+          ...GATEIO_FUTURES_DECIMAL_SIZE_HEADERS,
         }),
         ...(method === 'POST' ? { body } : {}),
         redirect: 'error',

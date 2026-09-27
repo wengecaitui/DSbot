@@ -6,6 +6,7 @@
  * retry, polling, backoff, fallback origin, credential discovery or trading authority here.
  */
 import {
+  GATEIO_FUTURES_DECIMAL_SIZE_HEADERS,
   GATEIO_L0_LIVE_ORIGIN,
   GATEIO_L0_TESTNET_ORIGIN,
   GATEIO_READ_ENDPOINTS,
@@ -313,7 +314,10 @@ function createReadTransport(
       const url = validated.canonicalQuery.length === 0
         ? `${origin}${validated.endpoint}`
         : `${origin}${validated.endpoint}?${validated.canonicalQuery}`;
-      const headers = authenticatedHeaders(validated);
+      const authHeaders = authenticatedHeaders(validated);
+      const headers = validated.endpoint.startsWith('/api/v4/futures/')
+        ? Object.freeze({ ...authHeaders, ...GATEIO_FUTURES_DECIMAL_SIZE_HEADERS })
+        : authHeaders;
       budget?.consumeReadRequest();
       counters.total += 1;
       counters.byEndpoint.set(
