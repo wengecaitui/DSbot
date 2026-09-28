@@ -41,6 +41,12 @@ export interface GateIoExecutionTruthPort extends ExecutionTruthPort {
   establishVerifiedTradeBoundary(truth: ExecutionTruthSnapshot): void;
 }
 
+// Object provenance only: no second capture, truth projection or reconciliation state.
+const gateIoTruthPorts = new WeakSet<object>();
+export function isGateIoExecutionTruthPort(value: unknown): value is GateIoExecutionTruthPort {
+  return typeof value === 'object' && value !== null && gateIoTruthPorts.has(value);
+}
+
 function tradeFingerprint(trade: GateIoCanonicalTrade): string {
   return JSON.stringify(trade);
 }
@@ -116,7 +122,7 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
     return instrument;
   }
 
-  return Object.freeze({
+  const port: GateIoExecutionTruthPort = Object.freeze({
     environment: options.environment,
     captureSequence: () => sequence,
     isLatestTruth: (value: ExecutionTruthSnapshot) => value === latestTruth,
@@ -425,4 +431,6 @@ export function createGateIoExecutionTruthPort(options: GateIoExecutionTruthPort
       return latestTruth;
     },
   });
+  gateIoTruthPorts.add(port);
+  return port;
 }
