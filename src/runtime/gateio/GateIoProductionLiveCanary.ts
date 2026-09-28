@@ -13,15 +13,17 @@ import type { GateIoCanonicalInstrumentFacts } from './GateIoAuthenticatedReadFo
 import { GateIoCanaryCredentialError } from './GateIoCanaryCredentialFile';
 
 // Same budget implementation as the formal Gate binding; not a second limiter/transport.
-// Eight 5-GET captures + two 3-GET instrument reads + 3 attestations + 2 ambiguity GETs + 3 POSTs.
+// Eight 5-GET captures + five 3-GET instrument reads + 3 attestations + 2 ambiguity GETs + 3 POSTs.
 export const GATEIO_LIVE_CANARY_LIMITS: Readonly<GateIoG3RunLimits> = Object.freeze({
-  accountAcquisitions: 8, instrumentAcquisitions: 2, currentRunOrderAttestations: 3,
+  accountAcquisitions: 8, instrumentAcquisitions: 5, currentRunOrderAttestations: 3,
   ambiguousReconciliations: 2, proofMutations: 2, cleanupMutations: 1,
-  totalMutations: 3, networkRequests: 54,
+  totalMutations: 3, networkRequests: 63,
 });
 export const GATEIO_LIVE_RECOVERY_LIMITS: Readonly<GateIoG3RunLimits> = Object.freeze({
-  ...GATEIO_LIVE_CANARY_LIMITS, proofMutations: 0, cleanupMutations: 1, totalMutations: 1,
+  ...GATEIO_LIVE_CANARY_LIMITS, instrumentAcquisitions: 3, networkRequests: 55,
+  proofMutations: 0, cleanupMutations: 1, totalMutations: 1,
 });
+export const GATEIO_CANARY_OPEN_MARK_DRIFT_RATIO = 0.001;
 
 /** Reuse the adapter's proven lattice, not an assumed venue exception for sub-minimum closes. */
 export function gateIoCanaryPartialCloseability(facts: GateIoCanonicalInstrumentFacts): boolean {
@@ -145,14 +147,18 @@ export async function runGateIoProductionLiveCanary(options: GateIoLiveCanaryOpt
       ? multiplyQuantity(c.instrument.minOrderSize, c.instrument.contractMultiplier)
       : Math.abs(local.signedQuantity);
     const usd = multiplyQuantity(quantity, c.instrument.markPrice);
-    if (!Number.isFinite(usd) || usd <= 0
-        || (action === 'open' && usd > options.maxNotionalUsd!)) stop('MINIMUM_SIZE_EXCEEDS_CAP');
+    // Only OPEN requests an explicit Risk-approved drift buffer. Contract target remains minOrderSize.
+    const riskRequestedNotionalUsd = action === 'open'
+      ? multiplyQuantity(usd, 1 + GATEIO_CANARY_OPEN_MARK_DRIFT_RATIO) : usd;
+    if (!Number.isFinite(usd) || usd <= 0 || !Number.isFinite(riskRequestedNotionalUsd)
+        || (action === 'open' && riskRequestedNotionalUsd > options.maxNotionalUsd!))
+      stop('MINIMUM_SIZE_EXCEEDS_CAP');
     if (action !== 'open' && local.status !== 'open') stop('FACTUAL_RESIDUAL_REQUIRED');
     const intent = createTradeIntent({ exchange: 'gateio', symbol: 'ETH/USDT',
-      direction: action === 'open' || local.signedQuantity < 0 ? 'long' : 'short', positionUsd: usd,
+      direction: action === 'open' || local.signedQuantity < 0 ? 'long' : 'short', positionUsd: riskRequestedNotionalUsd,
       source: 'gateio-production-live-canary', reason: `g6-${recoveryOnly ? 'recovery-' : ''}${action}-${verifiedHead}`,
       createdAt: startedAt, biasUpdatedAt: host.now() });
-    const result = await executeThroughGateway(spine, intent, action, usd);
+    const result = await executeThroughGateway(spine, intent, action, riskRequestedNotionalUsd);
     const order = spine.oms.getStore().list().find(o => o.intentId === intent.intentId);
     if (order) orderIds[action] = order.orderId;
     if (action === 'open') open = orderEvidence(order);

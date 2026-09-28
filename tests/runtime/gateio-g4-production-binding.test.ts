@@ -20,6 +20,7 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   overrideConfig?: Partial<ProductionRuntimeConfig>; omitGate?: boolean; wrongEnvironment?: boolean;
   wrongAccount?: boolean; denyRecovery?: boolean; budget?: GateIoG3RunBudget;
   lostAcknowledgement?: boolean;
+  freshExecutionMark?: number; onInstrumentRefresh?: () => void;
   openOrderFact?: (order: Record<string, any>) => Record<string, any> } = {}) {
   let now = NOW;
   let exposure = 0;
@@ -39,6 +40,8 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   let externalActivity = false;
   let available = '900';
   let lookupCount = 0;
+  let instrumentReads = 0;
+  let instrumentMark = 2000;
   const requests: { method: string; url: string; body?: any }[] = [];
   const orders = new Map<string, any>();
   const environment = options.environment ?? 'testnet';
@@ -110,21 +113,29 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
         { ...trade, id: trade.id + '2', size: String(Number(trade.size) / 2) },
       ]) : trades);
     }
-    if (path === GATEIO_READ_ENDPOINTS.CONTRACT) return response({
+    if (path === GATEIO_READ_ENDPOINTS.CONTRACT) {
+      instrumentReads += 1;
+      instrumentMark = instrumentReads > 1 ? options.freshExecutionMark ?? 2000 : 2000;
+      if (instrumentReads > 1) options.onInstrumentRefresh?.();
+      return response({
       name: 'ETH_USDT', status: 'trading', in_delisting: false, quanto_multiplier: '0.001',
       order_size_min: '0.1', order_size_max: '10000', enable_decimal: true,
       order_price_round: '0.01', mark_price_round: '0.01', leverage_min: '1', leverage_max: '100',
       maker_fee_rate: '0', taker_fee_rate: '0',
     });
+    }
     if (path === GATEIO_READ_ENDPOINTS.TICKERS) return response([{
-      contract: 'ETH_USDT', last: '2000', mark_price: '2000', index_price: '2000', funding_rate: '0',
+      contract: 'ETH_USDT', last: String(instrumentMark), mark_price: String(instrumentMark),
+      index_price: String(instrumentMark), funding_rate: '0',
       highest_bid: '1999', lowest_ask: '2001', high_24h: '2100', low_24h: '1900', volume_24h: '100',
     }]);
     assert.fail('unexpected fixture endpoint');
   };
-  // Extra READ capacity permits adversarial re-audits; mutation ceilings remain the inherited 2+1.
+  // Extra READ capacity permits adversarial re-audits and an instrument refresh per execution;
+  // mutation ceilings remain the inherited 2+1.
   const budget = options.budget ?? GateIoG3RunBudget.create({
-    ...GATEIO_G3_LIMITS, accountAcquisitions: 20, networkRequests: 120 });
+    ...GATEIO_G3_LIMITS, accountAcquisitions: 20, instrumentAcquisitions: 20,
+    networkRequests: 120 });
   const config: ProductionRuntimeConfig = {
     enabled: true, mode: 'limited-live', exchange: 'gateio', environment, accountId, journalPath,
     hardRisk: { enabled: true, locked: false, totalCapitalUsd: 2000,
@@ -158,6 +169,7 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   return {
     get owner() { return owner; }, requests, budget, get spine() { return spine; }, get posts() { return posts; },
     get creations() { return creations; }, get accounts() { return accounts; },
+    get instrumentReads() { return instrumentReads; },
     get exposure() { return exposure; }, set exposure(v: number) { exposure = v; },
     set missingOrder(v: boolean) { missingOrder = v; },
     set mismatchOrder(v: boolean) { mismatchOrder = v; },
@@ -419,18 +431,40 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
     assert.equal(h.posts, 2);
     assert.ok(h.requests.every((r) => new URL(r.url).origin === 'https://api.gateio.ws'));
   });
-  it('the unchanged default G3 budget suffices for bound OPEN/CLOSE and cannot replenish', async (t) => {
-    const h = harness({ budget: GateIoG3RunBudget.create() }); t.after(() => h.owner.stop());
-    await h.start(); await h.activate(); await h.trade(); await h.trade('close');
+  for (const [name, freshExecutionMark, expectedStatus, expectedPosts] of [
+    ['successful POST', 2000, 'filled', 1],
+    ['fresh-minimum pre-POST rejection', 2005, 'rejected', 0],
+  ] as const) it(`execution refresh invalidates prior truth before ${name}, then reconciles`, async t => {
+    const duringRefresh: { verified: boolean; canonicalPresent: boolean }[] = [];
+    let h: ReturnType<typeof harness>;
+    h = harness({ freshExecutionMark, onInstrumentRefresh: () => {
+      duringRefresh.push({ verified: h.spine.reconciliationVerified,
+        canonicalPresent: h.owner.gateIoObservation()?.canonical !== null });
+    } });
+    t.after(() => h.owner.stop()); await h.start(); await h.activate();
     assert.equal(h.spine.reconciliationVerified, true);
-    assert.equal(h.budget.snapshot().accountUsed, 5);
-    assert.equal(h.budget.snapshot().totalUsed, 2);
-    assert.ok(h.budget.snapshot().networkUsed <= 39);
-    const exhausted = await reconcileRecoveredState(h.spine);
-    assert.equal(exhausted.reconciliationVerified, false);
-    assert.match(exhausted.issues[0]!.reason, /ACQUISITION_CAP_EXCEEDED/);
+    assert.notEqual(h.owner.gateIoObservation()?.canonical, null);
+    assert.equal((await h.trade()).omsResult?.status, expectedStatus);
+    assert.equal(h.instrumentReads, 2);
+    assert.deepEqual(duringRefresh, [{ verified: false, canonicalPresent: false }]);
+    assert.equal(h.posts, expectedPosts);
+    assert.equal(h.spine.reconciliationVerified, true);
+    assert.notEqual(h.owner.gateIoObservation()?.canonical, null);
+  });
+  it('the unchanged default G3 instrument cap fails closed before a second execution', async (t) => {
+    const h = harness({ budget: GateIoG3RunBudget.create() }); t.after(() => h.owner.stop());
+    await h.start(); await h.activate();
+    assert.equal((await h.trade()).omsResult?.status, 'filled');
+    assert.equal((await h.trade('close')).omsResult?.status, 'rejected');
     assert.equal(h.spine.reconciliationVerified, false);
-    assert.equal((await h.trade()).admitted, false);
+    assert.equal(h.budget.snapshot().instrumentUsed, 2);
+    assert.equal(h.instrumentReads, 2);
+    assert.equal(h.requests.filter(r => new URL(r.url).pathname === GATEIO_READ_ENDPOINTS.CONTRACT).length, 2);
+    assert.equal(h.budget.snapshot().totalUsed, 1);
+    assert.equal(h.posts, 1);
+    assert.ok(h.budget.snapshot().networkUsed <= 39);
+    await assert.rejects(h.trade('close'), /GATEIO_PRODUCTION_FACTS_UNAVAILABLE/);
+    assert.equal(h.posts, 1);
   });
   it('failed fresh post-submit read retains factual fill and revokes reconciliation immediately', async (t) => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
