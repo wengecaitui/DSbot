@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { OmsOrder } from '../../src/oms/oms-types';
+import { multiplyQuantity } from '../../src/types/decimal-quantity';
 import {
   GateIoFuturesExecutionAdapter,
   type GateIoFuturesExecutionClient,
@@ -109,6 +110,55 @@ describe('Gate.io G2R1 F-09 fractional ETH sizing', () => {
     }));
     assert.equal(rejected.status, 'rejected');
     assert.equal(insufficient.requests.length, 0);
+
+    const beyondDrift = recordingAdapterClient(decimalFacts({ markPrice: MARK * 1.002 }));
+    const beyond = await new GateIoFuturesExecutionAdapter(beyondDrift.client).submit(order({
+      action: 'close', side: 'sell', approvedNotionalUsd: 0.1 * MARK * MULTIPLIER,
+    }));
+    assert.equal(beyond.status, 'rejected');
+    assert.equal(beyondDrift.requests.length, 0);
+  });
+});
+
+describe('Gate G8E fresh minimum OPEN approval boundary', () => {
+  const failedMark = 2681.98;
+  const minimumNotional = multiplyQuantity(multiplyQuantity(0.1, MULTIPLIER), failedMark);
+
+  it('reproduces the Live binary shortfall but prepares exactly 0.1 at the factual minimum', async () => {
+    assert.equal(minimumNotional, 2.68198);
+    assert.ok(minimumNotional / (failedMark * MULTIPLIER) < 0.1);
+    const recorded = recordingAdapterClient(decimalFacts({ markPrice: failedMark }));
+    const result = await new GateIoFuturesExecutionAdapter(recorded.client).submit(order({
+      approvedNotionalUsd: minimumNotional,
+    }));
+    assert.equal(result.status, 'filled');
+    assert.equal(recorded.requests.length, 1);
+    assert.equal(recorded.requests[0]!.size, 0.1);
+    assert.equal(recorded.requests[0]!.reduceOnly, false);
+    const required = multiplyQuantity(multiplyQuantity(recorded.requests[0]!.size, MULTIPLIER), failedMark);
+    assert.equal(required, minimumNotional);
+    assert.ok(required <= minimumNotional);
+  });
+
+  it('never posts when a normal caller approves less than the factual minimum', async () => {
+    const recorded = recordingAdapterClient(decimalFacts({ markPrice: failedMark }));
+    const result = await new GateIoFuturesExecutionAdapter(recorded.client).submit(order({
+      approvedNotionalUsd: 2.68197,
+    }));
+    assert.equal(result.status, 'rejected');
+    assert.equal(recorded.requests.length, 0);
+  });
+
+  it('rejects binary-normalized 0.1 when a fresh mark makes it exceed approved Risk notional', async () => {
+    const freshMark = 2681.980000000001;
+    const required = multiplyQuantity(multiplyQuantity(0.1, MULTIPLIER), freshMark);
+    assert.ok(required > minimumNotional);
+    const recorded = recordingAdapterClient(decimalFacts({ markPrice: freshMark }));
+    const result = await new GateIoFuturesExecutionAdapter(recorded.client).submit(order({
+      approvedNotionalUsd: minimumNotional,
+    }));
+    assert.deepEqual(result, { status: 'rejected', reason: 'APPROVED_NOTIONAL_BELOW_FRESH_MINIMUM' });
+    assert.equal(recorded.requests.length, 0);
   });
 });
 

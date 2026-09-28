@@ -54,7 +54,10 @@ export function createGateIoProductionBinding(
     signedTimestamp: () => foundation.signedTimestamp(),
     fetchImpl: options.fetchImpl, runBudget: options.runBudget,
     readFoundation: { async instrumentFacts() {
-      const facts = gateTruth.currentInstrument();
+      // Every execution attempt uses the same truth port's bounded, factual refresh.
+      // Its invalidation of the prior account/instrument pairing is intentional;
+      // ProductionSpine reconciles again after submission or rejection.
+      const facts = await gateTruth.refreshInstrumentFacts();
       return facts === null
         ? { availability: 'UNKNOWN', value: null, reason: 'INSTRUMENT_FACTS_UNKNOWN', failureProvenance: null }
         : { availability: 'AVAILABLE', value: facts, reason: null, failureProvenance: null };

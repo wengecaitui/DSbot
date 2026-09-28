@@ -237,13 +237,23 @@ export class GateIoFuturesExecutionAdapter implements ExecutionAdapter {
     if (contracts === null) {
       return rejected('NORMALIZED_SIZE_ZERO');
     }
-    if (contracts < facts.minOrderSize
-        || (order.action !== 'reduce' && order.action !== 'close'
-          && order.action !== 'emergency_exit'
-          && rawContracts < facts.minOrderSize)) {
+    if (contracts < facts.minOrderSize) {
       return rejected('BELOW_MIN_ORDER_SIZE');
     }
     if (contracts > facts.maxOrderSize) return rejected('ABOVE_MAX_ORDER_SIZE');
+    if (order.action === 'open') {
+      let requiredNotionalUsd: number;
+      try {
+        const baseQuantity = multiplyQuantity(contracts, facts.contractMultiplier);
+        requiredNotionalUsd = multiplyQuantity(baseQuantity, facts.markPrice);
+      } catch {
+        return rejected('APPROVED_NOTIONAL_BELOW_FRESH_MINIMUM');
+      }
+      // A normalized minimum may repair binary dust, but never grant more than Risk approved.
+      if (requiredNotionalUsd > order.approvedNotionalUsd) {
+        return rejected('APPROVED_NOTIONAL_BELOW_FRESH_MINIMUM');
+      }
+    }
 
     const request: GateIoFuturesMarketOrderRequest = Object.freeze({
       contract: GATEIO_L0_INITIAL_CONTRACT,
