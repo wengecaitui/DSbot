@@ -27,6 +27,10 @@ const DOCUMENTED_CATEGORIES: Readonly<Record<string, GateIoEconomicCategory>> = 
   bonus_offset: 'BONUS_OFFSET',
 });
 
+export function gateIoEconomicCategoryForRawType(rawType: string): GateIoEconomicCategory {
+  return DOCUMENTED_CATEGORIES[rawType] ?? 'UNCLASSIFIED';
+}
+
 function fail(code: string): never {
   throw new Error(code);
 }
@@ -123,7 +127,7 @@ function normalizeRow(
     source: GATEIO_ACCOUNT_BOOK_SOURCE,
     sourceId: requiredText(raw.id, 'GATEIO_ACCOUNT_BOOK_ID_MALFORMED'),
     occurredAt: occurredAt(raw.time),
-    category: DOCUMENTED_CATEGORIES[rawType] ?? 'UNCLASSIFIED',
+    category: gateIoEconomicCategoryForRawType(rawType),
     rawType,
     change: exactDecimal(raw.change),
     balance: exactDecimal(raw.balance),

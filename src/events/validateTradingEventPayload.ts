@@ -10,11 +10,16 @@ import { validateConfirmedFill } from '../types/confirmed-fill';
 import { validatePositionBaseline } from '../types/position-state';
 import { validateExecutionPreparation, validateExecutionObservation } from '../oms/execution-observation';
 import type { ExecutionPreparation, OrderExecutionObservation } from '../oms/oms-types';
+import { validateGateIoEconomicEventRecordedPayload } from '../accounting/gateio-economic-ledger';
 
 export function validateTradingEventPayload(
   type: string,
   payload: Record<string, unknown>,
 ): void {
+  if (type === 'GATEIO_ECONOMIC_EVENT_RECORDED') {
+    validateGateIoEconomicEventRecordedPayload(payload);
+    return;
+  }
   if (type === 'order.execution.prepared') {
     if (typeof payload.orderId !== 'string' || !payload.orderId) throw new Error('OMS_PREPARATION_ORDER_REQUIRED');
     validateExecutionPreparation(payload.preparation as ExecutionPreparation);
