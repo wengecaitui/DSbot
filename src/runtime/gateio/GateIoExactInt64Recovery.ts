@@ -96,11 +96,12 @@ function unambiguousFields(raw: string, spec: GateIoExactInt64Spec): boolean {
 export function parseGateIoExactInt64Json(raw: string, spec: GateIoExactInt64Spec): unknown {
   if (typeof raw !== 'string' || Buffer.byteLength(raw, 'utf8') > MAX_GATEIO_EXACT_JSON_BYTES
       || !spec || (spec.shape !== 'object' && spec.shape !== 'array')
-      || !Array.isArray(spec.fields) || spec.fields.length === 0
+      || !Array.isArray(spec.fields)
       || new Set(spec.fields).size !== spec.fields.length
       || spec.fields.some((field) => typeof field !== 'string' || field.length === 0)
       || (spec.decimalFields !== undefined && (!Array.isArray(spec.decimalFields)
         || spec.decimalFields.some((field) => typeof field !== 'string' || field.length === 0)))
+      || spec.fields.length + (spec.decimalFields?.length ?? 0) === 0
       || new Set([...spec.fields, ...(spec.decimalFields ?? [])]).size
         !== spec.fields.length + (spec.decimalFields?.length ?? 0)) {
     throw new Error('GATEIO_EXACT_INT64_INVALID');

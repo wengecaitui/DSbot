@@ -268,13 +268,16 @@ describe('Gate.io L1A authenticated read client', () => {
 describe('Gate.io L1A strict canonical normalization', () => {
   it('normalizes classic and unified-account-compatible facts without inventing zeroes', () => {
     assert.deepEqual(normalizeGateIoAccount(accountFixture), {
-      currency: 'USDT', total: 1000.5, available: 900.25, unrealizedPnl: 4.5,
+      currency: 'USDT', total: 1000.5, totalExact: '1000.5',
+      available: 900.25, availableExact: '900.25',
+      unrealizedPnl: 4.5, unrealizedPnlExact: '4.5',
       orderMargin: 10, inDualMode: false, positionMode: 'single', marginMode: 0,
     });
     assert.deepEqual(normalizeGateIoAccount({
       currency: 'usdt', total: '8', available: '7', in_dual_mode: true, position_mode: 'dual',
     }), {
-      currency: 'USDT', total: 8, available: 7, unrealizedPnl: null, orderMargin: null,
+      currency: 'USDT', total: 8, totalExact: '8', available: 7, availableExact: '7',
+      unrealizedPnl: null, unrealizedPnlExact: null, orderMargin: null,
       inDualMode: true, positionMode: 'dual', marginMode: null,
     });
     assert.throws(() => normalizeGateIoAccount({ currency: 'BTC', total: '1', available: '1' }));
@@ -442,6 +445,9 @@ describe('Gate.io L1A foundation truth and readiness', () => {
       { name: 'contract', value: GATEIO_L0_INITIAL_CONTRACT },
     ]);
     assert.equal(account.value?.accountState, 'OPEN');
+    assert.equal(account.value?.account.totalExact, '1000.5');
+    assert.equal(account.value?.account.availableExact, '900.25');
+    assert.equal(account.value?.account.unrealizedPnlExact, '4.5');
     assert.equal(account.value?.accountStateBasis, 'FACTUAL_POSITIONS_RESPONSE');
     assert.equal(account.value?.freshness, 'FRESH');
     assert.equal(Object.isFrozen(account.value), true);
