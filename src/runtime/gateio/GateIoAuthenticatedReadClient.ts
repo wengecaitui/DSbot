@@ -8,6 +8,9 @@
 import {
   GATEIO_L0_INITIAL_CONTRACT,
   GATEIO_READ_ENDPOINTS,
+  gateIoAccountBookPageQuery,
+  normalizeGateIoAccountBookPageRequest,
+  type GateIoAccountBookPageRequest,
   type GateIoQueryParameter,
   type GateIoReadCredential,
   type GateIoReadEndpoint,
@@ -40,6 +43,8 @@ export type GateIoReadFailureReason =
   | 'POSITION_TRUTH_UNKNOWN'
   | 'OPEN_ORDERS_MALFORMED'
   | 'TRADES_MALFORMED'
+  | 'ACCOUNT_BOOK_QUERY_INVALID'
+  | 'ACCOUNT_BOOK_MALFORMED'
   | 'INSTRUMENT_FACTS_UNKNOWN'
   | 'INSTRUMENT_FACTS_MALFORMED'
   | 'MARKET_RULES_UNKNOWN'
@@ -77,6 +82,7 @@ export interface GateIoAuthenticatedReadClient {
   getPositions(): Promise<unknown>;
   getOpenOrders(): Promise<unknown>;
   getRecentTrades(): Promise<unknown>;
+  getAccountBookPage(request: GateIoAccountBookPageRequest): Promise<unknown>;
   getContract(): Promise<unknown>;
   getTicker(): Promise<unknown>;
 }
@@ -194,6 +200,18 @@ export function createGateIoAuthenticatedReadClient(
       return authenticatedRead(
         transport, credential, clock, serverTimeObservation(), GATEIO_READ_ENDPOINTS.MY_TRADES,
         [contractParameter()],
+      );
+    },
+    async getAccountBookPage(request: GateIoAccountBookPageRequest): Promise<unknown> {
+      let query: readonly GateIoQueryParameter[];
+      try {
+        query = gateIoAccountBookPageQuery(normalizeGateIoAccountBookPageRequest(request));
+      } catch {
+        fail('ACCOUNT_BOOK_QUERY_INVALID');
+      }
+      return authenticatedRead(
+        transport, credential, clock, serverTimeObservation(), GATEIO_READ_ENDPOINTS.ACCOUNT_BOOK,
+        query,
       );
     },
     async getContract(): Promise<unknown> {

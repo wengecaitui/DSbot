@@ -6,9 +6,13 @@
  */
 import {
   GATEIO_L0_INITIAL_CONTRACT,
+  normalizeGateIoAccountBookPageRequest,
+  type GateIoAccountBookPageRequest,
   type GateIoReadCredential,
   type GateIoReadTransport,
 } from './GateIoReadContracts';
+import { normalizeGateIoAccountBookPage } from '../../accounting/gateio-economic-truth';
+import type { GateIoCanonicalEconomicEvent } from '../../accounting/gateio-economic-truth-types';
 import {
   GateIoReadClientError,
   createGateIoAuthenticatedReadClient,
@@ -34,6 +38,7 @@ import { gateIoExactSecondsToMilliseconds } from './GateIoExactTradeTime';
 export const MAX_GATEIO_ACCOUNT_TRUTH_GETS = 5 as const;
 export const MAX_GATEIO_INSTRUMENT_FACTS_GETS = 3 as const;
 export const MAX_GATEIO_L1A_COMBINED_GETS = 8 as const;
+export const MAX_GATEIO_ACCOUNT_BOOK_PAGE_GETS = 2 as const;
 export const GATEIO_L1A_SOURCE = 'gateio-usdt-futures-read' as const;
 export const GATEIO_L1A_SCHEMA_VERSION = 'gateio-l1a-v1' as const;
 export const GATEIO_L1A_SNAPSHOT_FRESHNESS_MS = 30_000 as const;
@@ -192,6 +197,10 @@ export interface GateIoAuthenticatedReadStatus {
 export interface GateIoAuthenticatedReadFoundation {
   accountTruth(): Promise<GateIoFoundationReadResult<GateIoCanonicalAccountTruth>>;
   instrumentFacts(): Promise<GateIoFoundationReadResult<GateIoCanonicalInstrumentFacts>>;
+  /** Reads and normalizes exactly one page; no ordering or historical-completeness claim is made. */
+  accountBookPage(
+    request: GateIoAccountBookPageRequest,
+  ): Promise<GateIoFoundationReadResult<readonly GateIoCanonicalEconomicEvent[]>>;
   /** Uses only the latest bounded public server-time observation; no new I/O. */
   signedTimestamp(): string;
   status(): GateIoAuthenticatedReadStatus;
@@ -745,9 +754,41 @@ export function createGateIoAuthenticatedReadFoundation(
     }
   }
 
+  async function accountBookPage(
+    request: GateIoAccountBookPageRequest,
+  ): Promise<GateIoFoundationReadResult<readonly GateIoCanonicalEconomicEvent[]>> {
+    if (credential === null) {
+      return remember(result<readonly GateIoCanonicalEconomicEvent[]>(
+        'UNAVAILABLE', null, 'GATEIO_READ_CREDENTIALS_UNAVAILABLE',
+      ));
+    }
+    let pageRequest: Readonly<GateIoAccountBookPageRequest>;
+    try {
+      pageRequest = normalizeGateIoAccountBookPageRequest(request);
+    } catch {
+      return remember(result<readonly GateIoCanonicalEconomicEvent[]>(
+        'UNKNOWN', null, 'ACCOUNT_BOOK_QUERY_INVALID',
+      ));
+    }
+    const time = await synchronizeTime();
+    if (time.value === null) return remember(result<readonly GateIoCanonicalEconomicEvent[]>(
+      time.availability, null, time.reason ?? 'GATEIO_SERVER_TIME_INVALID', time.failureProvenance,
+    ));
+    try {
+      const rawPage = await client.getAccountBookPage(pageRequest);
+      const observedAt = clock.now();
+      const events = normalizeGateIoAccountBookPage(rawPage, { observedAt, pageRequest });
+      lastObservedAt = observedAt;
+      return remember(available(events));
+    } catch (error) {
+      return remember(failed(error, 'ACCOUNT_BOOK_MALFORMED'));
+    }
+  }
+
   return Object.freeze({
     accountTruth,
     instrumentFacts,
+    accountBookPage,
     signedTimestamp: () => signedGateIoTimestamp(clock, observation),
     status(): GateIoAuthenticatedReadStatus {
       return Object.freeze({

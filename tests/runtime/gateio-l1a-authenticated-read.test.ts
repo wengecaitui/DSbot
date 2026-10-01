@@ -106,6 +106,7 @@ function fixtureFor(endpoint: GateIoReadEndpoint): unknown {
     case GATEIO_READ_ENDPOINTS.POSITIONS: return [positionFixture];
     case GATEIO_READ_ENDPOINTS.OPEN_ORDERS: return [orderFixture];
     case GATEIO_READ_ENDPOINTS.MY_TRADES: return [tradeFixture];
+    case GATEIO_READ_ENDPOINTS.ACCOUNT_BOOK: return [];
     case GATEIO_READ_ENDPOINTS.CONTRACT: return contractFixture;
     case GATEIO_READ_ENDPOINTS.TICKERS: return tickerFixture;
   }
@@ -230,10 +231,10 @@ describe('Gate.io L1A authenticated read client', () => {
     assert.equal(injected.requests.length, 0);
   });
 
-  it('exposes exactly seven GET read methods and no mutation method', () => {
+  it('exposes exactly eight GET read methods and no mutation method', () => {
     const injected = transport((request) => fixtureFor(request.endpoint));
     assert.deepEqual(Object.keys(clientWith(injected.value)).sort(), [
-      'getAccount', 'getContract', 'getOpenOrders', 'getPositions', 'getRecentTrades',
+      'getAccount', 'getAccountBookPage', 'getContract', 'getOpenOrders', 'getPositions', 'getRecentTrades',
       'getServerTime', 'getTicker',
     ]);
   });

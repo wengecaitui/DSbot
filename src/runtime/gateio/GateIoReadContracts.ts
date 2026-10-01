@@ -24,6 +24,7 @@ export const GATEIO_READ_ENDPOINTS = Object.freeze({
   POSITIONS: '/api/v4/futures/usdt/positions',
   OPEN_ORDERS: '/api/v4/futures/usdt/orders',
   MY_TRADES: '/api/v4/futures/usdt/my_trades',
+  ACCOUNT_BOOK: '/api/v4/futures/usdt/account_book',
 } as const);
 
 export type GateIoReadEndpoint =
@@ -34,6 +35,18 @@ export type GateIoReadKind = 'PUBLIC_READ' | 'AUTHENTICATED_READ';
 export interface GateIoQueryParameter {
   readonly name: string;
   readonly value: string;
+}
+
+/** One bounded account-book page request. It is not evidence of historical completeness. */
+export interface GateIoAccountBookPageRequest {
+  readonly contract?: string;
+  readonly limit?: number;
+  readonly offset?: number;
+  /** Exact int64 Unix-seconds text; never routed through a JS binary number. */
+  readonly from?: string;
+  /** Exact int64 Unix-seconds text; never routed through a JS binary number. */
+  readonly to?: string;
+  readonly type?: string;
 }
 
 export interface GateIoReadCredential {
@@ -106,6 +119,12 @@ Record<GateIoReadEndpoint, GateIoEndpointContract>
     optional: Object.freeze([]),
     responseShape: 'ARRAY' as const,
   }),
+  [GATEIO_READ_ENDPOINTS.ACCOUNT_BOOK]: Object.freeze({
+    kind: 'AUTHENTICATED_READ' as const,
+    required: Object.freeze([]),
+    optional: Object.freeze(['contract', 'limit', 'offset', 'from', 'to', 'type']),
+    responseShape: 'ARRAY' as const,
+  }),
 });
 
 const QUERY_NAME_PATTERN = /^[a-z][a-z0-9_]{0,31}$/;
@@ -165,10 +184,117 @@ export function gateIoEndpointContract(endpoint: unknown): GateIoEndpointContrac
   return Object.prototype.hasOwnProperty.call(contracts, endpoint) ? contracts[endpoint] ?? null : null;
 }
 
-export function gateIoQueryValueValid(name: string, value: string): boolean {
-  if (name === 'contract') return value === GATEIO_L0_INITIAL_CONTRACT;
+const GATEIO_ACCOUNT_BOOK_INT64_MAX = '9223372036854775807';
+const GATEIO_ACCOUNT_BOOK_INT64_MIN = '-9223372036854775808';
+
+function int64Text(value: string): boolean {
+  if (!/^-?[0-9]{1,19}$/.test(value)) return false;
+  try {
+    const parsed = BigInt(value);
+    return parsed >= BigInt(GATEIO_ACCOUNT_BOOK_INT64_MIN)
+      && parsed <= BigInt(GATEIO_ACCOUNT_BOOK_INT64_MAX);
+  } catch {
+    return false;
+  }
+}
+
+function safeAccountBookText(value: string): boolean {
+  return value.length > 0 && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+export function gateIoQueryValueValid(
+  endpoint: GateIoReadEndpoint,
+  name: string,
+  value: string,
+): boolean {
+  if (name === 'contract') {
+    return endpoint === GATEIO_READ_ENDPOINTS.ACCOUNT_BOOK
+      ? GATEIO_SAFE_LABEL_PATTERN.test(value)
+      : value === GATEIO_L0_INITIAL_CONTRACT;
+  }
   if (name === 'status') return value === 'open';
+  if (endpoint !== GATEIO_READ_ENDPOINTS.ACCOUNT_BOOK) return false;
+  if (name === 'limit') {
+    return /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value));
+  }
+  if (name === 'offset') {
+    return /^(0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value));
+  }
+  if (name === 'from' || name === 'to') return int64Text(value);
+  if (name === 'type') return safeAccountBookText(value);
   return false;
+}
+
+/** Deterministic DTO validation/serialization for exactly one account-book page. */
+export function gateIoAccountBookPageQuery(
+  request: GateIoAccountBookPageRequest,
+): readonly GateIoQueryParameter[] {
+  if (typeof request !== 'object' || request === null || Array.isArray(request)) {
+    fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+  }
+  const raw = request as Record<string, unknown>;
+  const allowed = new Set(['contract', 'limit', 'offset', 'from', 'to', 'type']);
+  if (Object.keys(raw).some((name) => !allowed.has(name))) {
+    fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+  }
+  const entries: GateIoQueryParameter[] = [];
+  const add = (name: keyof GateIoAccountBookPageRequest, value: string): void => {
+    if (!gateIoQueryValueValid(GATEIO_READ_ENDPOINTS.ACCOUNT_BOOK, name, value)) {
+      fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+    }
+    entries.push(Object.freeze({ name, value }));
+  };
+  if (request.contract !== undefined) {
+    if (typeof request.contract !== 'string') fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+    add('contract', request.contract);
+  }
+  if (request.from !== undefined) {
+    if (typeof request.from !== 'string') fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+    add('from', request.from);
+  }
+  if (request.limit !== undefined) {
+    if (!Number.isSafeInteger(request.limit) || request.limit <= 0) {
+      fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+    }
+    add('limit', String(request.limit));
+  }
+  if (request.offset !== undefined) {
+    if (!Number.isSafeInteger(request.offset) || request.offset < 0) {
+      fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+    }
+    add('offset', String(request.offset));
+  }
+  if (request.to !== undefined) {
+    if (typeof request.to !== 'string') fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+    add('to', request.to);
+  }
+  if (request.type !== undefined) {
+    if (typeof request.type !== 'string') fail('GATEIO_ACCOUNT_BOOK_QUERY_INVALID');
+    add('type', request.type);
+  }
+  return Object.freeze(entries);
+}
+
+/** Freeze the exact request facts that will be serialized and later attached as capture provenance. */
+export function normalizeGateIoAccountBookPageRequest(
+  request: GateIoAccountBookPageRequest,
+): Readonly<GateIoAccountBookPageRequest> {
+  const query = gateIoAccountBookPageQuery(request);
+  const normalized: {
+    contract?: string;
+    from?: string;
+    limit?: number;
+    offset?: number;
+    to?: string;
+    type?: string;
+  } = {};
+  for (const { name, value } of query) {
+    if (name === 'limit' || name === 'offset') normalized[name] = Number(value);
+    else if (name === 'contract' || name === 'from' || name === 'to' || name === 'type') {
+      normalized[name] = value;
+    }
+  }
+  return Object.freeze(normalized);
 }
 
 export function gateIoTimestampValid(value: unknown): value is string {
