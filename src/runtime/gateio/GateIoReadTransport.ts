@@ -200,7 +200,8 @@ function validateRequest(request: GateIoReadTransportRequest): ValidatedRequest 
     if (!isRecord(parameter)) fail('GATEIO_READ_REQUEST_INVALID');
     const { name, value } = parameter;
     if (typeof name !== 'string' || typeof value !== 'string'
-        || !allowed.has(name) || seen.has(name) || !gateIoQueryValueValid(name, value)) {
+        || !allowed.has(name) || seen.has(name)
+        || !gateIoQueryValueValid(endpoint as GateIoReadEndpoint, name, value)) {
       fail('GATEIO_READ_REQUEST_INVALID');
     }
     seen.add(name);

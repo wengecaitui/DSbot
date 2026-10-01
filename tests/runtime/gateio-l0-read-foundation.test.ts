@@ -95,7 +95,7 @@ function serializedError(error: Error): string {
 }
 
 describe('Gate.io L0 read foundation', () => {
-  it('1. freezes the exact live scope and seven-endpoint allowlist', () => {
+  it('1. freezes the exact live scope and eight-endpoint allowlist', () => {
     assert.equal(GATEIO_L0_LIVE_ORIGIN, 'https://api.gateio.ws');
     assert.equal(GATEIO_API_PREFIX, '/api/v4');
     assert.equal(GATEIO_L0_SETTLE, 'usdt');
@@ -108,6 +108,7 @@ describe('Gate.io L0 read foundation', () => {
       '/api/v4/futures/usdt/positions',
       '/api/v4/futures/usdt/orders',
       '/api/v4/futures/usdt/my_trades',
+      '/api/v4/futures/usdt/account_book',
     ]);
   });
 
@@ -479,8 +480,11 @@ describe('Gate.io L0 read foundation', () => {
     await transport.get(authenticatedRequest(GATEIO_READ_ENDPOINTS.MY_TRADES, [
       { name: 'contract', value: GATEIO_L0_INITIAL_CONTRACT },
     ]));
+    await transport.get(authenticatedRequest(GATEIO_READ_ENDPOINTS.ACCOUNT_BOOK, [
+      { name: 'limit', value: '10' },
+    ]));
     assert.equal(getGateIoReadRequestCount(accountTransport)?.total, 1);
-    assert.equal(getGateIoReadRequestCount(transport)?.total, 3);
+    assert.equal(getGateIoReadRequestCount(transport)?.total, 4);
   });
 
   it('43. missing API key fails closed before fetch', async () => {

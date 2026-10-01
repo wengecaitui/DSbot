@@ -13,6 +13,7 @@ import type { ConfirmedPositionBaseline } from '../types/position-state';
 import type { OrderCreatedPayload, OrderStatusPayload } from '../oms/oms-events';
 import type { PositionPlan } from '../position/position-plan-types';
 import type { ExecutionPreparation, OrderExecutionObservation } from '../oms/oms-types';
+import type { GateIoEconomicEventRecordedPayload } from '../accounting/gateio-economic-ledger-types';
 
 export interface ExternalFlatBaselineEvidence {
   readonly exchange: 'gateio';
@@ -42,6 +43,7 @@ export interface TradingEventPayloadMap {
   'position.plan.updated':      { planId: string; stopPrice?: number };
   'position.plan.archived':     { planId: string };
   'position.plan.closed':       { planId: string };
+  'GATEIO_ECONOMIC_EVENT_RECORDED': GateIoEconomicEventRecordedPayload;
 }
 
 export type TradingEventType = keyof TradingEventPayloadMap;
