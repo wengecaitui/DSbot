@@ -63,3 +63,6 @@ export interface GateIoEconomicLedgerSnapshot {
   /** Local replay/append boundary only; never an exchange cursor or history-completeness proof. */
   readonly captureBoundary: GateIoEconomicLocalCaptureBoundary | null;
 }
+
+/** Durable replayed state consumed by pure downstream projections. */
+export type GateIoEconomicLedgerState = GateIoEconomicLedgerSnapshot;
