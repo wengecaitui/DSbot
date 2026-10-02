@@ -7,6 +7,7 @@ import {
   accountRiskMetricPolicyDigest,
   activateAccountRiskMetricPolicy,
   createGateIoAccountMetricFoundation,
+  createGateIoDurableAccountRiskMetricProjector,
   gateIoAccountObservationDigest,
   gateIoDurableAccountObservationFromTruth,
   projectQualifiedAccountValue,
@@ -14,6 +15,10 @@ import {
   validateAccountRiskMetricPolicy,
   validateGateIoAccountFactObservedPayload,
 } from '../../src/accounting/gateio-account-risk-metrics';
+import { gateIoEconomicFactDigest } from '../../src/accounting/gateio-economic-ledger';
+import { GATEIO_ECONOMIC_EVENT_RECORDED } from '../../src/accounting/gateio-economic-ledger-types';
+import { normalizeGateIoAccountBookPage } from '../../src/accounting/gateio-economic-truth';
+import type { GateIoCanonicalEconomicEvent } from '../../src/accounting/gateio-economic-truth-types';
 import {
   ACCOUNT_RISK_METRIC_POLICY_ACTIVATED,
   ACCOUNT_RISK_METRIC_POLICY_SCHEMA_VERSION,
@@ -25,6 +30,7 @@ import {
   type GateIoDurableAccountObservation,
 } from '../../src/accounting/gateio-account-risk-metrics-types';
 import { createTradingKernel } from '../../src/kernel/TradingKernel';
+import type { TradingKernel } from '../../src/kernel/TradingKernel';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
 import { replayJournal, type ProjectorMap } from '../../src/recovery/ReplayCoordinator';
 import {
@@ -36,6 +42,303 @@ import { gateIoExactDecimalSource, parseGateIoExactInt64Json } from '../../src/r
 const BASE_MS = 1_800_000_000_000;
 const IDENTITY: GateIoAccountRiskIdentity = Object.freeze({
   exchange: 'gateio', settle: 'USDT', accountId: 'gate-account-r2',
+});
+
+describe('R2B2 durable daily loss, epoch high-water and drawdown', () => {
+  it('establishes a day-open baseline only from fully bracketed boundary coverage', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '99.5'));
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 1_000);
+    assert.equal(result.status, 'AVAILABLE');
+    assert.equal(result.baseline?.coverage, 'FULL_BOUNDARY_COVERAGE');
+    assert.equal(result.baseline?.valueExact, '99.5');
+    assert.equal(result.baseline?.qualifiedAt, DAY_BOUNDARY + 1_000);
+    assert.equal(result.accountingDayId?.includes('2027-01-15'), true);
+    assert.equal(result.dailyEquityLossExact, '0');
+  });
+
+  it('fails closed for a mid-day bootstrap and never invents a first-observation baseline', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 12 * 60 * 60_000, '90'));
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 12 * 60 * 60_000);
+    assert.equal(result.status, 'PARTIAL_DAY');
+    assert.equal(result.baseline?.coverage, 'PARTIAL_DAY_BOOTSTRAP');
+    assert.equal(result.baseline?.valueExact, null);
+    assert.equal(result.dailyEquityLossExact, null);
+    assert.ok(result.reasons.includes('DAY_OPEN_VALUE_NOT_PROVEN'));
+
+    const gapped = durableHarness();
+    applyObservation(gapped.kernel, gapped.projector,
+      valueObservation(DAY_BOUNDARY - 20_000, '100'));
+    applyObservation(gapped.kernel, gapped.projector,
+      valueObservation(DAY_BOUNDARY + 20_000, '100'));
+    const gapResult = gapped.projector.snapshot(IDENTITY, DAY_BOUNDARY + 20_000);
+    assert.equal(gapResult.status, 'PARTIAL_DAY');
+    assert.ok(gapResult.reasons.includes('BOUNDARY_OBSERVATION_GAP_EXCEEDS_POLICY_FRESHNESS'));
+  });
+
+  it('computes exact same-day equity loss while gains clamp to exact zero', () => {
+    const decline = durableHarness();
+    applyObservation(decline.kernel, decline.projector,
+      valueObservation(DAY_BOUNDARY - 1_000, '100.000000000000000001'));
+    applyObservation(decline.kernel, decline.projector,
+      valueObservation(DAY_BOUNDARY + 1_000, '100.000000000000000001'));
+    applyObservation(decline.kernel, decline.projector,
+      valueObservation(DAY_BOUNDARY + 2_000, '99.0000000000000000001'));
+    assert.equal(decline.projector.snapshot(IDENTITY, DAY_BOUNDARY + 2_000)
+      .dailyEquityLossExact, '1.0000000000000000009');
+
+    const gain = durableHarness();
+    applyObservation(gain.kernel, gain.projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(gain.kernel, gain.projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    applyObservation(gain.kernel, gain.projector, valueObservation(DAY_BOUNDARY + 2_000, '101'));
+    assert.equal(gain.projector.snapshot(IDENTITY, DAY_BOUNDARY + 2_000)
+      .dailyEquityLossExact, '0');
+  });
+
+  it('tracks epoch high-water monotonically and computes deterministic drawdown', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    assert.equal(projector.snapshot(IDENTITY, DAY_BOUNDARY + 1_000).epochHighWaterExact, '100');
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 2_000, '125'));
+    assert.equal(projector.snapshot(IDENTITY, DAY_BOUNDARY + 2_000).epochHighWaterExact, '125');
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 3_000, '100'));
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 3_000);
+    assert.equal(result.epochHighWaterExact, '125');
+    assert.equal(result.drawdownAbsoluteExact, '25');
+    assert.equal(result.drawdownFractionExact, '0.2');
+    assert.equal(result.drawdownFractionScale, 18);
+    assert.equal(result.drawdownFractionRounding, 'ROUND_HALF_UP');
+  });
+
+  it('does not advance high-water from unsupported observations and reports stale current data', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 2_000, '999', {
+      marginMode: 1, accountModeQualification: 'UNSUPPORTED_ACCOUNT_MODE',
+    }));
+    const invalid = projector.snapshot(IDENTITY, DAY_BOUNDARY + 2_000);
+    assert.equal(invalid.status, 'UNSUPPORTED_ACCOUNT_MODE');
+    assert.equal(invalid.epochHighWaterExact, '100');
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 3_000, '99'));
+    const stale = projector.snapshot(IDENTITY, DAY_BOUNDARY + 33_001);
+    assert.equal(stale.status, 'STALE');
+    assert.equal(stale.dailyEquityLossExact, null);
+    assert.equal(stale.drawdownAbsoluteExact, null);
+    assert.equal(stale.epochHighWaterExact, '100');
+    assert.equal(stale.historicalStateRetained, true);
+
+    const provenanceStale = durableHarness();
+    applyObservation(provenanceStale.kernel, provenanceStale.projector,
+      valueObservation(DAY_BOUNDARY + 1_000, '500', {
+        captureProvenance: {
+          kind: 'GATEIO_AUTHENTICATED_ACCOUNT_READ',
+          endpoint: '/api/v4/futures/usdt/accounts',
+          foundationFreshness: 'STALE',
+        },
+      }));
+    const rejected = provenanceStale.projector.snapshot(IDENTITY, DAY_BOUNDARY + 1_000);
+    assert.equal(rejected.status, 'STALE');
+    assert.equal(rejected.epochHighWaterExact, null);
+  });
+
+  it('blocks current authority on R1 conflict while retaining historical metric facts', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    applyEconomic(kernel, projector, economicFact({ change: '-0.02' }));
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 1_000);
+    assert.equal(result.status, 'ECONOMIC_CONFLICT');
+    assert.equal(result.currentQualifiedAccountValueExact, null);
+    assert.equal(result.dailyEquityLossExact, null);
+    assert.equal(result.drawdownAbsoluteExact, null);
+    assert.equal(result.epochHighWaterExact, '100');
+    assert.equal(result.baseline?.valueExact, '100');
+    assert.equal(result.historicalStateRetained, true);
+  });
+
+  it('blocks UNCLASSIFIED economic activity and refuses later high-water updates', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    applyEconomic(kernel, projector, economicFact({ id: 'unknown-risk-event', type: 'future_type' }));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 2_000, '200'));
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 2_000);
+    assert.equal(result.status, 'UNCLASSIFIED_ECONOMIC_ACTIVITY');
+    assert.equal(result.epochHighWaterExact, '100');
+    assert.equal(result.acceptedMetricPoints.length, 2);
+  });
+
+  it('blocks an R1 ambiguous terminal balance and retains the earlier high-water', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    applyEconomic(kernel, projector, economicFact({ id: 'same-terminal-time', type: 'fund' }));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 2_000, '200'));
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 2_000);
+    assert.equal(result.status, 'CURRENT_VALUE_UNAVAILABLE');
+    assert.ok(result.reasons.includes('ECONOMIC_TERMINAL_BALANCE_AMBIGUOUS'));
+    assert.equal(result.epochHighWaterExact, '100');
+    assert.equal(result.currentQualifiedAccountValueExact, null);
+  });
+
+  it('keeps projection unusable without R1 economic facts and never accepts a metric point', () => {
+    const projector = createGateIoDurableAccountRiskMetricProjector();
+    let clockTick = 0;
+    const kernel = createTradingKernel({ exchange: 'gateio',
+      clock: { now: () => DAY_BOUNDARY + (++clockTick) } });
+    applyPolicy(kernel, projector, policy({ effectiveAt: DAY_BOUNDARY - 86_400_000 }));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 1_000);
+    assert.equal(result.status, 'CURRENT_VALUE_UNAVAILABLE');
+    assert.ok(result.reasons.includes('ECONOMIC_PROJECTION_UNUSABLE'));
+    assert.equal(result.acceptedMetricPoints.length, 0);
+    assert.equal(result.epochHighWaterExact, null);
+  });
+
+  it('makes malformed economic state sticky instead of exposing prior metrics as available', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    const nextFact = economicFact({ id: 'malformed-on-replay', type: 'fund' });
+    const validEnvelope = kernel.publish(GATEIO_ECONOMIC_EVENT_RECORDED, {
+      fact: nextFact, factDigest: gateIoEconomicFactDigest(nextFact),
+    }).envelope;
+    const malformed = JSON.parse(JSON.stringify(validEnvelope)) as {
+      payload: { fact: { change: string } };
+    };
+    malformed.payload.fact.change = 'NaN';
+    assert.throws(() => projector.apply(malformed), /GATEIO_ECONOMIC_DURABLE_PAYLOAD_INVALID/);
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 1_000);
+    assert.equal(result.status, 'CURRENT_VALUE_UNAVAILABLE');
+    assert.ok(result.reasons.includes('ECONOMIC_STATE_MALFORMED'));
+    assert.equal(result.epochHighWaterExact, '100');
+    assert.equal(result.currentQualifiedAccountValueExact, null);
+  });
+
+  it('makes an account observation identity conflict sticky across later clean observations', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    assert.throws(() => applyObservation(kernel, projector,
+      valueObservation(DAY_BOUNDARY + 1_000, '101')),
+    /GATEIO_ACCOUNT_OBSERVATION_IDENTITY_CONFLICT/);
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 2_000, '200'));
+    const result = projector.snapshot(IDENTITY, DAY_BOUNDARY + 2_000);
+    assert.equal(result.status, 'IDENTITY_INVALID');
+    assert.ok(result.reasons.includes('GATEIO_ACCOUNT_OBSERVATION_IDENTITY_CONFLICT'));
+    assert.equal(result.epochHighWaterExact, '100');
+    assert.equal(result.currentQualifiedAccountValueExact, null);
+  });
+
+  it('fails closed on account identity mismatch and non-positive high-water fraction', () => {
+    const mismatch = durableHarness();
+    const wrongIdentity = { ...IDENTITY, accountId: 'other-account' } as const;
+    assert.equal(mismatch.projector.snapshot(wrongIdentity, DAY_BOUNDARY + 1_000).status,
+      'IDENTITY_INVALID');
+
+    const zero = durableHarness();
+    applyObservation(zero.kernel, zero.projector, valueObservation(DAY_BOUNDARY - 1_000, '0'));
+    applyObservation(zero.kernel, zero.projector, valueObservation(DAY_BOUNDARY + 1_000, '0'));
+    const result = zero.projector.snapshot(IDENTITY, DAY_BOUNDARY + 1_000);
+    assert.equal(result.status, 'AVAILABLE');
+    assert.equal(result.epochHighWaterExact, '0');
+    assert.equal(result.drawdownAbsoluteExact, '0');
+    assert.equal(result.drawdownFractionExact, null);
+    assert.ok(result.reasons.includes('DRAWDOWN_FRACTION_UNAVAILABLE_NON_POSITIVE_HIGH_WATER'));
+  });
+
+  it('rolls daily baseline independently while carrying epoch high-water across days', () => {
+    const { kernel, projector } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 23 * 60 * 60_000, '110'));
+    const nextBoundary = DAY_BOUNDARY + 86_400_000;
+    applyObservation(kernel, projector, valueObservation(nextBoundary - 1_000, '105'));
+    applyObservation(kernel, projector, valueObservation(nextBoundary + 1_000, '104'));
+    const dayB = projector.snapshot(IDENTITY, nextBoundary + 1_000);
+    assert.equal(dayB.status, 'AVAILABLE');
+    assert.equal(dayB.baseline?.valueExact, '104');
+    assert.equal(dayB.dailyEquityLossExact, '0');
+    assert.equal(dayB.epochHighWaterExact, '110');
+
+    const missing = durableHarness();
+    applyObservation(missing.kernel, missing.projector,
+      valueObservation(nextBoundary + 12 * 60 * 60_000, '90'));
+    assert.equal(missing.projector.snapshot(IDENTITY, nextBoundary + 12 * 60 * 60_000)
+      .status, 'PARTIAL_DAY');
+  });
+
+  it('starts a new marked metric epoch for every versioned policy activation', () => {
+    const { kernel, projector, configured } = durableHarness();
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 1_000, '120'));
+    const v1 = projector.snapshot(IDENTITY, DAY_BOUNDARY + 1_000);
+    const v2 = policy({
+      policyVersion: 2,
+      effectiveAt: DAY_BOUNDARY + 2_000,
+      accountObservationMaxAgeMs: configured.accountObservationMaxAgeMs,
+      dayBoundary: { timezone: 'UTC', localBoundaryTime: '06:00:00' },
+    });
+    applyPolicy(kernel, projector, v2);
+    applyObservation(kernel, projector, valueObservation(DAY_BOUNDARY + 3_000, '80'));
+    const rolled = projector.snapshot(IDENTITY, DAY_BOUNDARY + 3_000);
+    assert.equal(rolled.activePolicyVersion, 2);
+    assert.notEqual(rolled.metricEpochId, v1.metricEpochId);
+    assert.equal(rolled.epochHighWaterExact, '80');
+    assert.equal(rolled.status, 'PARTIAL_DAY');
+    assert.ok(rolled.baseline?.reasons.includes('POLICY_EPOCH_STARTED_AFTER_BOUNDARY'));
+  });
+
+  it('uses explicit IANA-zone accounting days deterministically across DST', () => {
+    const boundary = Date.UTC(2027, 10, 7, 5, 0, 0);
+    const configured = policy({
+      effectiveAt: boundary - 86_400_000,
+      accountObservationMaxAgeMs: 10_000,
+      dayBoundary: { timezone: 'America/New_York', localBoundaryTime: '01:00:00' },
+    });
+    const { kernel, projector } = durableHarness(configured);
+    applyObservation(kernel, projector, valueObservation(boundary - 1_000, '100'));
+    applyObservation(kernel, projector, valueObservation(boundary + 1_000, '100'));
+    const first = projector.snapshot(IDENTITY, boundary + 1_000);
+    const second = projector.snapshot(IDENTITY, boundary + 1_000);
+    assert.deepEqual(second, first);
+    assert.equal(first.baseline?.boundaryAt, boundary);
+    assert.equal(first.baseline?.coverage, 'FULL_BOUNDARY_COVERAGE');
+  });
+
+  it('replays restart, partial-day state, and R1 conflict identically without checkpoint state', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-r2b2-'));
+    const path = join(dir, 'journal.jsonl');
+    try {
+      const journal = createFileEventJournal(path);
+      const kernel = createTradingKernel({ exchange: 'gateio', journal,
+        initialSequence: journal.lastSequence, clock: { now: () => DAY_BOUNDARY + journal.lastSequence + 1 } });
+      const live = createGateIoDurableAccountRiskMetricProjector();
+      applyEconomic(kernel, live, economicFact());
+      applyPolicy(kernel, live, policy({ effectiveAt: DAY_BOUNDARY - 86_400_000 }));
+      applyObservation(kernel, live, valueObservation(DAY_BOUNDARY + 12 * 60 * 60_000, '100'));
+      const partial = live.snapshot(IDENTITY, DAY_BOUNDARY + 12 * 60 * 60_000);
+      assert.equal(partial.status, 'PARTIAL_DAY');
+      applyEconomic(kernel, live, economicFact({ change: '-0.02' }));
+      const conflicted = live.snapshot(IDENTITY, DAY_BOUNDARY + 12 * 60 * 60_000);
+      assert.equal(conflicted.status, 'ECONOMIC_CONFLICT');
+
+      const recovered = createGateIoDurableAccountRiskMetricProjector();
+      const report = replayJournal(createFileEventJournal(path), durableProjectorMap(recovered));
+      assert.deepEqual(report.errors, []);
+      assert.deepEqual(recovered.snapshot(IDENTITY, DAY_BOUNDARY + 12 * 60 * 60_000), conflicted);
+      assert.equal(recovered.digest(), live.digest());
+      const second = createGateIoDurableAccountRiskMetricProjector();
+      assert.deepEqual(replayJournal(createFileEventJournal(path), durableProjectorMap(second)).errors, []);
+      assert.equal(second.digest(), recovered.digest());
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 function truth(overrides: {
@@ -116,6 +419,96 @@ function projectorMap(foundation: ReturnType<typeof createGateIoAccountMetricFou
   return new Map([
     [GATEIO_ACCOUNT_FACT_OBSERVED, [foundation]],
     [ACCOUNT_RISK_METRIC_POLICY_ACTIVATED, [foundation]],
+  ]) as ProjectorMap;
+}
+
+const DAY_BOUNDARY = Date.UTC(2027, 0, 15, 0, 0, 0);
+
+function economicFact(overrides: {
+  id?: string;
+  type?: string;
+  change?: string;
+  balance?: string;
+} = {}): GateIoCanonicalEconomicEvent {
+  const event = normalizeGateIoAccountBookPage([{
+    id: overrides.id ?? 'risk-health-1',
+    time: DAY_BOUNDARY / 1_000,
+    type: overrides.type ?? 'fee',
+    change: overrides.change ?? '-0.01',
+    balance: overrides.balance ?? '100',
+  }], { observedAt: DAY_BOUNDARY, pageRequest: { limit: 100, offset: 0 } })[0];
+  assert.ok(event);
+  return event;
+}
+
+function applyPolicy(
+  kernel: TradingKernel,
+  projector: ReturnType<typeof createGateIoDurableAccountRiskMetricProjector>,
+  configured: AccountRiskMetricPolicy,
+): void {
+  projector.apply(kernel.publish(ACCOUNT_RISK_METRIC_POLICY_ACTIVATED, {
+    policy: configured,
+    policyDigest: accountRiskMetricPolicyDigest(configured),
+  }).envelope);
+}
+
+function applyObservation(
+  kernel: TradingKernel,
+  projector: ReturnType<typeof createGateIoDurableAccountRiskMetricProjector>,
+  observed: GateIoDurableAccountObservation,
+): void {
+  projector.apply(kernel.publish(GATEIO_ACCOUNT_FACT_OBSERVED, {
+    observation: observed,
+    observationDigest: gateIoAccountObservationDigest(observed),
+  }).envelope);
+}
+
+function applyEconomic(
+  kernel: TradingKernel,
+  projector: ReturnType<typeof createGateIoDurableAccountRiskMetricProjector>,
+  fact: GateIoCanonicalEconomicEvent,
+): void {
+  projector.apply(kernel.publish(GATEIO_ECONOMIC_EVENT_RECORDED, {
+    fact,
+    factDigest: gateIoEconomicFactDigest(fact),
+  }).envelope);
+}
+
+function durableHarness(configured: AccountRiskMetricPolicy = policy({
+  effectiveAt: DAY_BOUNDARY - 86_400_000,
+  accountObservationMaxAgeMs: 30_000,
+})) {
+  const projector = createGateIoDurableAccountRiskMetricProjector();
+  let clockTick = 0;
+  const kernel = createTradingKernel({
+    exchange: 'gateio',
+    clock: { now: () => DAY_BOUNDARY + (++clockTick) },
+  });
+  applyEconomic(kernel, projector, economicFact());
+  applyPolicy(kernel, projector, configured);
+  return { kernel, projector, configured };
+}
+
+function valueObservation(
+  observedAt: number,
+  value: string,
+  overrides: Partial<GateIoDurableAccountObservation> = {},
+): GateIoDurableAccountObservation {
+  return observation({
+    observedAt,
+    totalExact: value,
+    unrealisedPnlExact: '0',
+    ...overrides,
+  });
+}
+
+function durableProjectorMap(
+  projector: ReturnType<typeof createGateIoDurableAccountRiskMetricProjector>,
+): ProjectorMap {
+  return new Map([
+    [GATEIO_ECONOMIC_EVENT_RECORDED, [projector]],
+    [GATEIO_ACCOUNT_FACT_OBSERVED, [projector]],
+    [ACCOUNT_RISK_METRIC_POLICY_ACTIVATED, [projector]],
   ]) as ProjectorMap;
 }
 

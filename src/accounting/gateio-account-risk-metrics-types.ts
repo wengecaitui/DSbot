@@ -90,6 +90,69 @@ export interface GateIoAccountMetricFoundationSnapshot {
   readonly lastKernelLogicalSequence: number | null;
 }
 
+export type AccountRiskMetricStatus =
+  | 'AVAILABLE'
+  | 'PARTIAL_DAY'
+  | 'POLICY_UNAVAILABLE'
+  | 'CURRENT_VALUE_UNAVAILABLE'
+  | 'STALE'
+  | 'ECONOMIC_CONFLICT'
+  | 'UNCLASSIFIED_ECONOMIC_ACTIVITY'
+  | 'IDENTITY_INVALID'
+  | 'UNSUPPORTED_ACCOUNT_MODE'
+  | 'COVERAGE_UNKNOWN';
+
+export type AccountBoundaryCoverage =
+  | 'FULL_BOUNDARY_COVERAGE'
+  | 'PARTIAL_DAY_BOOTSTRAP'
+  | 'COVERAGE_UNKNOWN';
+
+export interface AcceptedAccountMetricPoint {
+  readonly kernelLogicalSequence: number;
+  readonly observationId: string;
+  readonly observedAt: number;
+  readonly derivedAccountValueExact: string;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly policyEffectiveAt: number;
+  readonly epochId: string;
+}
+
+export interface DailyAccountMetricBaseline {
+  readonly status: 'AVAILABLE' | 'PARTIAL_DAY' | 'COVERAGE_UNKNOWN';
+  readonly accountingDayId: string;
+  readonly boundaryAt: number | null;
+  readonly coverage: AccountBoundaryCoverage;
+  readonly valueExact: string | null;
+  readonly sourceObservationId: string | null;
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly qualifiedAt: number | null;
+  readonly reasons: readonly string[];
+}
+
+export interface GateIoDurableAccountRiskMetricsSnapshot {
+  readonly schemaVersion: 'gateio-durable-account-risk-metrics-v1';
+  readonly evaluatedAt: number;
+  readonly accountingDayId: string | null;
+  readonly activePolicyId: string | null;
+  readonly activePolicyVersion: number | null;
+  readonly metricEpochId: string | null;
+  readonly status: AccountRiskMetricStatus;
+  readonly reasons: readonly string[];
+  readonly currentQualifiedAccountValueExact: string | null;
+  readonly baseline: DailyAccountMetricBaseline | null;
+  readonly dailyEquityLossExact: string | null;
+  readonly epochHighWaterExact: string | null;
+  readonly drawdownAbsoluteExact: string | null;
+  readonly drawdownFractionExact: string | null;
+  readonly drawdownFractionScale: 18;
+  readonly drawdownFractionRounding: 'ROUND_HALF_UP';
+  readonly acceptedMetricPoints: readonly AcceptedAccountMetricPoint[];
+  readonly historicalStateRetained: boolean;
+  readonly lastKernelLogicalSequence: number | null;
+}
+
 export type QualifiedAccountValueStatus =
   | 'AVAILABLE'
   | 'POLICY_UNAVAILABLE'

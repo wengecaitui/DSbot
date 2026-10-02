@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { TradingKernel } from '../kernel/TradingKernel';
 import type { KernelEventEnvelope } from '../kernel/KernelEventEnvelope';
+import { createGateIoEconomicLedger, GateIoEconomicLedgerError } from './gateio-economic-ledger';
+import { projectGateIoEconomicState } from './gateio-economic-projection';
 import {
   GATEIO_L1A_SCHEMA_VERSION,
   GATEIO_L1A_SOURCE,
@@ -24,7 +26,14 @@ import {
   type GateIoDurableAccountObservation,
   type QualifiedAccountValueCandidate,
   type QualifiedAccountValueStatus,
+  type AcceptedAccountMetricPoint,
+  type AccountBoundaryCoverage,
+  type AccountRiskMetricStatus,
+  type DailyAccountMetricBaseline,
+  type GateIoDurableAccountRiskMetricsSnapshot,
 } from './gateio-account-risk-metrics-types';
+import { GATEIO_ECONOMIC_EVENT_RECORDED } from './gateio-economic-ledger-types';
+import type { GateIoEconomicProjection } from './gateio-economic-projection-types';
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const EXACT_DECIMAL = /^-?[0-9]+(?:\.[0-9]+)?$/;
@@ -487,6 +496,47 @@ function addExactDecimals(left: string, right: string): string | null {
   return exactDecimal({ coefficient, scale });
 }
 
+function compareExactDecimals(left: string, right: string): number | null {
+  const a = parseExactDecimal(left);
+  const b = parseExactDecimal(right);
+  if (a === null || b === null) return null;
+  const scale = Math.max(a.scale, b.scale);
+  const leftCoefficient = a.coefficient * (10n ** BigInt(scale - a.scale));
+  const rightCoefficient = b.coefficient * (10n ** BigInt(scale - b.scale));
+  return leftCoefficient < rightCoefficient ? -1 : leftCoefficient > rightCoefficient ? 1 : 0;
+}
+
+function subtractExactDecimals(left: string, right: string): string | null {
+  const b = parseExactDecimal(right);
+  if (b === null) return null;
+  return addExactDecimals(left, exactDecimal({ coefficient: -b.coefficient, scale: b.scale }));
+}
+
+function nonNegativeDifference(left: string, right: string): string | null {
+  const comparison = compareExactDecimals(left, right);
+  if (comparison === null) return null;
+  if (comparison <= 0) return '0';
+  return subtractExactDecimals(left, right);
+}
+
+const DRAWDOWN_FRACTION_SCALE = 18 as const;
+
+function divideExactDecimals(
+  numerator: string,
+  denominator: string,
+  scale = DRAWDOWN_FRACTION_SCALE,
+): string | null {
+  const a = parseExactDecimal(numerator);
+  const b = parseExactDecimal(denominator);
+  if (a === null || b === null || b.coefficient <= 0n) return null;
+  const dividend = a.coefficient * (10n ** BigInt(scale + b.scale));
+  const divisor = b.coefficient * (10n ** BigInt(a.scale));
+  let quotient = dividend / divisor;
+  const remainder = dividend % divisor;
+  if (remainder * 2n >= divisor) quotient += 1n;
+  return exactDecimal({ coefficient: quotient, scale });
+}
+
 function candidate(
   status: QualifiedAccountValueStatus,
   reasons: readonly string[],
@@ -552,6 +602,13 @@ export function projectQualifiedAccountValue(input: {
   if (input.observation.accountModeQualification !== 'SUPPORTED_CLASSIC') {
     return candidate('ACCOUNT_MODE_UNSUPPORTED', ['ACCOUNT_MODE_UNSUPPORTED'], observationDetails);
   }
+  if (input.observation.captureProvenance.foundationFreshness === 'STALE') {
+    return candidate('STALE', ['ACCOUNT_FOUNDATION_REPORTED_STALE'], observationDetails);
+  }
+  if (input.observation.captureProvenance.foundationFreshness !== 'FRESH') {
+    return candidate('SOURCE_UNAVAILABLE', ['ACCOUNT_FOUNDATION_FRESHNESS_UNKNOWN'],
+      observationDetails);
+  }
   const ageMs = input.evaluationTime - input.observation.observedAt;
   if (!Number.isSafeInteger(ageMs) || ageMs < 0) {
     return candidate('MALFORMED', ['OBSERVATION_TIME_AFTER_EVALUATION'], observationDetails);
@@ -573,5 +630,448 @@ export function projectQualifiedAccountValue(input: {
     ageMs,
     derivedAccountValueExact: derived,
     formula: CLASSIC_TOTAL_PLUS_UNREALISED_PNL_V1,
+  });
+}
+
+export interface GateIoDurableAccountRiskMetricProjector {
+  apply(envelope: unknown): 'RECORDED' | 'DUPLICATE_SAME_FACT';
+  snapshot(
+    expectedIdentity: GateIoAccountRiskIdentity,
+    evaluationTime: number,
+  ): GateIoDurableAccountRiskMetricsSnapshot;
+  digest(): string;
+}
+
+interface ZonedParts {
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
+  readonly hour: number;
+  readonly minute: number;
+  readonly second: number;
+}
+
+function zonedParts(timestamp: number, timezone: string): ZonedParts | null {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(timestamp);
+    const value = (type: Intl.DateTimeFormatPartTypes): number =>
+      Number(parts.find((entry) => entry.type === type)?.value);
+    const result = {
+      year: value('year'), month: value('month'), day: value('day'),
+      hour: value('hour'), minute: value('minute'), second: value('second'),
+    };
+    return Object.values(result).every(Number.isSafeInteger) ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+function dateKey(parts: Pick<ZonedParts, 'year' | 'month' | 'day'>): string {
+  return `${parts.year.toString().padStart(4, '0')}-${parts.month.toString().padStart(2, '0')}`
+    + `-${parts.day.toString().padStart(2, '0')}`;
+}
+
+function shiftUtcDate(date: string, days: number): string | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (match === null) return null;
+  const shifted = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days));
+  return `${shifted.getUTCFullYear().toString().padStart(4, '0')}`
+    + `-${(shifted.getUTCMonth() + 1).toString().padStart(2, '0')}`
+    + `-${shifted.getUTCDate().toString().padStart(2, '0')}`;
+}
+
+function localDateTimeEpoch(
+  date: string,
+  localBoundaryTime: string,
+  timezone: string,
+): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  const time = /^(\d{2}):(\d{2}):(\d{2})$/.exec(localBoundaryTime);
+  if (match === null || time === null) return null;
+  const target = {
+    year: Number(match[1]), month: Number(match[2]), day: Number(match[3]),
+    hour: Number(time[1]), minute: Number(time[2]), second: Number(time[3]),
+  };
+  const targetAsUtc = Date.UTC(
+    target.year, target.month - 1, target.day, target.hour, target.minute, target.second,
+  );
+  const offsets = new Set<number>();
+  for (let hour = -36; hour <= 36; hour += 6) {
+    const probe = targetAsUtc + hour * 60 * 60 * 1_000;
+    const parts = zonedParts(probe, timezone);
+    if (parts !== null) {
+      offsets.add(Date.UTC(
+        parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second,
+      ) - probe);
+    }
+  }
+  const candidates = [...offsets]
+    .map((offset) => targetAsUtc - offset)
+    .filter((candidate) => {
+      const parts = zonedParts(candidate, timezone);
+      return parts !== null && Object.entries(target).every(
+        ([key, value]) => parts[key as keyof ZonedParts] === value,
+      );
+    })
+    .sort((left, right) => left - right);
+  // A repeated DST wall time chooses the earlier instant deterministically.
+  // A skipped wall time has no candidate and is fail-closed as coverage unknown.
+  return candidates[0] ?? null;
+}
+
+function accountingDay(
+  policy: AccountRiskMetricPolicy,
+  timestamp: number,
+): { id: string; localDate: string; boundaryAt: number | null } | null {
+  const parts = zonedParts(timestamp, policy.dayBoundary.timezone);
+  if (parts === null) return null;
+  const localTime = `${parts.hour.toString().padStart(2, '0')}`
+    + `:${parts.minute.toString().padStart(2, '0')}`
+    + `:${parts.second.toString().padStart(2, '0')}`;
+  let localDate = dateKey(parts);
+  if (localTime < policy.dayBoundary.localBoundaryTime) {
+    const prior = shiftUtcDate(localDate, -1);
+    if (prior === null) return null;
+    localDate = prior;
+  }
+  const boundaryAt = localDateTimeEpoch(
+    localDate, policy.dayBoundary.localBoundaryTime, policy.dayBoundary.timezone,
+  );
+  const id = canonicalJSON([
+    policy.exchange, policy.settle, policy.accountId, policy.policyId, policy.policyVersion,
+    policy.effectiveAt, policy.dayBoundary.timezone, policy.dayBoundary.localBoundaryTime, localDate,
+  ]);
+  return { id, localDate, boundaryAt };
+}
+
+function metricEpochId(policy: AccountRiskMetricPolicy): string {
+  return sha256(canonicalJSON([
+    policy.exchange, policy.settle, policy.accountId, policy.policyId, policy.policyVersion,
+    policy.effectiveAt, policy.accountValueFormula, policy.accountObservationMaxAgeMs,
+    policy.dayBoundary.timezone, policy.dayBoundary.localBoundaryTime,
+  ]));
+}
+
+function economicHealth(projection: GateIoEconomicProjection): {
+  readonly status: AccountRiskMetricStatus;
+  readonly reasons: readonly string[];
+} {
+  if (projection.identityConflictCount > 0 || projection.completenessStatus === 'CONFLICTED') {
+    return { status: 'ECONOMIC_CONFLICT', reasons: ['ECONOMIC_IDENTITY_CONFLICT'] };
+  }
+  if (projection.unclassifiedEventCount > 0
+      || projection.completenessStatus === 'UNCLASSIFIED_PRESENT') {
+    return {
+      status: 'UNCLASSIFIED_ECONOMIC_ACTIVITY',
+      reasons: ['UNCLASSIFIED_ECONOMIC_ACTIVITY_PRESENT'],
+    };
+  }
+  if (projection.balanceStatus === 'AMBIGUOUS_TERMINAL_ORDER') {
+    return {
+      status: 'CURRENT_VALUE_UNAVAILABLE',
+      reasons: ['ECONOMIC_TERMINAL_BALANCE_AMBIGUOUS'],
+    };
+  }
+  if (!projection.projectionUsableForObservedAccounting) {
+    return { status: 'CURRENT_VALUE_UNAVAILABLE', reasons: ['ECONOMIC_PROJECTION_UNUSABLE'] };
+  }
+  return { status: 'AVAILABLE', reasons: [] };
+}
+
+function statusFromCandidate(candidateValue: QualifiedAccountValueCandidate): AccountRiskMetricStatus {
+  switch (candidateValue.status) {
+    case 'POLICY_UNAVAILABLE': return 'POLICY_UNAVAILABLE';
+    case 'STALE': return 'STALE';
+    case 'ACCOUNT_IDENTITY_INVALID': return 'IDENTITY_INVALID';
+    case 'ACCOUNT_MODE_UNSUPPORTED':
+    case 'ACCOUNT_MODE_UNKNOWN': return 'UNSUPPORTED_ACCOUNT_MODE';
+    default: return 'CURRENT_VALUE_UNAVAILABLE';
+  }
+}
+
+function dailyBaseline(
+  policy: AccountRiskMetricPolicy,
+  day: { id: string; boundaryAt: number | null },
+  epochPoints: readonly AcceptedAccountMetricPoint[],
+  evaluationTime: number,
+): DailyAccountMetricBaseline {
+  const common = {
+    accountingDayId: day.id,
+    boundaryAt: day.boundaryAt,
+    policyId: policy.policyId,
+    policyVersion: policy.policyVersion,
+  };
+  if (day.boundaryAt === null) {
+    return cloneFreeze({
+      ...common, status: 'COVERAGE_UNKNOWN' as const, coverage: 'COVERAGE_UNKNOWN' as const,
+      valueExact: null, sourceObservationId: null, qualifiedAt: null,
+      reasons: ['LOCAL_BOUNDARY_INSTANT_UNRESOLVABLE'],
+    });
+  }
+  const after = epochPoints.filter((point) =>
+    point.observedAt >= day.boundaryAt! && point.observedAt <= evaluationTime)
+    .sort((left, right) => left.observedAt - right.observedAt
+      || left.observationId.localeCompare(right.observationId))[0];
+  const before = epochPoints.filter((point) => point.observedAt <= day.boundaryAt!)
+    .sort((left, right) => right.observedAt - left.observedAt
+      || left.observationId.localeCompare(right.observationId))[0];
+  const full = policy.effectiveAt <= day.boundaryAt
+    && before !== undefined && after !== undefined
+    && day.boundaryAt - before.observedAt <= policy.accountObservationMaxAgeMs
+    && after.observedAt - day.boundaryAt <= policy.accountObservationMaxAgeMs
+    && after.observedAt - before.observedAt <= policy.accountObservationMaxAgeMs;
+  if (!full) {
+    const reasons = ['DAY_OPEN_VALUE_NOT_PROVEN'];
+    if (policy.effectiveAt > day.boundaryAt) reasons.push('POLICY_EPOCH_STARTED_AFTER_BOUNDARY');
+    if (before === undefined) reasons.push('PRE_BOUNDARY_OBSERVATION_MISSING');
+    if (after === undefined) reasons.push('POST_BOUNDARY_OBSERVATION_MISSING');
+    if (before !== undefined && after !== undefined
+        && after.observedAt - before.observedAt > policy.accountObservationMaxAgeMs) {
+      reasons.push('BOUNDARY_OBSERVATION_GAP_EXCEEDS_POLICY_FRESHNESS');
+    }
+    return cloneFreeze({
+      ...common, status: 'PARTIAL_DAY' as const,
+      coverage: 'PARTIAL_DAY_BOOTSTRAP' as AccountBoundaryCoverage,
+      valueExact: null, sourceObservationId: null, qualifiedAt: null, reasons,
+    });
+  }
+  return cloneFreeze({
+    ...common, status: 'AVAILABLE' as const,
+    coverage: 'FULL_BOUNDARY_COVERAGE' as AccountBoundaryCoverage,
+    valueExact: after.derivedAccountValueExact,
+    sourceObservationId: after.observationId,
+    qualifiedAt: after.observedAt,
+    reasons: [],
+  });
+}
+
+/**
+ * Replays only canonical durable R1/R2B1 facts. Derived metrics are rebuilt from
+ * event order; no checkpoint and no last-write-wins metric record is required.
+ */
+export function createGateIoDurableAccountRiskMetricProjector():
+GateIoDurableAccountRiskMetricProjector {
+  const foundation = createGateIoAccountMetricFoundation();
+  const economicLedger = createGateIoEconomicLedger();
+  const accepted = new Map<string, AcceptedAccountMetricPoint>();
+  const eventFingerprints = new Map<string, string>();
+  const accountFoundationFailureReasons = new Set<string>();
+  const economicFailureReasons = new Set<string>();
+  let lastSequence: number | null = null;
+
+  function apply(value: unknown): 'RECORDED' | 'DUPLICATE_SAME_FACT' {
+    if (!isRecord(value) || typeof value.kernelEventId !== 'string'
+        || !SHA256.test(value.kernelEventId)
+        || !Number.isSafeInteger(value.kernelLogicalSequence)
+        || (value.kernelLogicalSequence as number) <= 0
+        || (value.type !== GATEIO_ECONOMIC_EVENT_RECORDED
+          && value.type !== GATEIO_ACCOUNT_FACT_OBSERVED
+          && value.type !== ACCOUNT_RISK_METRIC_POLICY_ACTIVATED)) {
+      fail('GATEIO_ACCOUNT_METRIC_ENVELOPE_INVALID');
+    }
+    const fingerprint = sha256(canonicalJSON(value));
+    const prior = eventFingerprints.get(value.kernelEventId);
+    if (prior !== undefined) {
+      if (prior !== fingerprint) fail('GATEIO_ACCOUNT_METRIC_EVENT_CONFLICT');
+      return 'DUPLICATE_SAME_FACT';
+    }
+    if (lastSequence !== null && (value.kernelLogicalSequence as number) <= lastSequence) {
+      fail('GATEIO_ACCOUNT_METRIC_REPLAY_ORDER_INVALID');
+    }
+    eventFingerprints.set(value.kernelEventId, fingerprint);
+    lastSequence = value.kernelLogicalSequence as number;
+
+    if (value.type === GATEIO_ECONOMIC_EVENT_RECORDED) {
+      try { economicLedger.apply(value); }
+      catch (error) {
+        if (error instanceof GateIoEconomicLedgerError
+            && error.code === 'GATEIO_ECONOMIC_IDENTITY_CONFLICT') return 'RECORDED';
+        economicFailureReasons.add(error instanceof Error ? error.message : 'ECONOMIC_STATE_MALFORMED');
+        throw error;
+      }
+      return 'RECORDED';
+    }
+
+    let result: 'RECORDED' | 'DUPLICATE_SAME_FACT';
+    try { result = foundation.apply(value); }
+    catch (error) {
+      if (error instanceof GateIoAccountMetricFoundationError
+          && (error.code === 'GATEIO_ACCOUNT_OBSERVATION_IDENTITY_CONFLICT'
+            || error.code === 'ACCOUNT_RISK_METRIC_POLICY_IDENTITY_CONFLICT')) {
+        accountFoundationFailureReasons.add(error.code);
+      }
+      throw error;
+    }
+    if (value.type !== GATEIO_ACCOUNT_FACT_OBSERVED || result !== 'RECORDED') return result;
+    const observation = (value.payload as unknown as GateIoAccountFactObservedPayload).observation;
+    const policy = foundation.activePolicyAt(observation, observation.observedAt);
+    const health = economicHealth(projectGateIoEconomicState(economicLedger.snapshot()));
+    const qualified = projectQualifiedAccountValue({
+      observation, policy, evaluationTime: observation.observedAt, expectedIdentity: observation,
+    });
+    if (health.status === 'AVAILABLE' && economicFailureReasons.size === 0
+        && accountFoundationFailureReasons.size === 0
+        && qualified.status === 'AVAILABLE' && policy !== null
+        && observation.observedAt >= policy.effectiveAt
+        && qualified.derivedAccountValueExact !== null && qualified.observationId !== null) {
+      accepted.set(qualified.observationId, cloneFreeze({
+        kernelLogicalSequence: value.kernelLogicalSequence as number,
+        observationId: qualified.observationId,
+        observedAt: observation.observedAt,
+        derivedAccountValueExact: qualified.derivedAccountValueExact,
+        policyId: policy.policyId,
+        policyVersion: policy.policyVersion,
+        policyEffectiveAt: policy.effectiveAt,
+        epochId: metricEpochId(policy),
+      }));
+    }
+    return result;
+  }
+
+  function snapshot(
+    expectedIdentity: GateIoAccountRiskIdentity,
+    evaluationTime: number,
+  ): GateIoDurableAccountRiskMetricsSnapshot {
+    const policy = foundation.activePolicyAt(expectedIdentity, evaluationTime);
+    const base = {
+      schemaVersion: 'gateio-durable-account-risk-metrics-v1' as const,
+      evaluatedAt: evaluationTime,
+      accountingDayId: null,
+      activePolicyId: policy?.policyId ?? null,
+      activePolicyVersion: policy?.policyVersion ?? null,
+      metricEpochId: policy === null ? null : metricEpochId(policy),
+      currentQualifiedAccountValueExact: null,
+      baseline: null,
+      dailyEquityLossExact: null,
+      epochHighWaterExact: null,
+      drawdownAbsoluteExact: null,
+      drawdownFractionExact: null,
+      drawdownFractionScale: DRAWDOWN_FRACTION_SCALE,
+      drawdownFractionRounding: 'ROUND_HALF_UP' as const,
+      acceptedMetricPoints: [] as readonly AcceptedAccountMetricPoint[],
+      historicalStateRetained: false,
+      lastKernelLogicalSequence: lastSequence,
+    };
+    if (!Number.isSafeInteger(evaluationTime) || evaluationTime <= 0 || !validIdentity(expectedIdentity)) {
+      return cloneFreeze({ ...base, status: 'IDENTITY_INVALID' as const,
+        reasons: ['EVALUATION_OR_ACCOUNT_IDENTITY_INVALID'] });
+    }
+    if (policy === null) {
+      const policyState = foundation.snapshot();
+      const sameAccountPolicy = policyState.policies.some((entry) =>
+        sameIdentity(entry.policy, expectedIdentity));
+      const anyPolicy = policyState.policies.length > 0;
+      return cloneFreeze({ ...base,
+        status: anyPolicy && !sameAccountPolicy
+          ? 'IDENTITY_INVALID' as const : 'POLICY_UNAVAILABLE' as const,
+        reasons: [...accountFoundationFailureReasons, anyPolicy && !sameAccountPolicy
+          ? 'NO_POLICY_FOR_EXPECTED_ACCOUNT_IDENTITY' : 'POLICY_UNAVAILABLE_OR_CONFLICTED'],
+      });
+    }
+    const epochId = metricEpochId(policy);
+    const points = [...accepted.values()].filter((point) =>
+      point.epochId === epochId && point.observedAt <= evaluationTime)
+      .sort((left, right) => left.observedAt - right.observedAt
+        || left.observationId.localeCompare(right.observationId));
+    let highWater: string | null = null;
+    for (const point of points) {
+      if (highWater === null || compareExactDecimals(point.derivedAccountValueExact, highWater) === 1) {
+        highWater = point.derivedAccountValueExact;
+      }
+    }
+    const day = accountingDay(policy, evaluationTime);
+    const baseline = day === null ? null : dailyBaseline(policy, day, points, evaluationTime);
+    const historical = highWater !== null || baseline?.valueExact !== null;
+    const withHistory = {
+      ...base,
+      accountingDayId: day?.id ?? null,
+      metricEpochId: epochId,
+      baseline,
+      epochHighWaterExact: highWater,
+      acceptedMetricPoints: points,
+      historicalStateRetained: historical,
+    };
+    if (accountFoundationFailureReasons.size > 0) {
+      return cloneFreeze({
+        ...withHistory,
+        status: 'IDENTITY_INVALID' as const,
+        reasons: [...accountFoundationFailureReasons].sort(),
+      });
+    }
+    if (economicFailureReasons.size > 0) {
+      return cloneFreeze({
+        ...withHistory,
+        status: 'CURRENT_VALUE_UNAVAILABLE' as const,
+        reasons: ['ECONOMIC_STATE_MALFORMED', ...economicFailureReasons].sort(),
+      });
+    }
+    const projection = projectGateIoEconomicState(economicLedger.snapshot());
+    const health = economicHealth(projection);
+    if (health.status !== 'AVAILABLE') {
+      return cloneFreeze({ ...withHistory, status: health.status, reasons: health.reasons });
+    }
+    const observation = foundation.latestObservationAt(expectedIdentity, evaluationTime);
+    const current = projectQualifiedAccountValue({
+      observation, policy, evaluationTime, expectedIdentity,
+    });
+    if (current.status !== 'AVAILABLE' || current.derivedAccountValueExact === null
+        || current.observationId === null) {
+      return cloneFreeze({ ...withHistory, status: statusFromCandidate(current),
+        reasons: current.reasons });
+    }
+    if (!accepted.has(current.observationId)) {
+      return cloneFreeze({ ...withHistory, status: 'CURRENT_VALUE_UNAVAILABLE' as const,
+        reasons: ['CURRENT_OBSERVATION_NOT_ACCEPTED_UNDER_VALID_ECONOMIC_HEALTH'] });
+    }
+    if (day === null || baseline === null) {
+      return cloneFreeze({ ...withHistory, status: 'COVERAGE_UNKNOWN' as const,
+        reasons: ['ACCOUNTING_DAY_UNRESOLVABLE'] });
+    }
+    if (baseline.status !== 'AVAILABLE' || baseline.valueExact === null) {
+      return cloneFreeze({ ...withHistory,
+        status: baseline.status === 'COVERAGE_UNKNOWN' ? 'COVERAGE_UNKNOWN' as const
+          : 'PARTIAL_DAY' as const,
+        reasons: baseline.reasons,
+        currentQualifiedAccountValueExact: current.derivedAccountValueExact,
+      });
+    }
+    const dailyLoss = nonNegativeDifference(
+      baseline.valueExact, current.derivedAccountValueExact,
+    );
+    const drawdown = highWater === null ? null
+      : nonNegativeDifference(highWater, current.derivedAccountValueExact);
+    const fraction = highWater === null || drawdown === null
+      || compareExactDecimals(highWater, '0') !== 1
+      ? null : divideExactDecimals(drawdown, highWater);
+    const reasons = fraction === null && highWater !== null
+      ? ['DRAWDOWN_FRACTION_UNAVAILABLE_NON_POSITIVE_HIGH_WATER'] : [];
+    return cloneFreeze({
+      ...withHistory,
+      status: 'AVAILABLE' as const,
+      reasons,
+      currentQualifiedAccountValueExact: current.derivedAccountValueExact,
+      dailyEquityLossExact: dailyLoss,
+      drawdownAbsoluteExact: drawdown,
+      drawdownFractionExact: fraction,
+    });
+  }
+
+  return Object.freeze({
+    apply,
+    snapshot,
+    digest: () => sha256(canonicalJSON({
+      foundation: foundation.snapshot(),
+      economic: economicLedger.snapshot(),
+      accountFoundationFailureReasons: [...accountFoundationFailureReasons].sort(),
+      economicFailureReasons: [...economicFailureReasons].sort(),
+      accepted: [...accepted.values()].sort((left, right) =>
+        left.kernelLogicalSequence - right.kernelLogicalSequence),
+      lastSequence,
+    })),
   });
 }
