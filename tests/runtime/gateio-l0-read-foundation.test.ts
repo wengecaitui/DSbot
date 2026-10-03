@@ -35,6 +35,7 @@ import {
   type GateIoReadFetch,
   type GateIoReadResponse,
 } from '../../src/runtime/gateio/GateIoReadTransport';
+import { gateIoExactDecimalSource } from '../../src/runtime/gateio/GateIoExactInt64Recovery';
 
 const FIXTURE_API_KEY = 'FIXTURE_GATEIO_API_KEY_DO_NOT_LEAK';
 const FIXTURE_SECRET = 'FIXTURE_GATEIO_SECRET_DO_NOT_LEAK';
@@ -95,6 +96,18 @@ function serializedError(error: Error): string {
 }
 
 describe('Gate.io L0 read foundation', () => {
+  it('preserves exact account decimal tokens through the real transport parser', async () => {
+    const raw = '{"currency":"USDT","total":9007199254740993.123456789,'
+      + '"available":8007199254740993.000000001,"unrealised_pnl":-0.000000001}';
+    const transport = createGateIoReadTransport(async () =>
+      textResponse(200, raw, { 'content-type': 'application/json' }));
+    const response = await transport.get(authenticatedRequest(GATEIO_READ_ENDPOINTS.ACCOUNTS));
+    const parsed = response as Record<string, unknown>;
+    assert.equal(gateIoExactDecimalSource(parsed, 'total'), '9007199254740993.123456789');
+    assert.equal(gateIoExactDecimalSource(parsed, 'available'), '8007199254740993.000000001');
+    assert.equal(gateIoExactDecimalSource(parsed, 'unrealised_pnl'), '-0.000000001');
+  });
+
   it('1. freezes the exact live scope and eight-endpoint allowlist', () => {
     assert.equal(GATEIO_L0_LIVE_ORIGIN, 'https://api.gateio.ws');
     assert.equal(GATEIO_API_PREFIX, '/api/v4');

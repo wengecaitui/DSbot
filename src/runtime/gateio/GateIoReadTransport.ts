@@ -358,7 +358,12 @@ function createReadTransport(
           ? parseGateIoExactInt64Json(text, {
             shape: 'array', fields: ['id', 'order_id'], decimalFields: ['create_time'],
           })
-          : JSON.parse(text);
+          : validated.endpoint === GATEIO_READ_ENDPOINTS.ACCOUNTS
+            ? parseGateIoExactInt64Json(text, {
+              shape: 'object', fields: [],
+              decimalFields: ['total', 'available', 'unrealised_pnl'], required: false,
+            })
+            : JSON.parse(text);
       } catch {
         if (!response.ok) {
           throw new GateIoReadTransportError(
