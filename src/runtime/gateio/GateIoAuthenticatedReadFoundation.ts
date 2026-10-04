@@ -58,9 +58,18 @@ export interface GateIoFoundationReadResult<T> {
 
 export interface GateIoCanonicalAccount {
   readonly currency: 'USDT';
+  /** Legacy numeric compatibility only. R2 accounting must consume totalExact. */
   readonly total: number;
+  /** Exact Gate source token, or null when an injected legacy object has no lexical evidence. */
+  readonly totalExact: string | null;
+  /** Legacy numeric compatibility only. R2 accounting must consume availableExact. */
   readonly available: number;
+  /** Exact Gate source token, or null when an injected legacy object has no lexical evidence. */
+  readonly availableExact: string | null;
+  /** Legacy numeric compatibility only. R2 accounting must consume unrealizedPnlExact. */
   readonly unrealizedPnl: number | null;
+  /** Exact Gate source token; null means missing or lacking lexical source evidence, never zero. */
+  readonly unrealizedPnlExact: string | null;
   readonly orderMargin: number | null;
   readonly inDualMode: boolean | null;
   readonly positionMode: string | null;
@@ -262,6 +271,21 @@ function optionalDecimal(value: unknown): number | null {
   return decimal(value);
 }
 
+const GATEIO_EXACT_ACCOUNT_DECIMAL = /^-?[0-9]+(?:\.[0-9]+)?$/;
+
+/** Never reconstructs an exchange decimal from a parsed JS number. */
+function exactAccountDecimalSource(
+  raw: Record<string, unknown>,
+  field: 'total' | 'available' | 'unrealised_pnl',
+): string | null {
+  const value = raw[field];
+  if (value === undefined || value === null) return null;
+  const lexical = typeof value === 'string' ? value : gateIoExactDecimalSource(raw, field);
+  if (lexical === null) return null;
+  if (!GATEIO_EXACT_ACCOUNT_DECIMAL.test(lexical)) malformed('ACCOUNT_TRUTH_MALFORMED');
+  return lexical;
+}
+
 function optionalTradeValue(raw: Record<string, unknown>): string | number | null {
   if (!Object.prototype.hasOwnProperty.call(raw, 'trade_value')) return null;
   // A present null, blank, object or non-finite value is malformed, not "unavailable".
@@ -347,11 +371,17 @@ export function normalizeGateIoAccount(raw: unknown): GateIoCanonicalAccount {
     if (typeof raw.currency !== 'string' || raw.currency.toUpperCase() !== 'USDT') {
       malformed('ACCOUNT_TRUTH_MALFORMED');
     }
+    const total = decimal(raw.total);
+    const available = decimal(raw.available, { nonNegative: true });
+    const unrealizedPnl = optionalDecimal(raw.unrealised_pnl);
     return Object.freeze({
       currency: 'USDT' as const,
-      total: decimal(raw.total),
-      available: decimal(raw.available, { nonNegative: true }),
-      unrealizedPnl: optionalDecimal(raw.unrealised_pnl),
+      total,
+      totalExact: exactAccountDecimalSource(raw, 'total'),
+      available,
+      availableExact: exactAccountDecimalSource(raw, 'available'),
+      unrealizedPnl,
+      unrealizedPnlExact: exactAccountDecimalSource(raw, 'unrealised_pnl'),
       orderMargin: optionalDecimal(raw.order_margin),
       inDualMode: optionalBoolean(raw.in_dual_mode),
       positionMode: optionalText(raw.position_mode),

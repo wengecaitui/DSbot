@@ -14,6 +14,10 @@ import type { OrderCreatedPayload, OrderStatusPayload } from '../oms/oms-events'
 import type { PositionPlan } from '../position/position-plan-types';
 import type { ExecutionPreparation, OrderExecutionObservation } from '../oms/oms-types';
 import type { GateIoEconomicEventRecordedPayload } from '../accounting/gateio-economic-ledger-types';
+import type {
+  AccountRiskMetricPolicyActivatedPayload,
+  GateIoAccountFactObservedPayload,
+} from '../accounting/gateio-account-risk-metrics-types';
 
 export interface ExternalFlatBaselineEvidence {
   readonly exchange: 'gateio';
@@ -44,6 +48,8 @@ export interface TradingEventPayloadMap {
   'position.plan.archived':     { planId: string };
   'position.plan.closed':       { planId: string };
   'GATEIO_ECONOMIC_EVENT_RECORDED': GateIoEconomicEventRecordedPayload;
+  'GATEIO_ACCOUNT_FACT_OBSERVED': GateIoAccountFactObservedPayload;
+  'ACCOUNT_RISK_METRIC_POLICY_ACTIVATED': AccountRiskMetricPolicyActivatedPayload;
 }
 
 export type TradingEventType = keyof TradingEventPayloadMap;

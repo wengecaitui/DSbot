@@ -11,6 +11,10 @@ import { validatePositionBaseline } from '../types/position-state';
 import { validateExecutionPreparation, validateExecutionObservation } from '../oms/execution-observation';
 import type { ExecutionPreparation, OrderExecutionObservation } from '../oms/oms-types';
 import { validateGateIoEconomicEventRecordedPayload } from '../accounting/gateio-economic-ledger';
+import {
+  validateAccountRiskMetricPolicyActivatedPayload,
+  validateGateIoAccountFactObservedPayload,
+} from '../accounting/gateio-account-risk-metrics';
 
 export function validateTradingEventPayload(
   type: string,
@@ -18,6 +22,14 @@ export function validateTradingEventPayload(
 ): void {
   if (type === 'GATEIO_ECONOMIC_EVENT_RECORDED') {
     validateGateIoEconomicEventRecordedPayload(payload);
+    return;
+  }
+  if (type === 'GATEIO_ACCOUNT_FACT_OBSERVED') {
+    validateGateIoAccountFactObservedPayload(payload);
+    return;
+  }
+  if (type === 'ACCOUNT_RISK_METRIC_POLICY_ACTIVATED') {
+    validateAccountRiskMetricPolicyActivatedPayload(payload);
     return;
   }
   if (type === 'order.execution.prepared') {
