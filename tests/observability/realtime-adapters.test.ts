@@ -3,6 +3,8 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
+import chokidar, { type FSWatcher } from 'chokidar';
 import type { RawObservableEvent } from '../../src/observability/contracts';
 import { createGitWorkspaceAdapter, type GitSnapshot } from '../../src/observability/adapters/git-workspace-adapter';
 import { createHermesLogAdapter } from '../../src/observability/adapters/hermes-log-adapter';
@@ -24,6 +26,47 @@ async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {
 function collectingSink(events: RawObservableEvent[]) {
   return { emit(event: RawObservableEvent) { events.push(event); } };
 }
+
+test('Workspace file adapter normalizes Chokidar v4 unknown errors without changing lifecycle', async () => {
+  class FakeWatcher extends EventEmitter {
+    closeCalls = 0;
+    async close(): Promise<void> { this.closeCalls += 1; }
+  }
+
+  const watcher = new FakeWatcher();
+  const originalWatch = chokidar.watch;
+  chokidar.watch = (() => {
+    queueMicrotask(() => watcher.emit('ready'));
+    return watcher as unknown as FSWatcher;
+  }) as typeof chokidar.watch;
+
+  const received: Error[] = [];
+  const adapter = createWorkspaceFileAdapter({
+    rootPath: '.',
+    onError: error => { received.push(error); },
+  });
+  const nativeError = new Error('native');
+  const payloads: unknown[] = [nativeError, 'string failure', { code: 'OBJECT_FAILURE' }, null, undefined];
+
+  try {
+    await adapter.start(collectingSink([]));
+    for (const payload of payloads) watcher.emit('error', payload);
+
+    assert.equal(received.length, payloads.length, 'each watcher error must reach the callback exactly once');
+    assert.equal(received[0], nativeError, 'native Error identity must be preserved');
+    for (let index = 1; index < payloads.length; index += 1) {
+      assert.ok(received[index] instanceof Error);
+      assert.equal(received[index]?.cause, payloads[index]);
+    }
+
+    await adapter.stop();
+    await adapter.stop();
+    assert.equal(watcher.closeCalls, 1, 'stop remains idempotent');
+  } finally {
+    chokidar.watch = originalWatch;
+    await adapter.stop();
+  }
+});
 
 test('Hermes log adapter tails classified lines and stops cleanly', async () => {
   const root = await fs.mkdtemp(path.join(tmpdir(), 'hermes-log-adapter-'));
