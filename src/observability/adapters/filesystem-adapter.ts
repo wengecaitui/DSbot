@@ -9,6 +9,12 @@ export interface WorkspaceFileAdapterOptions {
   onError?: (error: Error) => void;
 }
 
+function normalizeWatcherError(cause: unknown): Error {
+  return cause instanceof Error
+    ? cause
+    : new Error('Workspace file watcher emitted a non-Error payload', { cause });
+}
+
 export function createWorkspaceFileAdapter(options: WorkspaceFileAdapterOptions): ObservableEventSourceAdapter {
   const rootPath = path.resolve(options.rootPath);
   const ignored = options.ignored ?? [
@@ -36,7 +42,7 @@ export function createWorkspaceFileAdapter(options: WorkspaceFileAdapterOptions)
       watcher.on('add', file => emit('filesystem.added', file));
       watcher.on('change', file => emit('filesystem.changed', file));
       watcher.on('unlink', file => emit('filesystem.deleted', file));
-      watcher.on('error', error => options.onError?.(error));
+      watcher.on('error', error => options.onError?.(normalizeWatcherError(error)));
       await new Promise<void>((resolve, reject) => {
         watcher?.once('ready', resolve);
         watcher?.once('error', reject);
