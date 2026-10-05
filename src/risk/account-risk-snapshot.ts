@@ -80,6 +80,12 @@ function economicDigest(projection: GateIoEconomicProjection): string {
   return sha256(canonicalJSON(projection));
 }
 
+export function accountRiskSnapshotDigest(
+  snapshot: Omit<AccountRiskSnapshotV1, 'snapshotDigest'>,
+): string {
+  return sha256(canonicalJSON(snapshot));
+}
+
 function statusFromMetrics(status: AccountRiskMetricStatus): AccountRiskSnapshotStatus {
   switch (status) {
     case 'AVAILABLE': return 'QUALIFIED';
@@ -359,6 +365,6 @@ export function buildAccountRiskSnapshot(
     status,
     reasons: uniqueSorted(reasons),
   };
-  const snapshotDigest = sha256(canonicalJSON(withoutDigest));
+  const snapshotDigest = accountRiskSnapshotDigest(withoutDigest);
   return cloneFreeze({ ...withoutDigest, snapshotDigest });
 }
