@@ -22,8 +22,23 @@ import type { PaperFill } from '../types/paper-fill';
 import { createPositionManagerRuntime } from './PositionManagerRuntime';
 import { PositionPlanStore } from './PositionPlanStore';
 import { systemDomainClock } from '../runtime/Clock';
-import { evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
-import type { AccountBoundHardRiskSnapshot, GatewayInput, TradeAction } from '../risk/pretrade-risk-types';
+import { evaluateAccountBoundPreTradeRisk, evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
+import type {
+  AccountBoundGatewayInput,
+  AccountBoundHardRiskSnapshot,
+  GatewayInput,
+  TradeAction,
+} from '../risk/pretrade-risk-types';
+import type { AccountRiskAuthorizationContext } from '../risk/account-risk-authorization-context-types';
+import { createGateIoAccountRiskRuntime, type GateIoAccountRiskRuntime } from '../risk/account-risk-runtime';
+import {
+  createPreTradeRiskDecisionReceipt,
+  createPreTradeRiskDecisionReceiptStore,
+} from '../risk/pretrade-decision-receipt';
+import type {
+  PreTradeRiskDecisionReceiptStore,
+  PreTradeRiskDecisionReceiptStoreSnapshot,
+} from '../risk/pretrade-decision-receipt-types';
 import type { TradeIntent } from '../types/trade-intent';
 import type { EventJournalPort } from '../kernel/EventJournalPort';
 import { createFileEventJournal, type FileEventJournal } from '../recovery/FileEventJournal';
@@ -63,6 +78,10 @@ export interface ProductionSpineConfig {
    * can establish LIVE_READY freshness. No public helper injects tickers.
    */
   marketRuntime?: MarketDataRuntime;
+  /** Every runtime composition must select exactly one risk-authority mode. */
+  riskAuthorization:
+    | { readonly mode: 'LEGACY_PAPER_OR_NON_GATE' }
+    | { readonly mode: 'GATEIO_ACCOUNT_BOUND'; readonly settle: 'USDT' };
   /** Omitted for backward-compatible Paper composition. */
   execution?:
     | { readonly mode: 'paper' }
@@ -85,7 +104,18 @@ export interface ProductionSpine {
   adapter: ExecutionAdapter;
   /** Present only for Paper compatibility; limited-live never fabricates Paper truth. */
   service: PaperExecutionService | null;
-  privateConfig: { hardRisk: () => AccountBoundHardRiskSnapshot };
+  privateConfig: {
+    hardRisk: () => AccountBoundHardRiskSnapshot;
+    accountId: string;
+    clock: { now(): number };
+  };
+  readonly riskAuthorizationMode: 'LEGACY_PAPER_OR_NON_GATE' | 'GATEIO_ACCOUNT_BOUND';
+  /** Pure current composition; null in the explicitly isolated legacy mode. */
+  accountRiskAuthorizationContext(evaluationTime: number): AccountRiskAuthorizationContext | null;
+  readonly pretradeDecisionReceipts: {
+    snapshot(): PreTradeRiskDecisionReceiptStoreSnapshot;
+    digest(): string;
+  };
   /** Set internally by RecoveryManager — read-only to callers */
   readonly recoveryVerified: boolean;
   /** Phase 5B: granted only by the real reconciliation sequence — read-only to callers */
@@ -143,6 +173,18 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
   const executionMode = config.execution?.mode ?? 'paper';
   const gateExecution = executionMode === 'limited-live' && config.exchange === 'gateio';
+  if (config.riskAuthorization === undefined) {
+    throw new Error('RISK_AUTHORIZATION_MODE_REQUIRED');
+  }
+  const riskAuthorizationMode = config.riskAuthorization.mode;
+  if (gateExecution && riskAuthorizationMode !== 'GATEIO_ACCOUNT_BOUND') {
+    throw new Error('GATEIO_ACCOUNT_BOUND_RISK_MODE_REQUIRED');
+  }
+  if (riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND'
+      && (!gateExecution || config.riskAuthorization.mode !== 'GATEIO_ACCOUNT_BOUND'
+        || config.riskAuthorization.settle !== 'USDT')) {
+    throw new Error('ACCOUNT_BOUND_RISK_MODE_INVALID');
+  }
   let executionInFlight = false;
   let reconciliationInFlight = false;
 
@@ -193,6 +235,20 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   kernel.subscribe('position.baseline.confirmed' as any, (e: any) => { positionStore.apply(e); });
 
   const planStore = new PositionPlanStore();
+
+  // ── Durable account-risk views and pretrade receipts ──
+  const accountRiskRuntime: GateIoAccountRiskRuntime | null =
+    riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND'
+      ? createGateIoAccountRiskRuntime({ accountId: config.accountId!, kernel })
+      : null;
+  const legacyDecisionReceipts: PreTradeRiskDecisionReceiptStore | null =
+    accountRiskRuntime === null ? createPreTradeRiskDecisionReceiptStore() : null;
+  if (legacyDecisionReceipts !== null) {
+    kernel.subscribe('PRETRADE_RISK_DECISION_RECORDED', (event) => {
+      legacyDecisionReceipts.apply(event);
+    });
+  }
+  const decisionReceipts = accountRiskRuntime?.decisionReceipts ?? legacyDecisionReceipts!;
 
   // ── Dynamic-price OMS ──
   const dynamicPriceOms = {
@@ -262,7 +318,19 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   const spine = {
     kernel, positionStore, marketStore, policyStore,
     oms: dynamicPriceOms, planStore, protection, executionMode, adapter, service,
-    privateConfig: { hardRisk: config.hardRisk },
+    privateConfig: {
+      hardRisk: config.hardRisk,
+      accountId: reconciliationIdentity.accountId,
+      clock,
+    },
+    riskAuthorizationMode,
+    accountRiskAuthorizationContext(evaluationTime: number) {
+      return accountRiskRuntime?.compose(evaluationTime) ?? null;
+    },
+    pretradeDecisionReceipts: Object.freeze({
+      snapshot: () => decisionReceipts.snapshot(),
+      digest: () => decisionReceipts.digest(),
+    }),
 
     get recoveryVerified() { return recoveryVerified; },
     get reconciliationVerified() { return reconciliationVerified; },
@@ -293,6 +361,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       throw new Error('START_AUTHORITY: use recoverAndStart + activateLiveReadiness');
     },
   };
+  if (accountRiskRuntime !== null) accountRiskRuntimeBySpine.set(spine, accountRiskRuntime);
+  decisionReceiptStoreBySpine.set(spine, decisionReceipts);
 
   // Internal helper: run reconciliation against CURRENT facts. Revokes any stale
   // authority first; grants reconciliationVerified only on a genuine current MATCH.
@@ -422,6 +492,8 @@ const VERIFY_TOKEN = Symbol('verifyToken');
 const LIVE_TOKEN = Symbol('liveToken');
 const RECONCILE_TOKEN = Symbol('reconcileToken');
 const ENTRY_TOKEN = Symbol('entryToken');
+const accountRiskRuntimeBySpine = new WeakMap<object, GateIoAccountRiskRuntime>();
+const decisionReceiptStoreBySpine = new WeakMap<object, PreTradeRiskDecisionReceiptStore>();
 
 /**
  * Full recovery: journal → replay → verify → RECOVERY_VERIFIED.
@@ -437,14 +509,17 @@ export async function recoverAndStart(
 
   const journal = typeof journalPath === 'string' ? createFileEventJournal(journalPath) : journalPath;
   const projectors = buildProjectorMap(spine);
-  const storeDigests = {
+  const currentStoreDigests = () => ({
     position: spine.positionStore.digest(),
     market: spine.marketStore.digest(),
     policy: spine.policyStore.digest(),
     oms: spine.oms.getStore().digest(),
     plan: spine.planStore.digest(),
-  };
-  const result = recoverFromJournal(journal, projectors, checkpointPath, storeDigests);
+    ...(accountRiskRuntimeBySpine.get(spine)?.digests() ?? {
+        pretradeDecisionReceipts: spine.pretradeDecisionReceipts.digest(),
+      }),
+  });
+  const result = recoverFromJournal(journal, projectors, checkpointPath, currentStoreDigests);
 
   if (result.recoveryVerified) {
     const fn = (spine as any)[VERIFY_TOKEN];
@@ -496,6 +571,16 @@ function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
   m.set('position.plan.updated', [spine.planStore]);
   m.set('position.plan.archived', [spine.planStore]);
   m.set('position.plan.closed', [spine.planStore]);
+  const accountRiskRuntime = accountRiskRuntimeBySpine.get(spine);
+  if (accountRiskRuntime !== undefined) {
+    for (const [type, projectors] of accountRiskRuntime.projectorBindings()) {
+      m.set(type as any, [...projectors]);
+    }
+  } else {
+    m.set('PRETRADE_RISK_DECISION_RECORDED', [
+      decisionReceiptStoreBySpine.get(spine)!,
+    ]);
+  }
   return m;
 }
 
@@ -528,15 +613,9 @@ export async function executeThroughGateway(
   const positionResolved = positionStore.resolve(exchange, symbol);
   const hardRiskSnapshot = spine.privateConfig.hardRisk();
 
-  // Resolve position — preserve factual semantics
-  const rawStatus = positionResolved?.status;
-  const isOpen = rawStatus === 'open';
-  const effectiveStatus: 'open' | 'flat' | 'missing' = isOpen ? 'open'
-    : rawStatus === 'missing' ? 'missing'
-    : 'flat';
-  const pos = isOpen
-    ? { ...positionResolved, status: 'open' as const }
-    : { snapshot: null, status: effectiveStatus, side: 'flat' as const, signedQuantity: 0, averageEntryPrice: 0 };
+  // Preserve the canonical snapshot. In particular, a trusted flat baseline has
+  // a non-null versioned snapshot; missing state must never be fabricated as flat.
+  const pos = positionResolved;
 
   // Real policy resolution from KernelPolicyStore — no fabricated allow-all
   const gatewayInput: GatewayInput = {
@@ -555,7 +634,37 @@ export async function executeThroughGateway(
     } : {}),
   };
 
-  const riskResult = evaluatePreTradeRisk(gatewayInput);
+  const evaluationTime = spine.privateConfig.clock.now();
+  const riskResult = spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND'
+      && action === 'open'
+    ? evaluateAccountBoundPreTradeRisk({
+        ...gatewayInput,
+        mode: 'ACCOUNT_BOUND',
+        action: 'open',
+        hardRisk: hardRiskSnapshot,
+        authorizationContext: spine.accountRiskAuthorizationContext(evaluationTime)!,
+      } satisfies AccountBoundGatewayInput)
+    : evaluatePreTradeRisk(gatewayInput);
+
+  // Persist the gateway fact before any OMS mutation. Subscriber failure is
+  // fail-closed even though the journal append itself may already be durable.
+  try {
+    const receipt = createPreTradeRiskDecisionReceipt({
+      gatewayMode: spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND' && action !== 'open'
+        ? 'GATEIO_EXISTING_EXIT_PATH' : spine.riskAuthorizationMode,
+      accountId: spine.privateConfig.accountId,
+      intent,
+      action,
+      evaluationTime,
+      result: riskResult,
+    });
+    const recorded = kernel.publish('PRETRADE_RISK_DECISION_RECORDED', receipt);
+    if (recorded.failures > 0) {
+      return { admitted: false, riskCode: 'RISK_DECISION_RECEIPT_PERSIST_FAILED', action };
+    }
+  } catch {
+    return { admitted: false, riskCode: 'RISK_DECISION_RECEIPT_PERSIST_FAILED', action };
+  }
   if (riskResult.decision !== 'ADMITTED') {
     return { admitted: false, riskCode: riskResult.reasonCode, action };
   }

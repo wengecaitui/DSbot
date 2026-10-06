@@ -11,6 +11,7 @@ import { replayJournal } from '../../src/recovery/ReplayCoordinator';
 import type { ProjectorMap } from '../../src/recovery/ReplayCoordinator';
 
 const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
+const riskAuthorization = { mode: 'LEGACY_PAPER_OR_NON_GATE' } as const;
 
 // Production market ingestion: MarketDataRuntime owns a collector that feeds its bus.
 // Tests simulate the real collector — NOT a public ticker-injection helper.
@@ -29,7 +30,7 @@ async function createSpineWithMarket(overrides: any = {}) {
     onKline: (_h: any) => {},
   };
   const marketRuntime = createMarketDataRuntime({ collectorFactory: () => collector });
-  const spine = await createProductionSpine({ exchange: 'bitget', hardRisk, ...overrides, marketRuntime });
+  const spine = await createProductionSpine({ exchange: 'bitget', hardRisk, riskAuthorization, ...overrides, marketRuntime });
   await marketRuntime.start();
   return {
     spine,
@@ -66,7 +67,7 @@ describe('Phase 5A — Production Recovery', () => {
   it('cold journal → first event sequence = 1', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-cold-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'cold', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'cold', hardRisk, riskAuthorization, journalPath });
     
     // Before any events, sequence should be 0
     const r = s.kernel.publish('position.baseline.confirmed' as any, {
@@ -82,7 +83,7 @@ describe('Phase 5A — Production Recovery', () => {
     const journalPath = join(dir, 'journal.jsonl');
     
     // First run: publish baseline + market
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'resume', hardRisk, journalPath });
+    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'resume', hardRisk, riskAuthorization, journalPath });
     s1.protection.start();
     s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
@@ -98,7 +99,7 @@ describe('Phase 5A — Production Recovery', () => {
     const journal = createFileEventJournal(journalPath);
     assert.ok(journal.lastSequence === firstRunSeq, 'journal matches first run');
     
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'resume-r2', hardRisk, journalPath: journalPath });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'resume-r2', hardRisk, riskAuthorization, journalPath: journalPath });
     
     // First new event after recovery = lastSequence + 1
     const r = s2.kernel.publish('position.baseline.confirmed' as any, {
@@ -114,7 +115,7 @@ describe('Phase 5A — Production Recovery', () => {
     const journalPath = join(dir, 'journal.jsonl');
     
     // Run 1: open position (baseline only — no policy needed for baseline)
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'replay', hardRisk, journalPath });
+    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'replay', hardRisk, riskAuthorization, journalPath });
     s1.protection.start();
     s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
@@ -129,7 +130,7 @@ describe('Phase 5A — Production Recovery', () => {
     assert.ok(journal1.lastSequence >= 2, `journal has baseline+market events: ${journal1.lastSequence}`);
     
     // Run 2: fresh kernel, replay journal → projectors
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'replay-r2', hardRisk, journalPath: journalPath });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'replay-r2', hardRisk, riskAuthorization, journalPath: journalPath });
     const proj = makeProjectors(s2);
     const report = replayJournal(journal1 as any, proj);
     
@@ -196,7 +197,7 @@ describe('Phase 5A — Production Recovery', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-policy-'));
     const journalPath = join(dir, 'journal.jsonl');
     
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'policy', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'policy', hardRisk, riskAuthorization, journalPath, policyMaxLifetimeMs: 3600_000 });
     
     // Without any policy published, policy store should return 'missing'
     const resolution = s.policyStore.resolve('bitget' as any, 'BTC/USDT');
@@ -218,7 +219,7 @@ describe('Phase 5A — Production Recovery', () => {
     const checkpointPath = join(dir, 'checkpoint.json');
     
     // Run 1: create journal + checkpoint
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'stale', hardRisk, journalPath });
+    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'stale', hardRisk, riskAuthorization, journalPath });
     trustBaseline(s1, 'bitget', 'BTC/USDT');
     const journal1 = createFileEventJournal(journalPath);
     saveRecoveryCheckpoint(checkpointPath, journal1, {
@@ -238,7 +239,7 @@ describe('Phase 5A — Production Recovery', () => {
     assert.ok(journal2.lastSequence > journal1.lastSequence, 'journal advanced');
     
     // Recovery with stale checkpoint → should still verify (journal authoritative)
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'stale-r2', hardRisk, journalPath: journalPath });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'stale-r2', hardRisk, riskAuthorization, journalPath: journalPath });
     const proj2 = makeProjectors(s2);
     const result = recoverFromJournal(journal2, proj2, checkpointPath);
     
@@ -269,7 +270,7 @@ describe('Phase 5A — Production Recovery', () => {
     };
 
     // Run 1: setup events in journal (baseline + policy + market)
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual', hardRisk, riskAuthorization, journalPath, policyMaxLifetimeMs: 3600_000 });
     s1.protection.start();
     s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
@@ -324,7 +325,7 @@ describe('Phase 5A — Production Recovery', () => {
   it('P0: caller cannot grant RECOVERY_VERIFIED directly', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0auth-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0auth', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0auth', hardRisk, riskAuthorization, journalPath });
     // s.start() is locked — only RecoveryManager can activate it via token
     await assert.rejects(() => s.start({ exchange: 'bitget' }), { message: /START_AUTHORITY/ });
     // recoveryVerified is false by default
@@ -336,7 +337,7 @@ describe('Phase 5A — Production Recovery', () => {
   it('P0: caller cannot force LIVE_READY via protection.setMode', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0live-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0live', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0live', hardRisk, riskAuthorization, journalPath });
     s.protection.start();
     // setMode no longer exists — getMode is 'replay'
     assert.strictEqual((s.protection as any).setMode, undefined, 'setMode not callable');
@@ -349,7 +350,7 @@ describe('Phase 5A — Production Recovery', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0entry-'));
     const journalPath = join(dir, 'journal.jsonl');
     // Setup: spine that writes to journal
-    const sSetup = await createProductionSpine({ exchange: 'bitget', accountId: 'p0entrysetup', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    const sSetup = await createProductionSpine({ exchange: 'bitget', accountId: 'p0entrysetup', hardRisk, riskAuthorization, journalPath, policyMaxLifetimeMs: 3600_000 });
     trustBaseline(sSetup, 'bitget', 'BTC/USDT');
     const now = Date.now();
     sSetup.kernel.publish('policy.snapshot.published', {
@@ -386,7 +387,7 @@ describe('Phase 5A — Production Recovery', () => {
   it('P0: pre-LIVE_READY protection produces zero submissions', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0prot-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0prot', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0prot', hardRisk, riskAuthorization, journalPath });
     s.protection.start();
     s.planStore.subscribeToKernel(s.kernel as any);
     trustBaseline(s, 'bitget', 'BTC/USDT');
@@ -404,7 +405,7 @@ describe('Phase 5A — Production Recovery', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0liveok-'));
     const journalPath = join(dir, 'journal.jsonl');
     // Setup: write events to journal via a setup spine
-    const sSetup = await createProductionSpine({ exchange: 'bitget', accountId: 'p0livesetup', hardRisk, journalPath, policyMaxLifetimeMs: 3600_000 });
+    const sSetup = await createProductionSpine({ exchange: 'bitget', accountId: 'p0livesetup', hardRisk, riskAuthorization, journalPath, policyMaxLifetimeMs: 3600_000 });
     sSetup.protection.start();
     trustBaseline(sSetup, 'bitget', 'BTC/USDT');
     const now = Date.now();
@@ -484,7 +485,7 @@ describe('Phase 5A — Production Recovery', () => {
     // A spine with NO marketRuntime can never become LIVE_READY (fail-closed)
     const dir = mkdtempSync(join(tmpdir(), 'p5a-p0nobus-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0nobus', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0nobus', hardRisk, riskAuthorization, journalPath });
     const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
     await reconcileRecoveredState(s);

@@ -22,6 +22,7 @@ import type {
   RiskMandateActivatedPayload,
   RiskMandateRevokedPayload,
 } from '../risk/risk-mandate-types';
+import type { PreTradeRiskDecisionRecordedPayload } from '../risk/pretrade-decision-receipt-types';
 
 export interface ExternalFlatBaselineEvidence {
   readonly exchange: 'gateio';
@@ -56,6 +57,7 @@ export interface TradingEventPayloadMap {
   'ACCOUNT_RISK_METRIC_POLICY_ACTIVATED': AccountRiskMetricPolicyActivatedPayload;
   'RISK_MANDATE_ACTIVATED': RiskMandateActivatedPayload;
   'RISK_MANDATE_REVOKED': RiskMandateRevokedPayload;
+  'PRETRADE_RISK_DECISION_RECORDED': PreTradeRiskDecisionRecordedPayload;
 }
 
 export type TradingEventType = keyof TradingEventPayloadMap;

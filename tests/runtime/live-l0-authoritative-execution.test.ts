@@ -97,7 +97,8 @@ const hardRisk = () => ({
 
 describe('Live L0 authoritative execution preparation', () => {
   it('preserves Paper defaults while limited-live uses only injected execution and truth ports', async () => {
-    const paper = await createProductionSpine({ exchange: 'binance', hardRisk });
+    const paper = await createProductionSpine({ exchange: 'binance', hardRisk,
+      riskAuthorization: { mode: 'LEGACY_PAPER_OR_NON_GATE' } });
     assert.equal(paper.executionMode, 'paper');
     assert.ok(paper.service);
 
@@ -107,6 +108,7 @@ describe('Live L0 authoritative execution preparation', () => {
       exchange: 'binance',
       accountId: 'live-l0',
       hardRisk,
+      riskAuthorization: { mode: 'LEGACY_PAPER_OR_NON_GATE' },
       journal: createInMemoryEventJournal(),
       execution: {
         mode: 'limited-live',

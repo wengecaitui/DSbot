@@ -13,10 +13,12 @@ import { GateIoG3RunBudget, GATEIO_G3_LIMITS } from '../../src/runtime/gateio/Ga
 import { GATEIO_READ_ENDPOINTS } from '../../src/runtime/gateio/GateIoReadContracts';
 import { createTradeIntent } from '../../src/types/trade-intent';
 import { reconcile } from '../../src/reconciliation/reconcile';
+import { seedGateIoAccountRiskAuthority } from '../helpers/gateio-account-risk-authority-fixture';
 
 const NOW = 1_800_000_000_000;
 let nextAccount = 0;
 function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
+  riskAuthority?: boolean;
   overrideConfig?: Partial<ProductionRuntimeConfig>; omitGate?: boolean; wrongEnvironment?: boolean;
   wrongAccount?: boolean; denyRecovery?: boolean; budget?: GateIoG3RunBudget;
   lostAcknowledgement?: boolean;
@@ -53,6 +55,9 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     const kernel = createTradingKernel({ exchange: 'gateio', journal: seed, clock: { now: () => now } });
     kernel.publish('position.baseline.confirmed', { baseline: { exchange: 'gateio',
       symbol: 'ETH/USDT', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 } });
+    if (options.riskAuthority !== false) {
+      seedGateIoAccountRiskAuthority(kernel, { accountId, now });
+    }
     seed.close();
   }
   const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -377,6 +382,24 @@ describe('Gate G5 — cumulative lifecycle through the sole production Owner/Spi
 });
 
 describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', () => {
+  it('recovery without account facts or human mandate keeps OPEN fail-closed and records the rejection', async t => {
+    const h = harness({ riskAuthority: false });
+    t.after(() => h.owner.stop());
+    await h.start();
+    await h.activate();
+    const readiness = h.spine.accountRiskAuthorizationContext(NOW)!;
+    assert.equal(readiness.compatible, false);
+    assert.notEqual(readiness.status, 'COMPATIBLE');
+    const result = await h.trade('open');
+    assert.equal(result.admitted, false);
+    assert.equal(result.riskCode, 'ACCOUNT_RISK_CONTEXT_INCOMPATIBLE');
+    assert.equal(h.posts, 0);
+    const receipts = h.spine.pretradeDecisionReceipts.snapshot().records;
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0]!.receipt.decision, 'REJECTED');
+    assert.equal(receipts[0]!.receipt.reasonCode, 'ACCOUNT_RISK_CONTEXT_INCOMPATIBLE');
+  });
+
   for (const environment of ['testnet', 'live'] as const) {
     it(environment + ': one spine, explicit environment, no boot order or auto LIVE_READY', async (t) => {
       const h = harness({ environment }); t.after(() => h.owner.stop());
@@ -408,6 +431,15 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
     assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').status, 'flat');
     assert.equal(h.spine.reconciliationVerified, true);
     assert.equal(h.fills().length, 2);
+    const decisions = h.spine.pretradeDecisionReceipts.snapshot().records.map((entry) => entry.receipt);
+    assert.equal(decisions.length, 2);
+    assert.equal(decisions[0]!.gatewayMode, 'GATEIO_ACCOUNT_BOUND');
+    assert.equal(decisions[0]!.decision, 'ADMITTED');
+    assert.match(decisions[0]!.contextDigest!, /^[a-f0-9]{64}$/);
+    assert.match(decisions[0]!.snapshotDigest!, /^[a-f0-9]{64}$/);
+    assert.match(decisions[0]!.mandateDigest!, /^[a-f0-9]{64}$/);
+    assert.equal(decisions[1]!.gatewayMode, 'GATEIO_EXISTING_EXIT_PATH');
+    assert.equal(decisions[1]!.decision, 'ADMITTED');
     assert.deepEqual(h.requests.filter((r) => r.method === 'POST').map((r) => [r.body.size, r.body.reduce_only]),
       [[0.1, false], [-0.1, true]]);
     assert.equal(h.budget.snapshot().attestationUsed, 2);

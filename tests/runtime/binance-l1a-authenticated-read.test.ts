@@ -280,6 +280,7 @@ describe('Binance L1A authenticated read foundation', () => {
     const paper = await createProductionSpine({
       exchange: 'binance',
       accountId: 'l1a-test',
+      riskAuthorization: { mode: 'LEGACY_PAPER_OR_NON_GATE' },
       hardRisk: () => ({
         exchange: 'binance', accountId: 'l1a-test', enabled: true, locked: false,
         totalCapitalUsd: 1_000, maxSinglePositionPct: 0.1, maxSinglePositionAbsUsd: 100,

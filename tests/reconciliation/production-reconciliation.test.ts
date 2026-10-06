@@ -25,6 +25,7 @@ import type { PaperBrokerPersistence } from '../../src/paper/PaperBroker';
 import type { ExchangeId } from '../../src/data/MarketIdentity';
 
 const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
+const riskAuthorization = { mode: 'LEGACY_PAPER_OR_NON_GATE' } as const;
 
 function env(type: string, seq: number, payload: Record<string, unknown>) {
   return { kernelEventId: 'a'.repeat(64), kernelLogicalSequence: seq, kernelTimestamp: seq * 1000, type, payload };
@@ -48,7 +49,7 @@ async function createSpineWithMarket(overrides: any = {}) {
     onKline: (_h: any) => {},
   };
   const marketRuntime = createMarketDataRuntime({ collectorFactory: () => collector });
-  const spine = await createProductionSpine({ exchange: 'bitget', hardRisk, ...overrides, marketRuntime });
+  const spine = await createProductionSpine({ exchange: 'bitget', hardRisk, riskAuthorization, ...overrides, marketRuntime });
   await marketRuntime.start();
   return { spine, emitTicker: () => { tickerHandler?.(btcTicker()); } };
 }
@@ -133,7 +134,7 @@ describe('Phase 5B2 — Paper correlation persistence', () => {
     const store = new PaperLedgerStore(cfg, { baseDir: dir });
     const journalPath = join(dir, 'journal.jsonl');
 
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'corr', hardRisk, journalPath, paperAccount: cfg, persistence: store });
+    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'corr', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: store });
     s1.protection.start();
     s1.planStore.subscribeToKernel(s1.kernel as any);
 
@@ -237,7 +238,7 @@ describe('Phase 5B2 — Authority', () => {
   it('reconcileRecoveredState before recovery fails closed', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-auth-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'auth', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'auth', hardRisk, riskAuthorization, journalPath });
     await assert.rejects(() => reconcileRecoveredState(s), { message: /RECONCILIATION_REQUIRES_RECOVERY/ });
     rmSync(dir, { recursive: true, force: true });
   });
@@ -245,7 +246,7 @@ describe('Phase 5B2 — Authority', () => {
   it('caller cannot forge reconciliationVerified (no setter/token/bool injection)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-forge-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'forge', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'forge', hardRisk, riskAuthorization, journalPath });
     assert.strictEqual(s.reconciliationVerified, false, 'default false');
     const desc = Object.getOwnPropertyDescriptor(s, 'reconciliationVerified');
     assert.strictEqual(desc && desc.set, undefined, 'no setter on reconciliationVerified');
@@ -351,7 +352,7 @@ describe('Phase 5B2 — Real restart proof', () => {
 
     // ── RUN 2: fresh spine, same durable paper + journal ──
     counting.reset();
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'restart', hardRisk, journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000 });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'restart', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000 });
     s2.planStore.subscribeToKernel(s2.kernel as any);
 
     const recResult = await recoverAndStart(s2, journalPath);
@@ -390,7 +391,7 @@ describe('Phase 5B2 — Real restart proof', () => {
 
     // RUN 2: same journal (has OMS/fill events), EMPTY paper persistence
     const emptyPaper = new PaperLedgerStore(cfg, { baseDir: join(dir, 'paper2-empty') });
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negfill', hardRisk, journalPath, paperAccount: cfg, persistence: emptyPaper });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negfill', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: emptyPaper });
     await recoverAndStart(s2, journalPath);
     const report = await reconcileRecoveredState(s2);
     assert.notStrictEqual(report.outcome, 'MATCH');
@@ -422,7 +423,7 @@ describe('Phase 5B2 — Real restart proof', () => {
 
     // RUN 2: EMPTY journal (no local OMS), SAME paper persistence (has correlated fill)
     const emptyJournal = join(dir, 'empty-journal.jsonl');
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negoph', hardRisk, journalPath: emptyJournal, paperAccount: cfg, persistence: paperStore });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negoph', hardRisk, riskAuthorization, journalPath: emptyJournal, paperAccount: cfg, persistence: paperStore });
     await recoverAndStart(s2, emptyJournal); // no_history → verified, empty local
     const report = await reconcileRecoveredState(s2);
     assert.notStrictEqual(report.outcome, 'MATCH');
@@ -438,14 +439,14 @@ describe('Phase 5B2 — Real restart proof', () => {
     const cfg = paperConfig('negunk');
 
     // RUN 1: journal with SUBMISSION_UNKNOWN order (no fill)
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, journalPath });
+    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, riskAuthorization, journalPath });
     s1.kernel.publish('order.created', { order: { orderId: 'o1', intentId: 'i1', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
     s1.kernel.publish('order.submitted', { orderId: 'o1' });
     s1.kernel.publish('order.submission.unknown', { orderId: 'o1', reason: 'adapter unavailable' });
 
     // RUN 2: recover + reconcile
     const counting = countingPersistence(new PaperLedgerStore(cfg, { baseDir: join(dir, 'paper') }));
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, journalPath, paperAccount: cfg, persistence: counting });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: counting });
     await recoverAndStart(s2, journalPath);
     counting.reset();
     const report = await reconcileRecoveredState(s2);

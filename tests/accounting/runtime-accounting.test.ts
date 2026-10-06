@@ -382,7 +382,9 @@ describe('Phase 6A — Restart + side effects (ProductionSpine)', () => {
     async function makeSpine(accountId: string) {
       const c = collector();
       const marketRuntime = createMarketDataRuntime({ collectorFactory: () => c });
-      const spine = await createProductionSpine({ exchange: 'bitget', accountId, hardRisk, journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000, marketRuntime });
+      const spine = await createProductionSpine({ exchange: 'bitget', accountId, hardRisk,
+        riskAuthorization: { mode: 'LEGACY_PAPER_OR_NON_GATE' }, journalPath,
+        paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000, marketRuntime });
       await marketRuntime.start();
       return { spine, emit: (t: any) => c.emit(t) };
     }

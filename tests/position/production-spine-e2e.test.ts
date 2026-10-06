@@ -14,6 +14,7 @@ const hardRisk = () => ({
   exchange: 'bitget', locked: false, enabled: true,
   totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity,
 });
+const riskAuthorization = { mode: 'LEGACY_PAPER_OR_NON_GATE' } as const;
 
 function btcTicker() {
   return { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() };
@@ -30,7 +31,7 @@ async function createSpineWithMarket(overrides: any = {}) {
     onKline: (_h: any) => {},
   };
   const marketRuntime = createMarketDataRuntime({ collectorFactory: () => collector });
-  const s = await createProductionSpine({ exchange: 'bitget', hardRisk, ...overrides, marketRuntime });
+  const s = await createProductionSpine({ exchange: 'bitget', hardRisk, riskAuthorization, ...overrides, marketRuntime });
   await marketRuntime.start();
   return {
     spine: s,

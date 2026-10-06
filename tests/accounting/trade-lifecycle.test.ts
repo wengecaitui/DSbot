@@ -593,6 +593,7 @@ describe('Phase 6B — read-only ProductionSpine lifecycle surface', () => {
       paperAccount: cfg,
       persistence,
       hardRisk,
+      riskAuthorization: { mode: 'LEGACY_PAPER_OR_NON_GATE' },
       journalPath: join(dir, 'journal.jsonl'),
       policyMaxLifetimeMs: 3600_000,
     });

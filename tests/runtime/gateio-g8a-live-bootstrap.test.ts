@@ -116,6 +116,7 @@ async function harness(options: {
         ? { ...result, value: options.transformAccount(result.value) } : result;
     } }, listOmsOrders: () => spine.oms.getStore().list() });
   spine = await createProductionSpine({ exchange: 'gateio', accountId, journal, clock: { now },
+    riskAuthorization: { mode: 'GATEIO_ACCOUNT_BOUND', settle: 'USDT' },
     policyMaxLifetimeMs: options.kernelPolicyLifetime ?? LIFETIME,
     hardRisk: () => { assert.fail('Risk must not be invoked by bootstrap'); },
     execution: { mode: 'limited-live', truthPort: port,
@@ -469,6 +470,7 @@ describe('Gate G8A R1 journal-backed research provenance', () => {
     const reopened = createFileEventJournal(h.journalPath);
     const bytes = readFileSync(h.journalPath, 'utf8');
     const restored = await createProductionSpine({ exchange: 'gateio', accountId: ACCOUNT,
+      riskAuthorization: { mode: 'GATEIO_ACCOUNT_BOUND', settle: 'USDT' },
       journal: reopened, clock: { now: () => NOW }, policyMaxLifetimeMs: LIFETIME,
       hardRisk: () => { assert.fail('Recovery cannot evaluate execution risk'); },
       execution: { mode: 'limited-live', truthPort: h.port,

@@ -549,6 +549,9 @@ export function createApplicationProductionRuntimeOwner(
           journal,
           hardRisk: readHardRisk,
           marketRuntime,
+          riskAuthorization: validated.identity.exchange === 'gateio'
+            ? { mode: 'GATEIO_ACCOUNT_BOUND', settle: 'USDT' }
+            : { mode: 'LEGACY_PAPER_OR_NON_GATE' },
           ...(gateBinding === null ? {} : {
             clock: gateBinding.clock, marketStaleAfterMs: gateBinding.staleAfterMs,
           }),

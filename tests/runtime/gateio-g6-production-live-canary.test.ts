@@ -17,6 +17,7 @@ import { createTradeIntent } from '../../src/types/trade-intent';
 import { GateIoG3RunBudget } from '../../src/runtime/gateio/GateIoG3RunBudget';
 import { GateIoCanaryCredentialError } from '../../src/runtime/gateio/GateIoCanaryCredentialFile';
 import { multiplyQuantity } from '../../src/types/decimal-quantity';
+import { seedGateIoAccountRiskAuthority } from '../helpers/gateio-account-risk-authority-fixture';
 
 const NOW = 1_800_000_000_000;
 const HEAD = 'a'.repeat(40);
@@ -52,6 +53,7 @@ function fixture(setup: { rejectOpen?: boolean; rejectClose?: boolean; rejectCle
     allowNewEntries: true, allowedSymbols: [], blockedSymbols: [], allowedStrategyIds: [], blockedStrategyIds: [],
     maxPositionMultiplier: 1, riskLevel: 'low', directionBias: 'neutral', symbolRules: {}, reasonCodes: [],
   } });
+  seedGateIoAccountRiskAuthority(kernel, { accountId, now: NOW });
   journal.close();
   let credentialReads = 0, repositoryReads = 0, posts = 0, accounts = 0, instrumentReads = 0;
   let currentInstrumentMark = snapshotMarkPrice;
