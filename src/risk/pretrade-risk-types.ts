@@ -11,6 +11,8 @@ export type TradeAction = 'open' | 'reduce' | 'close' | 'emergency_exit';
 export interface HardRiskSnapshot {
   readonly exchange: ExchangeId;
   readonly locked: boolean;
+  /** Gate: legacy locked is a risk-increase halt; only explicit ALL_MUTATIONS blocks proven exits. */
+  readonly mutationHalt?: 'RISK_INCREASE' | 'ALL_MUTATIONS';
   readonly enabled: boolean;
   readonly totalCapitalUsd: number;
   readonly maxSinglePositionPct: number;
@@ -92,6 +94,7 @@ export interface AccountBoundGatewayDecisionProvenance {
 }
 
 export type RiskReasonCode =
+  | 'ALL_MUTATIONS_HALTED' | 'EXIT_QUANTITY_EXCEEDS_EXPOSURE'
   | 'INVALID_INPUT' | 'PROVENANCE_MISMATCH' | 'KILLSWITCH_LOCKED'
   | 'MARKET_MISSING' | 'MARKET_STALE' | 'MARKET_PRICE_INVALID'
   | 'POSITION_UNKNOWN' | 'ACTION_POSITION_CONFLICT'

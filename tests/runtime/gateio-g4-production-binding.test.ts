@@ -13,18 +13,27 @@ import { GATEIO_READ_ENDPOINTS } from '../../src/runtime/gateio/GateIoReadContra
 import { createTradeIntent } from '../../src/types/trade-intent';
 import { reconcile } from '../../src/reconciliation/reconcile';
 import { seedGateIoAccountRiskAuthority } from '../helpers/gateio-account-risk-authority-fixture';
+import { multiplyQuantity } from '../../src/types/decimal-quantity';
+import { riskMandateDigest, riskMandateRevocationDigest } from '../../src/risk/risk-mandate';
+import { RISK_MANDATE_REVOCATION_SCHEMA_VERSION } from '../../src/risk/risk-mandate-types';
+import { gateIoAccountObservationDigest } from '../../src/accounting/gateio-account-risk-metrics';
+import { generateOrderId } from '../../src/oms/order-id';
+import { toGateIoClientText } from '../../src/exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 
 const NOW = 1_800_000_000_000;
 let nextAccount = 0;
 function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   riskAuthority?: boolean;
+  initialExposure?: number;
+  authorityFailure?: 'MISSING' | 'REVOKED' | 'EXPIRED' | 'STALE' | 'PARTIAL' | 'LOSS' | 'DRAWDOWN';
   overrideConfig?: Partial<ProductionRuntimeConfig>; omitGate?: boolean; wrongEnvironment?: boolean;
   wrongAccount?: boolean; denyRecovery?: boolean; budget?: GateIoG3RunBudget;
   lostAcknowledgement?: boolean;
   freshExecutionMark?: number; onInstrumentRefresh?: () => void;
   openOrderFact?: (order: Record<string, any>) => Record<string, any> } = {}) {
   let now = NOW;
-  let exposure = 0;
+  let exposure = options.initialExposure ?? 0;
+  let halt: 'RISK_INCREASE' | 'ALL_MUTATIONS' | undefined;
   let posts = 0;
   let accounts = 0;
   let creations = 0;
@@ -54,8 +63,58 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     const kernel = createTradingKernel({ exchange: 'gateio', journal: seed, clock: { now: () => now } });
     kernel.publish('position.baseline.confirmed', { baseline: { exchange: 'gateio',
       symbol: 'ETH/USDT', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 } });
+    if (exposure > 0) {
+      // Recovered tracked exchange execution, not an invented open baseline or a new mutation.
+      const notional = multiplyQuantity(exposure, 2);
+      const orderId = generateOrderId({ intentId: 'historical-open', exchange: 'gateio', symbol: 'ETH/USDT',
+        direction: 'long', action: 'open', approvedPositionUsd: notional });
+      const text = toGateIoClientText(orderId), id = '12345678901234560';
+      kernel.publish('order.created', { order: { orderId, intentId: 'historical-open', exchange: 'gateio',
+        symbol: 'ETH/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: notional } });
+      kernel.publish('order.submitted', { orderId });
+      kernel.publish('order.execution.prepared', { orderId, preparation: { requestedQuantity: multiplyQuantity(exposure, 0.001),
+        venueQuantity: exposure, quantityMultiplier: 0.001, clientOrderId: text, reduceOnly: false } });
+      kernel.publish('execution.fill.confirmed', { fill: { fillId: id, orderId, intentId: 'historical-open',
+        exchange: 'gateio', symbol: 'ETH/USDT', side: 'buy', quantity: multiplyQuantity(exposure, 0.001),
+        price: 2000, executedAt: NOW } });
+      orders.set(text, { text, id, contract: 'ETH_USDT', size: exposure, left: 0, status: 'finished',
+        finish_as: 'filled', reduce_only: false, price: '0', tif: 'ioc', fill_price: '2000',
+        finish_time: NOW / 1000, update_time: NOW / 1000 });
+    }
     if (options.riskAuthority !== false) {
-      seedGateIoAccountRiskAuthority(kernel, { accountId, now });
+      const publisher = { ...kernel, publish(type: any, payload: any) {
+        if (type === 'RISK_MANDATE_ACTIVATED') {
+          if (options.authorityFailure === 'MISSING') return;
+          if (options.authorityFailure === 'EXPIRED') {
+            const mandate = { ...payload.mandate, expiresAt: NOW - 1 };
+            payload = { mandate, mandateDigest: riskMandateDigest(mandate) };
+          }
+          if (options.authorityFailure === 'LOSS' || options.authorityFailure === 'DRAWDOWN') {
+            const mandate = { ...payload.mandate, limits: { ...payload.mandate.limits,
+              ...(options.authorityFailure === 'LOSS' ? { maxDailyEquityLossExact: '1' }
+                : { maxDrawdownFractionExact: '0.001' }) } };
+            payload = { mandate, mandateDigest: riskMandateDigest(mandate) };
+          }
+        }
+        if (type === 'GATEIO_ACCOUNT_FACT_OBSERVED') {
+          if (options.authorityFailure === 'PARTIAL' && payload.observation.observedAt !== NOW) return;
+          if (['LOSS', 'DRAWDOWN'].includes(options.authorityFailure!) && payload.observation.observedAt === NOW) {
+            const observation = { ...payload.observation, totalExact: '800' };
+            payload = { observation, observationDigest: gateIoAccountObservationDigest(observation) };
+          }
+        }
+        return kernel.publish(type, payload);
+      } } as unknown as typeof kernel;
+      const authority = seedGateIoAccountRiskAuthority(publisher, { accountId,
+        now: options.authorityFailure === 'STALE' ? NOW - 60_000 : now });
+      if (options.authorityFailure === 'REVOKED') {
+        const revocation = { schemaVersion: RISK_MANDATE_REVOCATION_SCHEMA_VERSION,
+          exchange: 'gateio' as const, settle: 'USDT' as const, accountId,
+          mandateId: authority.mandate.mandateId, mandateVersion: 1,
+          mandateDigest: riskMandateDigest(authority.mandate), revokedAt: NOW,
+          reason: 'offline-revocation', provenance: authority.mandate.provenance };
+        kernel.publish('RISK_MANDATE_REVOKED', { revocation, revocationDigest: riskMandateRevocationDigest(revocation) });
+      }
     }
     seed.close();
   }
@@ -157,7 +216,11 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     fetchImpl, now: () => now, runBudget: budget } }),
     createMarketRuntime: () => { throw new Error('REFERENCE_FEED_MUST_NOT_BE_USED'); },
     createLimitedLiveExecution: () => { throw new Error('LEGACY_VENUE_MUST_NOT_BE_USED'); },
-    createSpine: async (cfg) => { creations += 1; spine = await createProductionSpine(cfg); return spine; },
+    createSpine: async (cfg) => { creations += 1; const hardRisk = cfg.hardRisk;
+      const control = cfg.mutationControl!;
+      spine = await createProductionSpine({ ...cfg,
+        mutationControl: () => ({ ...control(), mutationHalt: halt }),
+        hardRisk: () => ({ ...hardRisk(), mutationHalt: halt }) }); return spine; },
     ...(options.denyRecovery ? { recover: async () => { throw new Error('FIXTURE_RECOVERY_DENIED'); } } : {}),
   });
   let owner = createOwner();
@@ -175,6 +238,7 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     get creations() { return creations; }, get accounts() { return accounts; },
     get instrumentReads() { return instrumentReads; },
     get exposure() { return exposure; }, set exposure(v: number) { exposure = v; },
+    set halt(v: 'RISK_INCREASE' | 'ALL_MUTATIONS' | undefined) { halt = v; },
     set missingOrder(v: boolean) { missingOrder = v; },
     set mismatchOrder(v: boolean) { mismatchOrder = v; },
     set corruptPositions(v: boolean) { corruptPositions = v; },
@@ -196,7 +260,9 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
     advance(ms: number) { now += ms; }, publishPolicy,
     async start() { await owner.start(); publishPolicy(); },
     async activate() { await activateLiveReadiness(spine); },
-    async trade(action: 'open' | 'close' = 'open', exchange: 'gateio' | 'binance' = 'gateio', usd = 0.2) {
+    async trade(action: 'open' | 'close' = 'open', exchange: 'gateio' | 'binance' = 'gateio', amount?: number) {
+      const usd = amount ?? (action === 'open' ? 0.2 : multiplyQuantity(Math.abs(
+        spine.positionStore.resolve('gateio', 'ETH/USDT').signedQuantity), instrumentMark));
       return executeThroughGateway(spine, createTradeIntent({ exchange, symbol: 'ETH/USDT',
         direction: action === 'open' ? 'long' : 'short', positionUsd: usd,
         source: 'offline-g4', reason: action, biasUpdatedAt: now, createdAt: now }),
@@ -206,6 +272,159 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
       .filter((e) => e.type === 'execution.fill.confirmed'); },
   };
 }
+
+describe('R3D2 authoritative trusted exit boundary (offline wire only)', () => {
+  function exit(h: ReturnType<typeof harness>, action: 'reduce' | 'close' | 'emergency_exit',
+    direction: 'long' | 'short' = 'short', usd = 0.2, exchange: 'gateio' | 'binance' = 'gateio') {
+    return executeThroughGateway(h.spine, createTradeIntent({ exchange, symbol: 'ETH/USDT', direction,
+      positionUsd: usd, source: 'adversarial-exit', reason: action, biasUpdatedAt: NOW, createdAt: NOW }), action, 999999);
+  }
+  for (const failure of ['MISSING', 'EXPIRED', 'REVOKED', 'STALE', 'PARTIAL', 'LOSS', 'DRAWDOWN'] as const) {
+    it(failure + ': independent recovery exit readiness permits proven close but no risk increase', async t => {
+      const h = harness({ initialExposure: 0.1, authorityFailure: failure }); t.after(() => h.owner.stop());
+      await h.start();
+      assert.equal(h.spine.protection.getMode(), 'replay', 'never grant general LIVE_READY');
+      const context = h.spine.accountRiskAuthorizationContext(NOW)!;
+      if (failure !== 'LOSS' && failure !== 'DRAWDOWN') assert.notEqual(context.status, 'COMPATIBLE');
+      assert.equal((await h.trade()).admitted, false);
+      const result = await exit(h, 'close');
+      assert.equal(result.omsResult?.status, 'filled', result.riskCode ?? 'expected proven exit');
+      assert.equal(h.spine.positionStore.resolve('gateio', 'ETH/USDT').status, 'flat');
+      const receipt = h.spine.pretradeDecisionReceipts.snapshot().records.at(-1)!.receipt;
+      assert.equal(receipt.riskEffect, 'CLOSE'); assert.equal(receipt.exitProof?.reduceOnly, true);
+      assert.equal(receipt.exitProof?.accountId, h.spine.privateConfig.accountId);
+      assert.equal(receipt.exitProof?.orderId, result.omsResult?.order?.orderId);
+      assert.equal((await h.trade()).admitted, false);
+      await h.activate();
+      assert.equal((await h.trade()).admitted, false, 'the same failed economic authority cannot authorize OPEN');
+      assert.equal(h.posts, 1);
+      assert.equal((h.spine.oms as any).submitRequest, undefined);
+      assert.equal((h.spine as any).adapter, undefined);
+    });
+  }
+  for (const action of ['reduce', 'close', 'emergency_exit'] as const) {
+    it(action + ' same-side or oversized label does not authorize mutation', async t => {
+      const h = harness({ initialExposure: 0.1, riskAuthority: false }); t.after(() => h.owner.stop()); await h.start();
+      assert.equal((await exit(h, action, 'long')).riskCode, 'ACTION_POSITION_CONFLICT');
+      assert.equal((await exit(h, action, 'short', 0.21)).riskCode, 'EXIT_QUANTITY_EXCEEDS_EXPOSURE');
+      assert.equal(h.posts, 0); assert.equal(h.spine.oms.getStore().list().length, 1, 'only the recovered order exists');
+    });
+  }
+  it('close with partial size derives reduce; full emergency derives emergency close, both reduceOnly', async t => {
+    const h = harness({ initialExposure: 0.2, riskAuthority: false }); t.after(() => h.owner.stop()); await h.start();
+    const partial = await exit(h, 'close', 'short', 0.2);
+    assert.equal(partial.action, 'reduce'); assert.equal(partial.omsResult?.status, 'filled');
+    assert.equal(h.exposure, 0.1);
+    const emergency = await exit(h, 'emergency_exit');
+    assert.equal(emergency.action, 'emergency_exit'); assert.equal(emergency.omsResult?.status, 'filled');
+    assert.deepEqual(h.spine.pretradeDecisionReceipts.snapshot().records.map(r => r.receipt.riskEffect),
+      ['REDUCE', 'EMERGENCY_CLOSE']);
+    assert.ok(h.requests.filter(r => r.method === 'POST').every(r => r.body.reduce_only === true));
+  });
+  it('risk-increase halt allows proven exit; ALL_MUTATIONS blocks entries and exits', async t => {
+    const h = harness({ initialExposure: 0.1 }); t.after(() => h.owner.stop()); await h.start();
+    h.halt = 'ALL_MUTATIONS';
+    assert.equal((await exit(h, 'close')).riskCode, 'ALL_MUTATIONS_HALTED');
+    assert.equal((await h.trade()).admitted, false); assert.equal(h.posts, 0);
+    h.halt = 'RISK_INCREASE';
+    assert.equal((await exit(h, 'close')).omsResult?.status, 'filled');
+    await h.activate(); assert.equal((await h.trade()).riskCode, 'KILLSWITCH_LOCKED');
+    assert.equal(h.posts, 1);
+  });
+  it('unknown/flat/mismatched position and foreign venue deny without mutation', async t => {
+    const flat = harness(); t.after(() => flat.owner.stop()); await flat.start();
+    assert.equal((await exit(flat, 'close')).admitted, false); assert.equal(flat.posts, 0);
+    const h = harness({ initialExposure: 0.1 }); t.after(() => h.owner.stop()); await h.start();
+    assert.equal((await exit(h, 'close', 'short', 0.2, 'binance')).riskCode, 'PROVENANCE_MISMATCH');
+    h.exposure = 0.2;
+    assert.equal((await exit(h, 'close')).riskCode, 'EXIT_TRUTH_NOT_VERIFIED');
+    assert.equal(h.posts, 0);
+  });
+  it('unrecovered or stopped process cannot exit; restart needs fresh position proof, not LIVE_READY', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
+    await h.restart(); assert.equal(h.spine.protection.getMode(), 'replay');
+    assert.equal((await exit(h, 'close')).omsResult?.status, 'filled');
+    await h.owner.stop(); const count = h.requests.length;
+    assert.equal((await exit(h, 'close')).riskCode, 'EXIT_RUNTIME_STOPPED');
+    assert.equal(h.requests.length, count);
+    const unready = harness({ initialExposure: 0.1, denyRecovery: true }); t.after(() => unready.owner.stop());
+    await assert.rejects(unready.start(), /FIXTURE_RECOVERY_DENIED/);
+    assert.equal((await exit(unready, 'close')).admitted, false); assert.equal(unready.posts, 0);
+  });
+  it('protective exits traverse authoritative receipt even during risk-increase halt', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
+    h.halt = 'RISK_INCREASE';
+    h.spine.kernel.publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
+      channel: 'ticker', last: 1800, bestBid: 1799, bestAsk: 1801, volume24h: 100, high24h: 2100,
+      low24h: 1800, ts: NOW }, receivedAt: NOW });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.posts, 2);
+    const receipt = h.spine.pretradeDecisionReceipts.snapshot().records.at(-1)!.receipt;
+    assert.equal(receipt.gatewayMode, 'GATEIO_TRUSTED_EXIT_ONLY');
+    assert.equal(receipt.riskEffect, 'CLOSE'); assert.equal(receipt.exitProof?.reduceOnly, true);
+    assert.equal(receipt.exitProof?.orderId, h.spine.oms.getStore().list().at(-1)!.orderId);
+  });
+  it('receipt persistence failure, halt changed by subscriber, and tampering never create a bypass', async t => {
+    const h = harness({ initialExposure: 0.1 }); t.after(() => h.owner.stop()); await h.start();
+    const risk = h.spine.privateConfig.hardRisk;
+    Reflect.set(h.spine, 'riskAuthorizationMode', 'LEGACY_PAPER_OR_NON_GATE');
+    Reflect.set(h.spine.privateConfig, 'hardRisk', () => ({ locked: false }));
+    assert.equal(h.spine.riskAuthorizationMode, 'GATEIO_ACCOUNT_BOUND');
+    assert.equal(h.spine.privateConfig.hardRisk, risk);
+    h.spine.kernel.subscribe('PRETRADE_RISK_DECISION_RECORDED', () => { h.halt = 'ALL_MUTATIONS'; });
+    const result = await exit(h, 'close');
+    assert.equal(result.omsResult?.status, 'rejected'); assert.equal(h.posts, 0);
+    const fail = harness({ initialExposure: 0.1 }); t.after(() => fail.owner.stop()); await fail.start();
+    fail.spine.kernel.subscribe('PRETRADE_RISK_DECISION_RECORDED', () => { throw new Error('receipt subscriber failure'); });
+    assert.equal((await exit(fail, 'close')).riskCode, 'RISK_DECISION_RECEIPT_PERSIST_FAILED');
+    assert.equal(fail.posts, 0); assert.equal(fail.spine.oms.getStore().list().length, 1);
+  });
+  it('ALL_MUTATIONS newly asserted while recording OPEN stops before adapter POST', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    h.spine.kernel.subscribe('PRETRADE_RISK_DECISION_RECORDED', () => { h.halt = 'ALL_MUTATIONS'; });
+    assert.equal((await h.trade()).omsResult?.status, 'rejected');
+    assert.equal(h.posts, 0);
+  });
+  it('private proof rejects non-journal position projection and unresolved exposure', async t => {
+    const h = harness({ initialExposure: 0.1 }); t.after(() => h.owner.stop()); await h.start();
+    h.spine.positionStore.apply({ type: 'execution.fill.confirmed', kernelEventId: 'f'.repeat(64),
+      kernelLogicalSequence: 999, kernelTimestamp: NOW, payload: { fill: { fillId: 'forged-position',
+        exchange: 'gateio', symbol: 'ETH/USDT', side: 'buy', quantity: 0.0001, price: 2000, executedAt: NOW } } });
+    h.exposure = 0.2;
+    assert.equal((await exit(h, 'close', 'short', 0.4)).admitted, false); assert.equal(h.posts, 0);
+    const pending = harness(); t.after(() => pending.owner.stop()); await pending.start(); await pending.activate();
+    pending.pendingPartial = true; await pending.trade('open', 'gateio', 4);
+    assert.equal((await exit(pending, 'close', 'short', 2)).riskCode, 'EXIT_ORDER_UNRESOLVED');
+    assert.equal(pending.posts, 1);
+  });
+  it('execution refresh cannot prepare a reduce-only quantity above the proven exposure', async t => {
+    const h = harness({ initialExposure: 0.1, freshExecutionMark: 1000 }); t.after(() => h.owner.stop()); await h.start();
+    const result = await exit(h, 'close');
+    assert.equal(result.omsResult?.status, 'submission_unknown', 'unchanged OMS catches preparation failure');
+    assert.equal(result.omsResult?.reason, 'TRUSTED_EXIT_PREPARATION_EXCEEDS_PROOF');
+    assert.equal(h.posts, 0);
+  });
+  it('protective recovery can exit with expired mandate without general LIVE_READY', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
+    h.advance(3_600_001); await h.restart();
+    assert.equal(h.spine.protection.getMode(), 'replay');
+    assert.notEqual(h.spine.accountRiskAuthorizationContext(NOW + 3_600_001)!.status, 'COMPATIBLE');
+    h.spine.kernel.publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
+      channel: 'ticker', last: 1800, bestBid: 1799, bestAsk: 1801, volume24h: 100, high24h: 2100,
+      low24h: 1800, ts: NOW + 3_600_001 }, receivedAt: NOW + 3_600_001 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.posts, 2);
+    assert.equal(h.spine.pretradeDecisionReceipts.snapshot().records.at(-1)!.receipt.riskEffect, 'CLOSE');
+    assert.equal(h.spine.protection.getMode(), 'replay');
+    assert.equal((await h.trade()).admitted, false);
+  });
+  it('halt asserted by durable preparation subscriber blocks the pending exit before POST', async t => {
+    const h = harness({ initialExposure: 0.1 }); t.after(() => h.owner.stop()); await h.start();
+    h.spine.kernel.subscribe('order.execution.prepared', () => { h.halt = 'ALL_MUTATIONS'; });
+    assert.equal((await exit(h, 'close')).omsResult?.status, 'submission_unknown');
+    assert.equal(h.posts, 0);
+  });
+});
 
 describe('Gate G5R1 cross-source order facts', () => {
   for (const [name, patch] of Object.entries({
@@ -439,7 +658,9 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
     assert.match(decisions[0]!.contextDigest!, /^[a-f0-9]{64}$/);
     assert.match(decisions[0]!.snapshotDigest!, /^[a-f0-9]{64}$/);
     assert.match(decisions[0]!.mandateDigest!, /^[a-f0-9]{64}$/);
-    assert.equal(decisions[1]!.gatewayMode, 'GATEIO_EXISTING_EXIT_PATH');
+    assert.equal(decisions[1]!.gatewayMode, 'GATEIO_TRUSTED_EXIT_ONLY');
+    assert.equal(decisions[1]!.exitProof?.reduceOnly, true);
+    assert.equal(decisions[1]!.exitProof?.orderId, h.spine.oms.getStore().list()[1]!.orderId);
     assert.equal(decisions[1]!.decision, 'ADMITTED');
     assert.deepEqual(h.requests.filter((r) => r.method === 'POST').map((r) => [r.body.size, r.body.reduce_only]),
       [[0.1, false], [-0.1, true]]);
@@ -496,7 +717,7 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
     assert.equal(h.budget.snapshot().totalUsed, 1);
     assert.equal(h.posts, 1);
     assert.ok(h.budget.snapshot().networkUsed <= 39);
-    await assert.rejects(h.trade('close'), /GATEIO_PRODUCTION_FACTS_UNAVAILABLE/);
+    assert.equal((await h.trade('close')).admitted, false);
     assert.equal(h.posts, 1);
   });
   it('failed fresh post-submit read retains factual fill and revokes reconciliation immediately', async (t) => {
@@ -524,7 +745,7 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
     const count = h.requests.length;
     const result = await h.trade('close');
     assert.equal(result.admitted, false);
-    assert.equal(result.riskCode, 'NOT_LIVE_READY');
+    assert.equal(result.riskCode, 'EXIT_RUNTIME_STOPPED');
     assert.equal(h.requests.length, count);
   });
   it('Gate account capacity tightens caller limits; unknown account never uses config capital', async (t) => {

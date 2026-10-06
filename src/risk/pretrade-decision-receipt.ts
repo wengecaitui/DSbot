@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { isExchangeId } from '../data/MarketIdentity';
 import type { KernelEventEnvelope } from '../kernel/KernelEventEnvelope';
 import type { TradeIntent } from '../types/trade-intent';
+import { generateOrderId } from '../oms/order-id';
+import { compareExitProduct, type TrustedExitProof } from './trusted-exit';
 import type {
   AccountBoundGatewayResult,
   ExactRiskComparisonEvidence,
@@ -106,11 +108,13 @@ export function validatePreTradeRiskDecisionReceipt(
     'reasonCode', 'approvedPositionUsdExact', 'riskEffect', 'contextDigest',
     'snapshotDigest', 'mandateDigest', 'accountingDayId', 'positionVersion',
     'positionSourceKernelEventId', 'comparisons',
+    ...(isRecord(value) && value.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY' ? ['exitProof'] : []),
   ])) throw new Error('PRETRADE_RECEIPT_INVALID');
   if (value.schemaVersion !== PRETRADE_RISK_DECISION_RECEIPT_SCHEMA_VERSION
       || (value.gatewayMode !== 'LEGACY_PAPER_OR_NON_GATE'
         && value.gatewayMode !== 'GATEIO_ACCOUNT_BOUND'
-        && value.gatewayMode !== 'GATEIO_EXISTING_EXIT_PATH')
+        && value.gatewayMode !== 'GATEIO_EXISTING_EXIT_PATH'
+        && value.gatewayMode !== 'GATEIO_TRUSTED_EXIT_ONLY')
       || !isExchangeId(value.exchange as string)
       || (value.settle !== null && value.settle !== 'USDT')
       || typeof value.accountId !== 'string' || value.accountId.length === 0
@@ -127,7 +131,9 @@ export function validatePreTradeRiskDecisionReceipt(
         && (typeof value.approvedPositionUsdExact !== 'string'
           || !EXACT_NON_NEGATIVE_DECIMAL.test(value.approvedPositionUsdExact)))
       || (value.riskEffect !== null && value.riskEffect !== 'OPEN'
-        && value.riskEffect !== 'INCREASE')
+        && value.riskEffect !== 'INCREASE'
+        && !(value.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY'
+          && ['REDUCE', 'CLOSE', 'EMERGENCY_CLOSE'].includes(value.riskEffect as string)))
       || !validNullableSha(value.contextDigest)
       || !validNullableSha(value.snapshotDigest)
       || !validNullableSha(value.mandateDigest)
@@ -140,13 +146,48 @@ export function validatePreTradeRiskDecisionReceipt(
     throw new Error('PRETRADE_RECEIPT_INVALID');
   }
   if ((value.gatewayMode === 'GATEIO_ACCOUNT_BOUND'
-        || value.gatewayMode === 'GATEIO_EXISTING_EXIT_PATH')
+        || value.gatewayMode === 'GATEIO_EXISTING_EXIT_PATH'
+        || value.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY')
       && (value.exchange !== 'gateio' || value.settle !== 'USDT')) {
     throw new Error('PRETRADE_RECEIPT_IDENTITY_INVALID');
   }
   if ((value.decision === 'ADMITTED') !== (value.approvedPositionUsdExact !== null)
       || (value.decision === 'REJECTED') !== (value.reasonCode !== null)) {
     throw new Error('PRETRADE_RECEIPT_DECISION_INVALID');
+  }
+  if (value.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY') {
+    const p = value.exitProof;
+    if (value.decision === 'REJECTED') {
+      if (p !== null || value.riskEffect !== null) throw new Error('EXIT_RECEIPT_PROOF_INVALID');
+      return;
+    }
+    if (!isRecord(p) || !exactKeys(p, ['effect', 'exchange', 'settle', 'accountId', 'symbol',
+        'direction', 'exposureQuantityExact', 'valuationPriceExact', 'positionVersion',
+        'positionSourceKernelEventId', 'truthCapturedAt', 'truthSource', 'reduceOnly', 'orderId'])
+        || p.exchange !== value.exchange || p.settle !== value.settle || p.accountId !== value.accountId
+        || p.symbol !== value.symbol || p.effect !== value.riskEffect
+        || p.positionVersion !== value.positionVersion || p.positionSourceKernelEventId !== value.positionSourceKernelEventId
+        || !Number.isSafeInteger(p.positionVersion) || (p.positionVersion as number) <= 0
+        || typeof p.positionSourceKernelEventId !== 'string' || !SHA256.test(p.positionSourceKernelEventId)
+        || !Number.isSafeInteger(p.truthCapturedAt) || (p.truthCapturedAt as number) <= 0
+        || (p.truthCapturedAt as number) > (value.evaluationTime as number)
+        || typeof p.truthSource !== 'string' || !p.truthSource
+        || p.reduceOnly !== true || (p.direction !== 'long' && p.direction !== 'short')
+        || typeof p.exposureQuantityExact !== 'string' || !EXACT_NON_NEGATIVE_DECIMAL.test(p.exposureQuantityExact)
+        || p.exposureQuantityExact === '0'
+        || typeof p.valuationPriceExact !== 'string' || !EXACT_NON_NEGATIVE_DECIMAL.test(p.valuationPriceExact)
+        || p.valuationPriceExact === '0'
+        || value.requestedPositionUsdExact !== value.approvedPositionUsdExact
+        || p.orderId !== generateOrderId({ intentId: value.intentId as string, exchange: 'gateio',
+          symbol: value.symbol as string, direction: p.direction, action: value.action as string,
+          approvedPositionUsd: Number(value.approvedPositionUsdExact) })) throw new Error('EXIT_RECEIPT_PROOF_INVALID');
+    const comparison = compareExitProduct(p.exposureQuantityExact, p.valuationPriceExact,
+      value.approvedPositionUsdExact as string);
+    if (comparison < 0 || (p.effect === 'REDUCE'
+        ? comparison <= 0 || value.action !== 'reduce'
+        : comparison !== 0 || (p.effect === 'CLOSE' ? value.action !== 'close'
+          : p.effect !== 'EMERGENCY_CLOSE' || value.action !== 'emergency_exit')))
+      throw new Error('EXIT_RECEIPT_EFFECT_INVALID');
   }
 }
 
@@ -177,6 +218,7 @@ export function createPreTradeRiskDecisionReceipt(input: Readonly<{
   action: TradeAction;
   evaluationTime: number;
   result: GatewayResult | AccountBoundGatewayResult;
+  exitProof?: TrustedExitProof | null;
 }>): PreTradeRiskDecisionRecordedPayload {
   const provenance = 'provenance' in input.result ? input.result.provenance : null;
   const receipt: PreTradeRiskDecisionReceiptV1 = {
@@ -184,7 +226,8 @@ export function createPreTradeRiskDecisionReceipt(input: Readonly<{
     gatewayMode: input.gatewayMode,
     exchange: input.intent.exchange,
     settle: provenance?.settle === 'USDT'
-      || input.gatewayMode === 'GATEIO_EXISTING_EXIT_PATH' ? 'USDT' : null,
+      || input.gatewayMode === 'GATEIO_EXISTING_EXIT_PATH'
+      || input.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY' ? 'USDT' : null,
     accountId: input.accountId,
     intentId: input.intent.intentId,
     symbol: input.intent.symbol,
@@ -195,13 +238,14 @@ export function createPreTradeRiskDecisionReceipt(input: Readonly<{
     reasonCode: input.result.decision === 'REJECTED' ? input.result.reasonCode : null,
     approvedPositionUsdExact: input.result.decision === 'ADMITTED'
       ? exactNumber(input.result.approvedPositionUsd) : null,
-    riskEffect: provenance?.riskEffect ?? null,
+    riskEffect: input.exitProof?.effect ?? provenance?.riskEffect ?? null,
+    ...(input.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY' ? { exitProof: input.exitProof ?? null } : {}),
     contextDigest: provenance?.contextDigest ?? null,
     snapshotDigest: provenance?.snapshotDigest ?? null,
     mandateDigest: provenance?.mandateDigest ?? null,
     accountingDayId: provenance?.accountingDayId ?? null,
-    positionVersion: provenance?.positionVersion ?? null,
-    positionSourceKernelEventId: provenance?.positionSourceKernelEventId ?? null,
+    positionVersion: input.exitProof?.positionVersion ?? provenance?.positionVersion ?? null,
+    positionSourceKernelEventId: input.exitProof?.positionSourceKernelEventId ?? provenance?.positionSourceKernelEventId ?? null,
     comparisons: provenance?.comparisons ?? [],
   };
   validatePreTradeRiskDecisionReceipt(receipt);

@@ -13,14 +13,16 @@ import type { GateIoCanonicalInstrumentFacts } from './GateIoAuthenticatedReadFo
 import { GateIoCanaryCredentialError } from './GateIoCanaryCredentialFile';
 
 // Same budget implementation as the formal Gate binding; not a second limiter/transport.
-// Eight 5-GET captures + five 3-GET instrument reads + 3 attestations + 2 ambiguity GETs + 3 POSTs.
+// Ten 5-GET captures + five 3-GET instrument reads + 3 attestations + 2 ambiguity GETs + 3 POSTs.
 export const GATEIO_LIVE_CANARY_LIMITS: Readonly<GateIoG3RunLimits> = Object.freeze({
-  accountAcquisitions: 8, instrumentAcquisitions: 5, currentRunOrderAttestations: 3,
+  // R3D2: mandatory fresh position proof before CLOSE and optional EMERGENCY_CLOSE.
+  // Two additional account reads (five GETs each), never additional mutation authority.
+  accountAcquisitions: 10, instrumentAcquisitions: 5, currentRunOrderAttestations: 3,
   ambiguousReconciliations: 2, proofMutations: 2, cleanupMutations: 1,
-  totalMutations: 3, networkRequests: 63,
+  totalMutations: 3, networkRequests: 73,
 });
 export const GATEIO_LIVE_RECOVERY_LIMITS: Readonly<GateIoG3RunLimits> = Object.freeze({
-  ...GATEIO_LIVE_CANARY_LIMITS, instrumentAcquisitions: 3, networkRequests: 55,
+  ...GATEIO_LIVE_CANARY_LIMITS, accountAcquisitions: 8, instrumentAcquisitions: 3, networkRequests: 55,
   proofMutations: 0, cleanupMutations: 1, totalMutations: 1,
 });
 export const GATEIO_CANARY_OPEN_MARK_DRIFT_RATIO = 0.001;

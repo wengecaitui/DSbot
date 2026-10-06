@@ -4,9 +4,8 @@ import type { KernelPositionStateStore } from '../kernel/KernelPositionStateStor
 import type { KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
 import { PositionManager } from './PositionManager';
 import { PositionPlanStore } from './PositionPlanStore';
-import { evaluateProtectiveRoute } from './ProtectiveExecutor';
-import type { ProtectiveContext } from './ProtectiveExecutor';
-import type { PositionPlan } from './position-plan-types';
+import { evaluateProtectiveRoute, buildProtectiveIntent } from './ProtectiveExecutor';
+import type { TradeIntent } from '../types/trade-intent';
 import type { HardRiskSnapshot } from '../risk/pretrade-risk-types';
 import type { OmsCore } from '../oms/OmsCore';
 import { quantityEqual } from '../oms/execution-observation';
@@ -22,6 +21,9 @@ export interface PositionManagerRuntimeConfig {
   readonly hardRisk: () => HardRiskSnapshot;
   readonly oms?: OmsCore;
   readonly stopPct?: number;
+  readonly submitAuthoritativeExit?: (intent: TradeIntent) => Promise<{ status: string; order?: any; reason?: string }>;
+  readonly exitObservationReady?: () => boolean;
+  readonly onStop?: () => void;
 }
 
 export interface PositionManagerRuntime {
@@ -65,7 +67,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
 
   function onFillEvent(envelope: any): void {
     queueMicrotask(() => {
-      if (mode === 'replay') return;
+      if (mode === 'replay' && !config.exitObservationReady?.()) return;
       const { type, kernelLogicalSequence: seq } = envelope;
       if (type !== 'execution.fill.confirmed') return;
       const fill = envelope.payload?.fill;
@@ -122,7 +124,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
     // re-arms before this deferred handler runs. Only a later NEW tick may submit.
     const lockedAtReceipt = new Set(submittedIntents);
     queueMicrotask(() => {
-      if (mode !== 'live') return;
+      if (mode !== 'live' && !config.exitObservationReady?.()) return;
       const ticker = envelope.payload?.ticker;
       if (!ticker) return;
 
@@ -148,21 +150,17 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
 
       const marketSnapshot = config.marketStore?.getSnapshot?.(exchange as any, symbol) as any;
 
-      const ctx: ProtectiveContext = {
-        plan,
-        currentPosition: position,
-        exchange,
-        marketPrice,
-        marketSnapshot,
-        hardRisk: config.hardRisk(),
-      };
-
-      const route = evaluateProtectiveRoute(ctx);
+      const route = config.submitAuthoritativeExit
+        ? { admitted: true as const, intent: buildProtectiveIntent({ plan,
+          currentPosition: position, exchange, marketPrice }), approvedSize: 0 }
+        : evaluateProtectiveRoute({ plan, currentPosition: position, exchange,
+          marketPrice, marketSnapshot, hardRisk: config.hardRisk() });
       if (!route.admitted) return;
 
       // Synchronously submit via fire-and-forget OMS call
       submittedIntents.add(plan.planId);
-      oms.submitRequest(route.intent, 'close', route.approvedSize).then((omsResult: any) => {
+      (config.submitAuthoritativeExit ? config.submitAuthoritativeExit(route.intent)
+        : oms.submitRequest(route.intent, 'close', route.approvedSize)).then((omsResult: any) => {
         if (omsResult?.status === 'rejected' || omsResult?.status === 'conflict') {
           // Allow future protection retries
           submittedIntents.delete(plan.planId);
@@ -216,6 +214,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
 
     stop(): void {
       mode = 'replay';
+      config.onStop?.();
     },
 
     positionManager,

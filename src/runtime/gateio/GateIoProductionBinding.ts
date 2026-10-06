@@ -142,6 +142,10 @@ export function createGateIoProductionBinding(
         history: gateTruth.currentRunTradeHistory() });
     },
     currentRunTradeHistory: gateTruth.currentRunTradeHistory,
+    // Current execution mark after the private fresh account/position capture; not R2 economic equity.
+    exitValuationPrice: () => facts().instrument.markPrice,
+    mutationControl: () => Object.freeze({ exchange: 'gateio' as const, accountId: options.accountId,
+      locked: riskLimits.locked, mutationHalt: riskLimits.mutationHalt }),
     bindSpine(value: ProductionSpine) {
       if (spine !== null || value.executionMode !== 'limited-live'
           || !productionSpineUsesExecutionBinding(value, adapter, truthPort))

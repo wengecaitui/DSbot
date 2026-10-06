@@ -1,4 +1,5 @@
 import type { ExactRiskComparisonEvidence, TradeAction } from './pretrade-risk-types';
+import type { TrustedExitProof } from './trusted-exit';
 
 export const PRETRADE_RISK_DECISION_RECORDED =
   'PRETRADE_RISK_DECISION_RECORDED' as const;
@@ -8,7 +9,8 @@ export const PRETRADE_RISK_DECISION_RECEIPT_SCHEMA_VERSION =
 export type PreTradeGatewayMode =
   | 'LEGACY_PAPER_OR_NON_GATE'
   | 'GATEIO_ACCOUNT_BOUND'
-  | 'GATEIO_EXISTING_EXIT_PATH';
+  | 'GATEIO_EXISTING_EXIT_PATH'
+  | 'GATEIO_TRUSTED_EXIT_ONLY';
 
 export interface PreTradeRiskDecisionReceiptV1 {
   readonly schemaVersion: typeof PRETRADE_RISK_DECISION_RECEIPT_SCHEMA_VERSION;
@@ -24,7 +26,9 @@ export interface PreTradeRiskDecisionReceiptV1 {
   readonly decision: 'ADMITTED' | 'REJECTED';
   readonly reasonCode: string | null;
   readonly approvedPositionUsdExact: string | null;
-  readonly riskEffect: 'OPEN' | 'INCREASE' | null;
+  readonly riskEffect: 'OPEN' | 'INCREASE' | TrustedExitProof['effect'] | null;
+  /** Additive: historical v1 receipts retain their original schema and digest. */
+  readonly exitProof?: TrustedExitProof | null;
   readonly contextDigest: string | null;
   readonly snapshotDigest: string | null;
   readonly mandateDigest: string | null;

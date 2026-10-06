@@ -44,6 +44,7 @@ export interface ProductionRuntimeIdentity {
 export interface ProductionRuntimeHardRiskConfig {
   readonly enabled: true;
   readonly locked: boolean;
+  readonly mutationHalt?: 'RISK_INCREASE' | 'ALL_MUTATIONS';
   readonly lockReason?: string;
   readonly totalCapitalUsd: number;
   readonly maxSinglePositionPct: number;
@@ -218,6 +219,8 @@ function validateHardRiskFacts(
   if (snapshot.locked && (typeof snapshot.lockReason !== 'string' || snapshot.lockReason.trim().length === 0)) {
     throw new Error('HARD_RISK_INCOMPLETE: locked snapshots require a reason');
   }
+  if (snapshot.mutationHalt !== undefined && !['RISK_INCREASE', 'ALL_MUTATIONS'].includes(snapshot.mutationHalt))
+    throw new Error('HARD_RISK_INCOMPLETE: mutationHalt must be explicit');
   return snapshot;
 }
 
@@ -246,6 +249,7 @@ export function createConfiguredCanonicalHardRiskSource(
     accountId: sourceIdentity.accountId,
     enabled: config.enabled,
     locked: config.locked,
+    ...(config.mutationHalt === undefined ? {} : { mutationHalt: config.mutationHalt }),
     ...(config.lockReason === undefined ? {} : { lockReason: config.lockReason }),
     totalCapitalUsd: config.totalCapitalUsd,
     maxSinglePositionPct: config.maxSinglePositionPct,
@@ -554,6 +558,8 @@ export function createApplicationProductionRuntimeOwner(
             : { mode: 'LEGACY_PAPER_OR_NON_GATE' },
           ...(gateBinding === null ? {} : {
             clock: gateBinding.clock, marketStaleAfterMs: gateBinding.staleAfterMs,
+            exitValuationPrice: gateBinding.exitValuationPrice,
+            mutationControl: gateBinding.mutationControl,
           }),
         });
         gateBinding?.bindSpine(authoritativeSpine);
@@ -575,7 +581,9 @@ export function createApplicationProductionRuntimeOwner(
         failureState = 'RECONCILIATION_FAILED';
         const reconciliation = await dependencies.reconcile(authoritativeSpine);
         reconciliationEvidence = reconciliation;
-        if (!reconciliation.reconciliationVerified) {
+        if (!reconciliation.reconciliationVerified && !(gateBinding !== null
+            && reconciliation.issues.length > 0
+            && reconciliation.issues.every(issue => issue.outcome === 'MISSING_PROTECTION'))) {
           throw new Error(`PRODUCTION_RUNTIME_RECONCILIATION_FAILED: ${reconciliation.outcome}`);
         }
 

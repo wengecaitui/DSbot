@@ -57,6 +57,9 @@ import { computeRuntimeAccounting } from '../accounting/runtime-accounting';
 import type { RuntimeAccountingSnapshot } from '../accounting/runtime-accounting-types';
 import { computeTradeLifecycle } from '../accounting/trade-lifecycle';
 import type { TradeLifecycle } from '../accounting/trade-lifecycle-types';
+import { deriveTrustedExit, compareExitProduct, type TrustedExitProof } from '../risk/trusted-exit';
+import { multiplyQuantity } from '../types/decimal-quantity';
+import type { GatewayResult } from '../risk/pretrade-risk-types';
 
 export interface ProductionSpineConfig {
   exchange: string;
@@ -78,6 +81,10 @@ export interface ProductionSpineConfig {
    * can establish LIVE_READY freshness. No public helper injects tickers.
    */
   marketRuntime?: MarketDataRuntime;
+  /** Composition-owned current Gate execution valuation, never caller-provided sizing. */
+  exitValuationPrice?: () => number;
+  /** Halt authority is independent of account-capacity refresh, which the adapter invalidates. */
+  mutationControl?: () => Pick<AccountBoundHardRiskSnapshot, 'exchange' | 'accountId' | 'locked' | 'mutationHalt'>;
   /** Every runtime composition must select exactly one risk-authority mode. */
   riskAuthorization:
     | { readonly mode: 'LEGACY_PAPER_OR_NON_GATE' }
@@ -198,6 +205,10 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   }
   let executionInFlight = false;
   let reconciliationInFlight = false;
+  let exitDecisionInFlight = false;
+  let runtimeStopped = false;
+  let lastExecutionTruth: ExecutionTruthSnapshot | null = null;
+  let exitPermit: { proof: TrustedExitProof; notional: number; receiptDigest: string } | null = null;
 
   // ── Execution adapter + factual truth port ──
   const defaultExecuteParams: ExecuteParams = {
@@ -237,7 +248,47 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     truthPort = config.execution.truthPort;
     reconciliationIdentity = { accountId: config.accountId, exchange };
   }
-  const oms = new OmsCore(kernel, adapter, undefined,
+  const guardedAdapter: ExecutionAdapter = gateExecution ? {
+    async submit(order, prepared) {
+      if (order.action === 'open') {
+        const checkIncrease = () => {
+          const control = config.mutationControl?.() ?? config.hardRisk();
+          if (runtimeStopped || control.exchange !== exchange || control.accountId !== reconciliationIdentity.accountId
+              || control.locked || control.mutationHalt !== undefined) throw new Error('RISK_INCREASE_HALTED');
+        };
+        try { checkIncrease(); } catch { return { status: 'rejected', reason: 'RISK_INCREASE_HALTED' }; }
+        return adapter.submit(order, value => { checkIncrease(); prepared?.(value); checkIncrease(); });
+      }
+      const permit = exitPermit;
+      function check() {
+        const position = positionStore.resolve(exchange, order.symbol);
+        const risk = config.mutationControl?.() ?? config.hardRisk();
+        if (!permit || permit.proof.orderId !== order.orderId
+            || permit.proof.direction !== (order.side === 'buy' ? 'long' : 'short')
+            || permit.notional !== order.approvedNotionalUsd || runtimeStopped
+            || risk.exchange !== exchange || risk.accountId !== reconciliationIdentity.accountId
+            || risk.mutationHalt === 'ALL_MUTATIONS'
+            || (risk.mutationHalt !== undefined && risk.mutationHalt !== 'RISK_INCREASE')
+            || position.status !== 'open' || position.snapshot?.positionVersion !== permit.proof.positionVersion
+            || position.snapshot.sourceKernelEventId !== permit.proof.positionSourceKernelEventId
+            || oms.getStore().list().some(o => o.orderId !== order.orderId
+              && !['FILLED', 'CANCELLED', 'REJECTED'].includes(o.status))
+            || !decisionReceipts.snapshot().records.some(r => r.receiptDigest === permit.receiptDigest))
+          throw new Error('TRUSTED_EXIT_ADMISSION_INVALIDATED');
+      }
+      try { check(); } catch { return { status: 'rejected', reason: 'TRUSTED_EXIT_ADMISSION_INVALIDATED' }; }
+      return adapter.submit(order, value => {
+        check();
+        if (!value.reduceOnly || !Number.isFinite(value.requestedQuantity) || value.requestedQuantity <= 0
+            || compareExitProduct(value.requestedQuantity, 1, permit!.proof.exposureQuantityExact) > 0
+            || compareExitProduct(value.requestedQuantity, permit!.proof.valuationPriceExact, permit!.notional) > 0)
+          throw new Error('TRUSTED_EXIT_PREPARATION_EXCEEDS_PROOF');
+        prepared?.(value);
+        check(); // The durable preparation may notify subscribers; recheck before the adapter can POST.
+      });
+    },
+  } : adapter;
+  const oms = new OmsCore(kernel, guardedAdapter, undefined,
     (venue, symbol) => positionStore.resolve(venue, symbol));
 
   // ── Position state store ──
@@ -274,7 +325,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
         p.executedAtMs = Date.now();
       }
       if (!gateExecution) return oms.submitRequest(intent, action, approvedUsd);
-      if (!recoveryVerified || protection.getMode() !== 'live' || executionInFlight || reconciliationInFlight
+      if (!recoveryVerified || runtimeStopped || (action === 'open' && protection.getMode() !== 'live')
+          || (action !== 'open' && exitPermit === null) || executionInFlight || reconciliationInFlight
           || intent.exchange !== exchange || intent.symbol !== 'ETH/USDT'
           || (action === 'open' && !reconciliationVerified)) {
         return { status: 'conflict' as const, reason: 'GATEIO_EXECUTION_STATE_NOT_VERIFIED' };
@@ -315,6 +367,15 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     marketStore,
     hardRisk: config.hardRisk,
     stopPct: config.stopPct ?? 0.05,
+    submitAuthoritativeExit: async (intent) => {
+      // Protective quantity is canonical, but valuation must come from current execution facts.
+      // The public label never establishes the exit effect or grants OMS access.
+      const result = gateExecution ? await executeTrustedExit(intent, 'close', true)
+        : await executeThroughGateway(spine, intent, 'close', intent.positionUsd);
+      return result.omsResult ?? { status: 'conflict', reason: result.riskCode ?? 'EXIT_DENIED' };
+    },
+    exitObservationReady: gateExecution ? () => recoveryVerified && !runtimeStopped : undefined,
+    onStop: () => { runtimeStopped = true; },
   });
   // Strip _setLive from public interface — captured for internal use only
   const _setLive = (protection as any)._setLive as () => void;
@@ -340,11 +401,11 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   const spine = {
     kernel, positionStore, marketStore, policyStore,
     oms: omsReadView, planStore, protection, executionMode, service,
-    privateConfig: {
+    privateConfig: Object.freeze({
       hardRisk: config.hardRisk,
       accountId: reconciliationIdentity.accountId,
       clock,
-    },
+    }),
     riskAuthorizationMode,
     accountRiskAuthorizationContext(evaluationTime: number) {
       return accountRiskRuntime?.compose(evaluationTime) ?? null;
@@ -388,6 +449,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     truthPort,
     oms,
     executionOms: dynamicPriceOms,
+    executeTrustedExit,
   }));
   if (accountRiskRuntime !== null) accountRiskRuntimeBySpine.set(spine, accountRiskRuntime);
   decisionReceiptStoreBySpine.set(spine, decisionReceipts);
@@ -415,6 +477,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
           })),
       }) : projected;
       const external: ExecutionTruthSnapshot = await truthPort.acquireTruth();
+      lastExecutionTruth = external;
       if (gateExecution && external.complete && external.executions?.length) {
         // Preview with the same OMS transition and position arithmetic. The existing pure
         // reconciliation engine must accept the proposed financial facts BEFORE any delta event.
@@ -451,6 +514,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       reconciliationVerified = report.reconciliationVerified;
       return report;
     } catch (error) {
+      lastExecutionTruth = null;
       reconciliationVerified = false;
       lastReconciliationReport = null;
       throw error;
@@ -467,10 +531,69 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       && now >= at && now - at <= (config.marketStaleAfterMs ?? 30_000);
   }
 
+  async function executeTrustedExit(originalIntent: TradeIntent, requestedAction: TradeAction,
+    protective = false): Promise<ExecuteThroughGatewayResult> {
+    originalIntent = Object.freeze({ ...originalIntent });
+    const deny = (riskCode: string): ExecuteThroughGatewayResult => ({ admitted: false, riskCode, action: requestedAction });
+    if (runtimeStopped) return deny('EXIT_RUNTIME_STOPPED');
+    if (!recoveryVerified || !started) return deny('EXIT_RECOVERY_NOT_VERIFIED');
+    if (exitDecisionInFlight || executionInFlight || reconciliationInFlight) return deny('EXIT_EXECUTION_BUSY');
+    if (originalIntent.exchange !== exchange || originalIntent.symbol !== 'ETH/USDT') return deny('PROVENANCE_MISMATCH');
+    exitDecisionInFlight = true;
+    try {
+      // Separate exit readiness: no requirement for economic context, mandate or general LIVE_READY.
+      const report = await runCurrentReconciliation();
+      const truth = lastExecutionTruth;
+      const time = clock.now();
+      if (!truth || !truth.complete || truth.identity.exchange !== exchange
+          || truth.identity.accountId !== reconciliationIdentity.accountId || !truth.source
+          || !Number.isSafeInteger(time) || !Number.isSafeInteger(truth.capturedAt)
+          || truth.capturedAt > time || time - truth.capturedAt > (config.marketStaleAfterMs ?? 30_000)
+          || report.issues.some(issue => issue.outcome !== 'MISSING_PROTECTION')) return deny('EXIT_TRUTH_NOT_VERIFIED');
+      if (oms.getStore().list().some(o => !['FILLED', 'CANCELLED', 'REJECTED'].includes(o.status))
+          || truth.orders.some(o => ['OPEN', 'PARTIALLY_FILLED'].includes(o.status))) return deny('EXIT_ORDER_UNRESOLVED');
+      // Public projections are not authority. Rebuild the canonical position from durable events.
+      const durable = createKernelPositionStateStore();
+      for (const event of kernel.journal().readFromLogicalSequence(1))
+        if (event.type === 'execution.fill.confirmed' || event.type === 'position.baseline.confirmed') durable.apply(event as any);
+      const position = positionStore.resolve(exchange, originalIntent.symbol);
+      const recovered = durable.resolve(exchange, originalIntent.symbol);
+      const external = truth.positions.filter(p => p.exchange === exchange && p.symbol === originalIntent.symbol);
+      if (JSON.stringify(position) !== JSON.stringify(recovered) || position.status !== 'open'
+          || external.length !== 1 || external[0]!.side !== position.side
+          || external[0]!.signedQuantity !== position.signedQuantity
+          || external[0]!.averageEntryPrice !== position.averageEntryPrice) return deny('EXIT_POSITION_NOT_VERIFIED');
+      const valuationPrice = config.exitValuationPrice?.()
+        ?? (gateMarketFresh() ? marketStore.getSnapshot(exchange, originalIntent.symbol)?.ticker?.ticker.last : undefined);
+      if (typeof valuationPrice !== 'number' || !Number.isFinite(valuationPrice) || valuationPrice <= 0)
+        return deny('EXIT_VALUATION_UNAVAILABLE');
+      const intent = protective ? Object.freeze({ ...originalIntent,
+        direction: position.side === 'long' ? 'short' as const : 'long' as const,
+        positionUsd: multiplyQuantity(Math.abs(position.signedQuantity), valuationPrice) }) : originalIntent;
+      const derived = deriveTrustedExit({ intent, requestedAction, position,
+        accountId: reconciliationIdentity.accountId, hardRisk: config.hardRisk(), valuationPrice,
+        truthCapturedAt: truth.capturedAt, truthSource: truth.source });
+      const receipt = createPreTradeRiskDecisionReceipt({ gatewayMode: 'GATEIO_TRUSTED_EXIT_ONLY',
+        accountId: reconciliationIdentity.accountId, intent, action: derived.action,
+        evaluationTime: time, result: derived.result, exitProof: derived.proof });
+      try {
+        if (kernel.publish('PRETRADE_RISK_DECISION_RECORDED', receipt).failures > 0)
+          return deny('RISK_DECISION_RECEIPT_PERSIST_FAILED');
+      } catch { return deny('RISK_DECISION_RECEIPT_PERSIST_FAILED'); }
+      if (derived.result.decision !== 'ADMITTED' || derived.proof === null)
+        return deny((derived.result as Extract<GatewayResult, { decision: 'REJECTED' }>).reasonCode);
+      exitPermit = { proof: derived.proof, notional: derived.result.approvedPositionUsd,
+        receiptDigest: receipt.receiptDigest };
+      const omsResult = await dynamicPriceOms.submitRequest(intent, derived.action, derived.result.approvedPositionUsd);
+      return { admitted: true, riskCode: null, action: derived.action, omsResult };
+    } catch { return deny('EXIT_READINESS_UNAVAILABLE'); }
+    finally { exitPermit = null; exitDecisionInFlight = false; }
+  }
+
   if (gateExecution) {
     (spine as any)[ENTRY_TOKEN] = async (intent: TradeIntent): Promise<string | null> => {
       if (intent.exchange !== exchange || intent.symbol !== 'ETH/USDT') return 'GATEIO_VENUE_MISMATCH';
-      if (!recoveryVerified || !reconciliationVerified || executionInFlight || reconciliationInFlight)
+      if (runtimeStopped || exitDecisionInFlight || !recoveryVerified || !reconciliationVerified || executionInFlight || reconciliationInFlight)
         return 'RECONCILIATION_NOT_VERIFIED';
       if (!gateMarketFresh()) return 'MARKET_STALE';
       if (oms.getStore().list().some(o => o.preparation &&
@@ -513,7 +636,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     _setLive();
   };
 
-  return spine;
+  Object.freeze(protection);
+  return Object.freeze(spine);
 }
 
 const VERIFY_TOKEN = Symbol('verifyToken');
@@ -527,6 +651,7 @@ interface ProductionSpineInternals {
   readonly truthPort: ExecutionTruthPort;
   readonly oms: OmsCore;
   readonly executionOms: OmsCore;
+  readonly executeTrustedExit: (intent: TradeIntent, action: TradeAction) => Promise<ExecuteThroughGatewayResult>;
 }
 const productionSpineInternalsBySpine = new WeakMap<object, ProductionSpineInternals>();
 
@@ -646,6 +771,9 @@ export async function executeThroughGateway(
   action: TradeAction,
   approvedUsd: number,
 ): Promise<ExecuteThroughGatewayResult> {
+  const internals = requireProductionSpineInternals(spine);
+  if (spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND' && action !== 'open')
+    return internals.executeTrustedExit(intent, action);
   // Block entries before LIVE_READY (protection mode !== 'live')
   if (spine.protection.getMode() !== 'live') {
     if (action === 'open' || action === 'close') {
@@ -664,7 +792,9 @@ export async function executeThroughGateway(
 
   const marketSnapshot = marketStore.getSnapshot(exchange, symbol);
   const positionResolved = positionStore.resolve(exchange, symbol);
-  const hardRiskSnapshot = spine.privateConfig.hardRisk();
+  const sourceHardRisk = spine.privateConfig.hardRisk();
+  const hardRiskSnapshot = sourceHardRisk.mutationHalt === undefined ? sourceHardRisk
+    : { ...sourceHardRisk, locked: true };
 
   // Preserve the canonical snapshot. In particular, a trusted flat baseline has
   // a non-null versioned snapshot; missing state must never be fabricated as flat.
@@ -730,10 +860,7 @@ export async function executeThroughGateway(
     admitted: true,
     riskCode: null,
     action,
-    omsResult: {
-      status: omsResult.status,
-      reason: (omsResult as any).reason,
-    },
+    omsResult,
   };
 }
 
