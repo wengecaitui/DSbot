@@ -7,6 +7,7 @@ import { createTradingKernel } from '../../src/kernel/TradingKernel';
 import { createMarketDataRuntime, type MarketDataCollectorPort } from '../../src/runtime/market/MarketDataRuntime';
 import type { MarketDataRuntime } from '../../src/runtime/market/MarketDataRuntime';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
+import { PaperLedgerStore } from '../../src/paper/PaperLedgerStore';
 import { createProductionSpine, type ProductionSpine } from '../../src/position/ProductionSpine';
 import {
   assertCanonicalHardRiskSource,
@@ -132,6 +133,11 @@ describe('Phase 8A application production runtime owner', () => {
       assert.equal(owner.read.recovery()?.recoveryVerified, true);
       assert.equal(owner.read.reconciliation()?.reconciliationVerified, true);
       assert.equal(authoritative.oms.getStore().list().length, 0, 'boot submits no OMS request');
+      assert.equal((authoritative as any).adapter, undefined, 'owner spine exposes no execution adapter');
+      assert.equal((authoritative.oms as any).submitRequest, undefined, 'owner spine exposes no OMS submit');
+      assert.equal((authoritative.oms.getStore() as any).apply, undefined, 'owner spine exposes no writable OMS store');
+      assert.equal(Object.isFrozen(authoritative.oms), true, 'OMS read view is immutable');
+      assert.equal(Object.isFrozen(authoritative.oms.getStore()), true, 'OMS store read view is immutable');
       assert.equal(authoritative.protection.getSubmittedCount(), 0, 'boot submits no protective request');
       assert.equal(authoritative.protection.getMode(), 'replay', 'boot never grants LIVE_READY');
       assert.equal(probe.starts(), 1);
@@ -480,16 +486,18 @@ describe('Phase 8A application production runtime owner', () => {
 
     const probe = collectorProbe();
     let captured: ProductionSpine | null = null;
-    let adapterSubmissions = 0;
+    let persistenceSaves = 0;
     const owner = createApplicationProductionRuntimeOwner(config, {
       ...marketOverride(probe),
+      createPaperPersistence(paperConfig, baseDir) {
+        const inner = new PaperLedgerStore(paperConfig, { baseDir });
+        return {
+          load: () => inner.load(),
+          save: async ledger => { persistenceSaves += 1; await inner.save(ledger); },
+        };
+      },
       async createSpine(spineConfig) {
         const spine = await createProductionSpine(spineConfig);
-        const originalSubmit = spine.adapter.submit.bind(spine.adapter);
-        spine.adapter.submit = async (order) => {
-          adapterSubmissions += 1;
-          return originalSubmit(order);
-        };
         captured = spine;
         return spine;
       },
@@ -498,7 +506,7 @@ describe('Phase 8A application production runtime owner', () => {
       await assert.rejects(() => owner.start(), /PRODUCTION_RUNTIME_RECONCILIATION_FAILED/);
       assert.ok(captured);
       assert.equal(captured.oms.getStore().get('unknown-order')?.status, 'SUBMISSION_UNKNOWN');
-      assert.equal(adapterSubmissions, 0, 'recovery/startup never resubmits unknown orders');
+      assert.equal(persistenceSaves, 0, 'recovery/startup never resubmits unknown orders');
       assert.equal(owner.authoritativeSpine(), null);
       assert.equal(owner.read.status().state, 'RECONCILIATION_FAILED');
       assert.equal(probe.starts(), 0, 'market starts only after reconciliation succeeds');

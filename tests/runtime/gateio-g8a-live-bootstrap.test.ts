@@ -227,9 +227,8 @@ describe('Gate G8A LIVE-only factual baseline', () => {
   });
   it('nonempty local OMS after acquisition denies without publishing', async () => {
     const h = await harness();
-    h.spine.oms.getStore().apply({ type: 'order.created', kernelLogicalSequence: 1,
-      kernelEventId: 'a'.repeat(64), payload: { order: { orderId: 'existing' } } } as any);
-    assert.throws(() => establishVerifiedLiveFlatBaseline(h.baseline), /BASELINE_DENIED/);
+    const nonemptyOms = { getStore: () => ({ list: () => [{ orderId: 'existing' }] }) } as any;
+    assert.throws(() => establishVerifiedLiveFlatBaseline({ ...h.baseline, oms: nonemptyOms }), /BASELINE_DENIED/);
     assert.equal(h.journal.eventCount, 0);
   });
   it('existing historical boundary and later external activity remain fail closed', async () => {

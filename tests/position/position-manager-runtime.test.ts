@@ -16,7 +16,10 @@ const unlockedHardRisk = { exchange: 'bitget' as any, locked: false, enabled: tr
 
 function mkFakeOms() {
   const submitted: any[] = [];
-  return { _submitted: submitted, submitRequest: async (i: any) => { submitted.push(i); return { status: 'submitted', orderId: i.intentId }; } };
+  return { _submitted: submitted, submitRequest: async (intent: any, action: any, approved: any) => {
+    submitted.push({ intent, action, approved });
+    return { status: 'submitted', orderId: intent.intentId };
+  } };
 }
 
 // ─── Real store integration ────────────────────────────────────────────────
@@ -27,10 +30,19 @@ describe('Real store integration', () => {
     kernel = createTradingKernel({ exchange: BITGET });
     positionStore = createKernelPositionStateStore();
     planStore = new PositionPlanStore();
-    oms = { _submitted: [] as any[], submitRequest: async (i: any) => { oms._submitted.push(i); return { status: 'submitted' }; } };
+    oms = { _submitted: [] as any[], submitRequest: async (intent: any, action: any, approved: any) => {
+      oms._submitted.push({ intent, action, approved });
+      return { status: 'submitted' };
+    } };
     // Position store subscribes BEFORE runtime (enforced ordering)
     kernel.subscribe('execution.fill.confirmed', (env: any) => positionStore.apply(env));
-    rt = createPositionManagerRuntime({ kernel, positionStore, planStore, marketStore: null, hardRisk: () => unlockedHardRisk, oms, stopPct: DEFAULT_STOP_PCT });
+    const marketStore = { getSnapshot: () => ({
+      exchange: 'bitget',
+      symbol: 'BTC/USDT',
+      isStale: false,
+      ticker: { ticker: { last: 47499 } },
+    }) } as any;
+    rt = createPositionManagerRuntime({ kernel, positionStore, planStore, marketStore, hardRisk: () => unlockedHardRisk, oms, stopPct: DEFAULT_STOP_PCT });
     rt.start();
   });
 
@@ -50,6 +62,18 @@ describe('Real store integration', () => {
     // Market above stop → no action
     await kernel.publish('market.ticker.updated', { ticker: { exchange: 'bitget', symbol: 'BTC/USDT', last: 48000 } });
     assert.strictEqual(oms._submitted.length, 0, 'above stop → no OMS');
+  });
+
+  it('protective runtime can submit only a trusted close action', async () => {
+    (rt as any)._setLive();
+    await publishFill('buy', 1, 50000);
+    await new Promise<void>(resolve => queueMicrotask(resolve));
+    await kernel.publish('market.ticker.updated', {
+      ticker: { exchange: 'bitget', symbol: 'BTC/USDT', last: 47499 },
+    });
+    await new Promise<void>(resolve => queueMicrotask(resolve));
+    assert.strictEqual(oms._submitted.length, 1, 'breached protection submitted exactly once');
+    assert.strictEqual(oms._submitted[0].action, 'close', 'protective runtime cannot submit OPEN/INCREASE');
   });
 
   it('start/stop dedup — multiple start() calls do not duplicate subscriptions', () => {

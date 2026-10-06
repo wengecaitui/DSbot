@@ -114,9 +114,9 @@ export interface ApplicationProductionRuntimeOwner {
   /** Internal, read-only L1A ports. No credential, execution, or activation surface. */
   readonly binanceAuthenticatedRead: BinanceAuthenticatedReadFoundation;
   /**
-   * Internal Workbench spine provider only. Resolves the exact owner spine (or
-   * null); wired exclusively into WorkbenchReadAdapter inside createGateway and
-   * never exposed through the public AppGateway.productionRuntime surface.
+   * Internal Workbench spine provider only. The returned spine exposes order
+   * evidence but no mutable OMS or execution adapter; all execution authority
+   * remains behind executeThroughGateway().
    */
   readonly authoritativeSpine: () => ProductionSpine | null;
   /** Internal Gate observation from the same binding used by reconciliation. No I/O or mutation. */

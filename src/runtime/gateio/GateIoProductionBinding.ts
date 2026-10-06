@@ -2,7 +2,10 @@
 import type { WsTicker } from '../../data/types';
 import { createMarketSnapshotStore } from '../../data/MarketSnapshotStore';
 import { GateIoFuturesExecutionAdapter } from '../../exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
-import type { ProductionSpine } from '../../position/ProductionSpine';
+import {
+  productionSpineUsesExecutionBinding,
+  type ProductionSpine,
+} from '../../position/ProductionSpine';
 import type { ExecutionTruthSnapshot } from '../../reconciliation/reconciliation-types';
 import { createGateIoExecutionTruthPort } from '../../reconciliation/GateIoExecutionTruthPort';
 import type { AccountBoundHardRiskSnapshot } from '../../risk/pretrade-risk-types';
@@ -140,7 +143,8 @@ export function createGateIoProductionBinding(
     },
     currentRunTradeHistory: gateTruth.currentRunTradeHistory,
     bindSpine(value: ProductionSpine) {
-      if (spine !== null || value.adapter !== adapter || value.executionMode !== 'limited-live')
+      if (spine !== null || value.executionMode !== 'limited-live'
+          || !productionSpineUsesExecutionBinding(value, adapter, truthPort))
         throw new Error('GATEIO_PRODUCTION_SPINE_BINDING_MISMATCH');
       spine = value;
     },

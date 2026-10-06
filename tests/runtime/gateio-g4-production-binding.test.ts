@@ -8,7 +8,6 @@ import { createTradingKernel } from '../../src/kernel/TradingKernel';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
 import { createApplicationProductionRuntimeOwner, type ProductionRuntimeConfig } from '../../src/runtime/production/ProductionRuntimeOwner';
 import { createProductionSpine, activateLiveReadiness, executeThroughGateway, reconcileRecoveredState, type ProductionSpine } from '../../src/position/ProductionSpine';
-import { GateIoFuturesExecutionAdapter } from '../../src/exchanges/gateio-futures/GateIoFuturesExecutionAdapter';
 import { GateIoG3RunBudget, GATEIO_G3_LIMITS } from '../../src/runtime/gateio/GateIoG3RunBudget';
 import { GATEIO_READ_ENDPOINTS } from '../../src/runtime/gateio/GateIoReadContracts';
 import { createTradeIntent } from '../../src/types/trade-intent';
@@ -409,7 +408,9 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
       assert.equal(h.owner.authoritativeSpine(), h.spine);
       assert.equal(h.spine.executionMode, 'limited-live');
       assert.equal(h.spine.service, null);
-      assert.ok(h.spine.adapter instanceof GateIoFuturesExecutionAdapter);
+      assert.equal((h.spine as any).adapter, undefined);
+      assert.equal((h.spine.oms as any).submitRequest, undefined);
+      assert.equal((h.spine.oms.getStore() as any).apply, undefined);
       assert.equal(h.spine.recoveryVerified, true);
       assert.equal(h.spine.lastReconciliationReport?.outcome, 'MATCH');
       assert.equal(h.spine.protection.getMode(), 'replay');
@@ -514,15 +515,16 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
     assert.equal(h.fills().length, 1);
     assert.equal(h.spine.reconciliationVerified, true);
   });
-  it('shutdown removes Gate mutation authority even from a retained internal OMS reference', async (t) => {
+  it('public spine has no direct OMS/adapter mutation and shutdown keeps the gateway closed', async (t) => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    assert.equal((h.spine as any).adapter, undefined);
+    assert.equal((h.spine.oms as any).submitRequest, undefined);
+    assert.equal((h.spine.oms.getStore() as any).apply, undefined);
     await h.trade(); await h.owner.stop();
     const count = h.requests.length;
-    const result = await h.spine.oms.submitRequest(createTradeIntent({
-      exchange: 'gateio', symbol: 'ETH/USDT', direction: 'short', positionUsd: 0.2,
-      source: 'offline-g4', reason: 'post-stop', biasUpdatedAt: NOW, createdAt: NOW,
-    }), 'reduce', 0.2);
-    assert.equal(result.status, 'conflict');
+    const result = await h.trade('close');
+    assert.equal(result.admitted, false);
+    assert.equal(result.riskCode, 'NOT_LIVE_READY');
     assert.equal(h.requests.length, count);
   });
   it('Gate account capacity tightens caller limits; unknown account never uses config capital', async (t) => {

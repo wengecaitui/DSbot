@@ -17,7 +17,11 @@ import {
 } from '../../src/position/ProductionSpine';
 import { createPaperExecutionTruthPort } from '../../src/reconciliation/PaperExecutionTruthPort';
 import { PaperLedgerStore } from '../../src/paper/PaperLedgerStore';
+import { PaperExecutionService } from '../../src/paper/PaperExecutionService';
+import { PaperExecutionAdapter } from '../../src/oms/PaperExecutionAdapter';
+import { OmsCore } from '../../src/oms/OmsCore';
 import { OmsOrderStore } from '../../src/oms/OmsOrderStore';
+import { createTradingKernel } from '../../src/kernel/TradingKernel';
 import { createKernelPositionStateStore } from '../../src/kernel/KernelPositionStateStore';
 import { PositionPlanStore } from '../../src/position/PositionPlanStore';
 import { validatePaperFill } from '../../src/types/paper-fill';
@@ -132,20 +136,19 @@ describe('Phase 5B2 — Paper correlation persistence', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-corr-'));
     const cfg = paperConfig('corr');
     const store = new PaperLedgerStore(cfg, { baseDir: dir });
-    const journalPath = join(dir, 'journal.jsonl');
+    const service = await PaperExecutionService.open(cfg, store);
+    const kernel = createTradingKernel({ exchange: 'bitget' });
+    const adapter = new PaperExecutionAdapter(service, {
+      markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: Date.now(),
+    });
+    const oms = new OmsCore(kernel, adapter);
 
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'corr', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: store });
-    s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
-
-    // Direct OMS submit (adapter carries correlation into the Paper fill)
-    (s1.adapter as any).params.markPriceUsd = 50000;
-    (s1.adapter as any).params.executedAtMs = Date.now();
-    const omsResult = await s1.oms.submitRequest(makeIntent('i1', 'BTC/USDT', 'long', 5000), 'open', 5000);
+    // OMS unit boundary still carries correlation; ProductionSpine no longer exposes this authority.
+    const omsResult = await oms.submitRequest(makeIntent('i1', 'BTC/USDT', 'long', 5000), 'open', 5000);
     assert.strictEqual(omsResult.status, 'filled', `filled, got ${omsResult.status}`);
 
     // Persisted Paper fill carries correlation
-    const fillEntry = s1.service.entries().find((e: any) => e.type === 'fill');
+    const fillEntry = service.entries().find((e: any) => e.type === 'fill');
     assert.ok(fillEntry, 'fill persisted');
     const fill = (fillEntry as any).fill;
     assert.strictEqual(typeof fill.sourceOrderId, 'string', 'sourceOrderId present');

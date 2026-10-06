@@ -4,11 +4,9 @@ import { describe, it } from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createProductionSpine, executeThroughGateway, trustBaseline } from '../../src/position/ProductionSpine';
+import { createProductionSpine, executeThroughGateway, recoverAndStart, trustBaseline } from '../../src/position/ProductionSpine';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
-import { recoverFromJournal, saveRecoveryCheckpoint } from '../../src/recovery/RecoveryManager';
-import { replayJournal } from '../../src/recovery/ReplayCoordinator';
-import type { ProjectorMap } from '../../src/recovery/ReplayCoordinator';
+import { saveRecoveryCheckpoint } from '../../src/recovery/RecoveryManager';
 
 const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
 const riskAuthorization = { mode: 'LEGACY_PAPER_OR_NON_GATE' } as const;
@@ -41,24 +39,6 @@ async function createSpineWithMarket(overrides: any = {}) {
 
 function makeIntent(id: string, symbol: string, dir: 'long' | 'short', usd: number) {
   return { intentId: id, exchange: 'bitget', symbol, direction: dir, orderType: 'market', positionUsd: usd, limitPrice: undefined, createdAt: Date.now() };
-}
-
-/** Create projectors from spine stores */
-function makeProjectors(s: any): ProjectorMap {
-  return new Map([
-    ['execution.fill.confirmed', [s.positionStore, s.oms.getStore()] as any],
-    ['position.baseline.confirmed', [s.positionStore] as any],
-    ['market.ticker.updated', [s.marketStore] as any],
-    ['policy.snapshot.published', [s.policyStore] as any],
-    ['order.created', [s.oms.getStore()] as any],
-    ['order.submitted', [s.oms.getStore()] as any],
-    ['order.rejected', [s.oms.getStore()] as any],
-    ['order.submission.unknown', [s.oms.getStore()] as any],
-    ['position.plan.created', [s.planStore] as any],
-    ['position.plan.closed', [s.planStore] as any],
-    ['position.plan.updated', [s.planStore] as any],
-    ['position.plan.archived', [s.planStore] as any],
-  ] as any);
 }
 
 let tmpdirPath: string;
@@ -131,8 +111,8 @@ describe('Phase 5A — Production Recovery', () => {
     
     // Run 2: fresh kernel, replay journal → projectors
     const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'replay-r2', hardRisk, riskAuthorization, journalPath: journalPath });
-    const proj = makeProjectors(s2);
-    const report = replayJournal(journal1 as any, proj);
+    const recovered = await recoverAndStart(s2, journal1);
+    const report = recovered.replayReport;
     
     assert.strictEqual(report.errors.length, 0, `no replay errors: ${JSON.stringify(report.errors)}`);
     assert.ok(report.eventsReplayed > 0, 'events replayed');
@@ -240,8 +220,7 @@ describe('Phase 5A — Production Recovery', () => {
     
     // Recovery with stale checkpoint → should still verify (journal authoritative)
     const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'stale-r2', hardRisk, riskAuthorization, journalPath: journalPath });
-    const proj2 = makeProjectors(s2);
-    const result = recoverFromJournal(journal2, proj2, checkpointPath);
+    const result = await recoverAndStart(s2, journal2, checkpointPath);
     
     assert.strictEqual(result.checkpointComparison, 'stale', 'stale checkpoint detected');
     assert.strictEqual(result.recoveryVerified, true, 'stale checkpoint → still verified');
