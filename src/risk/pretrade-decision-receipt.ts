@@ -50,6 +50,11 @@ function sha256(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(canonicalize(value)), 'utf8').digest('hex');
 }
 
+/** Full semantic intent binding, not merely a caller-chosen intentId. */
+export function riskIncreaseIntentDigest(intent: TradeIntent): string {
+  return sha256(intent);
+}
+
 function cloneFreeze<T>(value: T): T {
   const cloned = structuredClone(value);
   function freeze(entry: unknown): void {
@@ -85,6 +90,8 @@ function exactNumber(value: number): string {
   return rendered;
 }
 
+export { exactNumber as preTradeReceiptExactNumber };
+
 function validNullableSha(value: unknown): boolean {
   return value === null || (typeof value === 'string' && SHA256.test(value));
 }
@@ -109,6 +116,7 @@ export function validatePreTradeRiskDecisionReceipt(
     'snapshotDigest', 'mandateDigest', 'accountingDayId', 'positionVersion',
     'positionSourceKernelEventId', 'comparisons',
     ...(isRecord(value) && value.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY' ? ['exitProof'] : []),
+    ...(isRecord(value) && Object.hasOwn(value, 'riskIncreaseProof') ? ['riskIncreaseProof'] : []),
   ])) throw new Error('PRETRADE_RECEIPT_INVALID');
   if (value.schemaVersion !== PRETRADE_RISK_DECISION_RECEIPT_SCHEMA_VERSION
       || (value.gatewayMode !== 'LEGACY_PAPER_OR_NON_GATE'
@@ -154,6 +162,18 @@ export function validatePreTradeRiskDecisionReceipt(
   if ((value.decision === 'ADMITTED') !== (value.approvedPositionUsdExact !== null)
       || (value.decision === 'REJECTED') !== (value.reasonCode !== null)) {
     throw new Error('PRETRADE_RECEIPT_DECISION_INVALID');
+  }
+  if (Object.hasOwn(value, 'riskIncreaseProof')) {
+    const proof = value.riskIncreaseProof;
+    if (value.gatewayMode !== 'GATEIO_ACCOUNT_BOUND' || value.action !== 'open'
+        || value.decision !== 'ADMITTED' || !['OPEN', 'INCREASE'].includes(value.riskEffect as string)
+        || !isRecord(proof) || !exactKeys(proof, ['intentDigest', 'direction', 'orderId'])
+        || typeof proof.intentDigest !== 'string' || !SHA256.test(proof.intentDigest)
+        || (proof.direction !== 'long' && proof.direction !== 'short')
+        || proof.orderId !== generateOrderId({ intentId: value.intentId as string,
+          exchange: value.exchange as string, symbol: value.symbol as string,
+          direction: proof.direction, action: 'open', approvedPositionUsd: Number(value.approvedPositionUsdExact) }))
+      throw new Error('RISK_INCREASE_RECEIPT_PROOF_INVALID');
   }
   if (value.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY') {
     const p = value.exitProof;
@@ -219,6 +239,7 @@ export function createPreTradeRiskDecisionReceipt(input: Readonly<{
   evaluationTime: number;
   result: GatewayResult | AccountBoundGatewayResult;
   exitProof?: TrustedExitProof | null;
+  bindRiskIncreaseIntent?: boolean;
 }>): PreTradeRiskDecisionRecordedPayload {
   const provenance = 'provenance' in input.result ? input.result.provenance : null;
   const receipt: PreTradeRiskDecisionReceiptV1 = {
@@ -239,6 +260,13 @@ export function createPreTradeRiskDecisionReceipt(input: Readonly<{
     approvedPositionUsdExact: input.result.decision === 'ADMITTED'
       ? exactNumber(input.result.approvedPositionUsd) : null,
     riskEffect: input.exitProof?.effect ?? provenance?.riskEffect ?? null,
+    ...(input.bindRiskIncreaseIntent && input.result.decision === 'ADMITTED' ? {
+      riskIncreaseProof: {
+        intentDigest: riskIncreaseIntentDigest(input.intent), direction: input.intent.direction,
+        orderId: generateOrderId({ ...input.intent, action: input.action,
+          approvedPositionUsd: input.result.approvedPositionUsd }),
+      },
+    } : {}),
     ...(input.gatewayMode === 'GATEIO_TRUSTED_EXIT_ONLY' ? { exitProof: input.exitProof ?? null } : {}),
     contextDigest: provenance?.contextDigest ?? null,
     snapshotDigest: provenance?.snapshotDigest ?? null,

@@ -60,6 +60,9 @@ import type { TradeLifecycle } from '../accounting/trade-lifecycle-types';
 import { deriveTrustedExit, compareExitProduct, type TrustedExitProof } from '../risk/trusted-exit';
 import { multiplyQuantity } from '../types/decimal-quantity';
 import type { GatewayResult } from '../risk/pretrade-risk-types';
+import { createRiskIncreaseAdmission, type RiskIncreaseAdmissionBinding } from '../risk/risk-increase-admission';
+import type { PreTradeRiskDecisionRecordedPayload } from '../risk/pretrade-decision-receipt-types';
+import type { PublishResult } from '../kernel/TradingKernel';
 import { resolve } from 'node:path';
 import { createProductionAuthorityPorts, type ProductionKernelReadView,
   type ProductionEvidencePublisher, type RiskMandateOperatorAuthority } from './ProductionAuthorityPorts';
@@ -216,6 +219,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   let runtimeStopped = false;
   let lastExecutionTruth: ExecutionTruthSnapshot | null = null;
   let exitPermit: { proof: TrustedExitProof; notional: number; receiptDigest: string } | null = null;
+  let entryPermit: object | null = null;
 
   // ── Execution adapter + factual truth port ──
   const defaultExecuteParams: ExecuteParams = {
@@ -264,7 +268,13 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
               || control.locked || control.mutationHalt !== undefined) throw new Error('RISK_INCREASE_HALTED');
         };
         try { checkIncrease(); } catch { return { status: 'rejected', reason: 'RISK_INCREASE_HALTED' }; }
-        return adapter.submit(order, value => { checkIncrease(); prepared?.(value); checkIncrease(); });
+        try { entryAdmission!.enterAdapter(entryPermit, order); }
+        catch { return { status: 'rejected', reason: 'RISK_INCREASE_ADMISSION_INVALID' }; }
+        return adapter.submit(order, value => {
+          checkIncrease(); entryAdmission!.checkAdapter(entryPermit, order);
+          prepared?.(value);
+          checkIncrease(); entryAdmission!.checkAdapter(entryPermit, order);
+        });
       }
       const permit = exitPermit;
       function check() {
@@ -318,6 +328,19 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     });
   }
   const decisionReceipts = accountRiskRuntime?.decisionReceipts ?? legacyDecisionReceipts!;
+  const entryRiskStateDigest = () => JSON.stringify({
+    ...Object.fromEntries(Object.entries(accountRiskRuntime!.digests())
+      .filter(([key]) => key !== 'pretradeDecisionReceipts')),
+    policy: policyStore.digest(),
+  });
+  const entryAdmission = gateExecution ? createRiskIncreaseAdmission({
+    journalPath: (kernel.journal() as FileEventJournal).filePath,
+    accountId: reconciliationIdentity.accountId,
+    receipts: decisionReceipts, now: () => clock.now(),
+    context: evaluationTime => accountRiskRuntime!.compose(evaluationTime),
+    riskStateDigest: entryRiskStateDigest,
+    position: symbol => positionStore.resolve(exchange, symbol),
+  }) : null;
 
   // ── Dynamic-price OMS ──
   const dynamicPriceOms = {
@@ -337,6 +360,10 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
           || intent.exchange !== exchange || intent.symbol !== 'ETH/USDT'
           || (action === 'open' && !reconciliationVerified)) {
         return { status: 'conflict' as const, reason: 'GATEIO_EXECUTION_STATE_NOT_VERIFIED' };
+      }
+      if (action === 'open') {
+        try { entryAdmission!.enterOms(entryPermit, intent, approvedUsd); }
+        catch { return { status: 'conflict' as const, reason: 'RISK_INCREASE_ADMISSION_INVALID' }; }
       }
       executionInFlight = true;
       reconciliationVerified = false;
@@ -469,6 +496,26 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     },
     activateLive: async () => activateLive(),
     checkEntry: async (intent: TradeIntent) => gateExecution ? checkEntry(intent) : null,
+    entryRiskStateDigest,
+    priorEntryJournalSequence: () => (kernel.journal() as FileEventJournal).lastSequence,
+    submitRiskIncrease: async (binding: RiskIncreaseAdmissionBinding,
+      publication: PublishResult<'PRETRADE_RISK_DECISION_RECORDED'>) => {
+      if (!entryAdmission || entryPermit !== null) return { admitted: false,
+        riskCode: 'RISK_INCREASE_ADMISSION_INVALID', action: 'open' as const };
+      try {
+        entryPermit = entryAdmission.issue(binding, publication);
+      } catch {
+        return { admitted: false, riskCode: 'RISK_INCREASE_ADMISSION_INVALID', action: 'open' as const };
+      }
+      try {
+        const omsResult = await dynamicPriceOms.submitRequest(binding.intent, 'open', binding.approvedUsd);
+        return { admitted: omsResult.reason !== 'RISK_INCREASE_ADMISSION_INVALID',
+          riskCode: omsResult.reason === 'RISK_INCREASE_ADMISSION_INVALID' ? omsResult.reason : null,
+          action: 'open' as const, omsResult };
+      } finally {
+        entryAdmission.close(entryPermit); entryPermit = null;
+      }
+    },
   }));
   if (accountRiskRuntime !== null) accountRiskRuntimeBySpine.set(spine, accountRiskRuntime);
   decisionReceiptStoreBySpine.set(spine, decisionReceipts);
@@ -650,6 +697,10 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 const accountRiskRuntimeBySpine = new WeakMap<object, GateIoAccountRiskRuntime>();
 const decisionReceiptStoreBySpine = new WeakMap<object, PreTradeRiskDecisionReceiptStore>();
 interface ProductionSpineInternals {
+  readonly entryRiskStateDigest: () => string;
+  readonly priorEntryJournalSequence: () => number;
+  readonly submitRiskIncrease: (binding: RiskIncreaseAdmissionBinding,
+    publication: PublishResult<'PRETRADE_RISK_DECISION_RECORDED'>) => Promise<ExecuteThroughGatewayResult>;
   readonly evidencePublisher: ProductionEvidencePublisher;
   readonly kernel: TradingKernel;
   readonly journal: EventJournalPort;
@@ -795,6 +846,8 @@ export async function executeThroughGateway(
   const internals = requireProductionSpineInternals(spine);
   if (spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND' && action !== 'open')
     return internals.executeTrustedExit(intent, action);
+  const receiptBoundEntry = spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND' && action === 'open';
+  if (receiptBoundEntry) intent = Object.freeze(structuredClone(intent));
   // Block entries before LIVE_READY (protection mode !== 'live')
   if (spine.protection.getMode() !== 'live') {
     if (action === 'open' || action === 'close') {
@@ -850,6 +903,10 @@ export async function executeThroughGateway(
         authorizationContext: spine.accountRiskAuthorizationContext(evaluationTime)!,
       } satisfies AccountBoundGatewayInput)
     : evaluatePreTradeRisk(gatewayInput);
+  const riskStateDigest = receiptBoundEntry ? internals.entryRiskStateDigest() : '';
+  const priorJournalSequence = receiptBoundEntry ? internals.priorEntryJournalSequence() : 0;
+  let entryReceipt: PreTradeRiskDecisionRecordedPayload | undefined;
+  let entryPublication: PublishResult<'PRETRADE_RISK_DECISION_RECORDED'> | undefined;
 
   // Persist the gateway fact before any OMS mutation. Subscriber failure is
   // fail-closed even though the journal append itself may already be durable.
@@ -862,11 +919,13 @@ export async function executeThroughGateway(
       action,
       evaluationTime,
       result: riskResult,
+      ...(receiptBoundEntry ? { bindRiskIncreaseIntent: true } : {}),
     });
     const recorded = kernel.publish('PRETRADE_RISK_DECISION_RECORDED', receipt);
     if (recorded.failures > 0) {
       return { admitted: false, riskCode: 'RISK_DECISION_RECEIPT_PERSIST_FAILED', action };
     }
+    if (receiptBoundEntry) { entryReceipt = receipt; entryPublication = recorded; }
   } catch {
     return { admitted: false, riskCode: 'RISK_DECISION_RECEIPT_PERSIST_FAILED', action };
   }
@@ -875,6 +934,10 @@ export async function executeThroughGateway(
   }
 
   const authorisedUsd = riskResult.approvedPositionUsd;
+  if (receiptBoundEntry) return internals.submitRiskIncrease({
+    intent, approvedUsd: authorisedUsd, expectedReceipt: entryReceipt!,
+    priorJournalSequence, riskStateDigest,
+  }, entryPublication!);
 
   const omsResult = await oms.submitRequest(intent, action, authorisedUsd);
 

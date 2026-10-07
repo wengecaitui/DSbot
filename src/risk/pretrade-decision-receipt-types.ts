@@ -27,6 +27,12 @@ export interface PreTradeRiskDecisionReceiptV1 {
   readonly reasonCode: string | null;
   readonly approvedPositionUsdExact: string | null;
   readonly riskEffect: 'OPEN' | 'INCREASE' | TrustedExitProof['effect'] | null;
+  /** Additive proof for new account-bound entry receipts; historical receipts remain unchanged. */
+  readonly riskIncreaseProof?: Readonly<{
+    intentDigest: string;
+    direction: 'long' | 'short';
+    orderId: string;
+  }>;
   /** Additive: historical v1 receipts retain their original schema and digest. */
   readonly exitProof?: TrustedExitProof | null;
   readonly contextDigest: string | null;
