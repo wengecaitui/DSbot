@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ExternalFlatBaselineEvidence } from '../../events/TradingEvent';
-import type { TradingKernel } from '../../kernel/TradingKernel';
+import type { ProductionEvidencePublisher } from '../../position/ProductionAuthorityPorts';
+import type { EventJournalPort } from '../../kernel/EventJournalPort';
 import type { KernelPositionStateStore } from '../../kernel/KernelPositionStateStore';
 import type { GateIoExecutionTruthPort } from '../../reconciliation/GateIoExecutionTruthPort';
 import type { ExecutionTruthSnapshot } from '../../reconciliation/reconciliation-types';
@@ -8,7 +9,9 @@ import type { ExecutionTruthSnapshot } from '../../reconciliation/reconciliation
 export interface VerifiedGateIoFlatBaselineInput {
   readonly truthPort: GateIoExecutionTruthPort;
   readonly truth: ExecutionTruthSnapshot;
-  readonly kernel: TradingKernel;
+  readonly kernel: Pick<ProductionEvidencePublisher, 'publish'> & {
+    journal(): Pick<EventJournalPort, 'readFromLogicalSequence'>;
+  };
   readonly positionStore: KernelPositionStateStore;
   readonly accountId: string;
   readonly symbol: string;

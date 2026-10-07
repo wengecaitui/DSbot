@@ -1,3 +1,4 @@
+import { createTestProductionSpine as createProductionSpine, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 /** All wire traffic is intercepted by deterministic fixture functions. No ambient fetch or secrets. */
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
@@ -7,7 +8,7 @@ import { describe, it } from 'node:test';
 import { createTradingKernel } from '../../src/kernel/TradingKernel';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
 import { createApplicationProductionRuntimeOwner, type ProductionRuntimeConfig } from '../../src/runtime/production/ProductionRuntimeOwner';
-import { createProductionSpine, activateLiveReadiness, executeThroughGateway, reconcileRecoveredState, type ProductionSpine } from '../../src/position/ProductionSpine';
+import { activateLiveReadiness, executeThroughGateway, reconcileRecoveredState, type ProductionSpine } from '../../src/position/ProductionSpine';
 import { GateIoG3RunBudget, GATEIO_G3_LIMITS } from '../../src/runtime/gateio/GateIoG3RunBudget';
 import { GATEIO_READ_ENDPOINTS } from '../../src/runtime/gateio/GateIoReadContracts';
 import { createTradeIntent } from '../../src/types/trade-intent';
@@ -225,7 +226,7 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   });
   let owner = createOwner();
   function publishPolicy(allow = true) {
-    spine.kernel.publish('policy.snapshot.published', { policy: {
+    testSpinePublisher(spine).publish('policy.snapshot.published', { policy: {
       exchange: 'gateio', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
       compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3_600_000,
       allowNewEntries: allow, allowedSymbols: [], blockedSymbols: [],
@@ -354,7 +355,7 @@ describe('R3D2 authoritative trusted exit boundary (offline wire only)', () => {
   it('protective exits traverse authoritative receipt even during risk-increase halt', async t => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
     h.halt = 'RISK_INCREASE';
-    h.spine.kernel.publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
+    testSpinePublisher(h.spine).publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
       channel: 'ticker', last: 1800, bestBid: 1799, bestAsk: 1801, volume24h: 100, high24h: 2100,
       low24h: 1800, ts: NOW }, receivedAt: NOW });
     await new Promise(resolve => setImmediate(resolve));
@@ -409,7 +410,7 @@ describe('R3D2 authoritative trusted exit boundary (offline wire only)', () => {
     h.advance(3_600_001); await h.restart();
     assert.equal(h.spine.protection.getMode(), 'replay');
     assert.notEqual(h.spine.accountRiskAuthorizationContext(NOW + 3_600_001)!.status, 'COMPATIBLE');
-    h.spine.kernel.publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
+    testSpinePublisher(h.spine).publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
       channel: 'ticker', last: 1800, bestBid: 1799, bestAsk: 1801, volume24h: 100, high24h: 2100,
       low24h: 1800, ts: NOW + 3_600_001 }, receivedAt: NOW + 3_600_001 });
     await new Promise(resolve => setImmediate(resolve));
@@ -478,7 +479,7 @@ describe('Gate G5R1 cross-source order facts', () => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
     await h.trade('open', 'gateio', 4); h.partial = true;
     function tick(price: number) {
-      h.spine.kernel.publish('market.ticker.updated', { ticker: {
+      testSpinePublisher(h.spine).publish('market.ticker.updated', { ticker: {
         exchange: 'gateio', instId: 'ETH/USDT', channel: 'ticker', last: price,
         bestBid: price - 1, bestAsk: price + 1, volume24h: 100, high24h: 2100,
         low24h: 1800, ts: NOW }, receivedAt: NOW });
@@ -819,7 +820,7 @@ describe('Gate G4 — existing Owner/Spine/Risk/OMS composition, offline only', 
   it('wrong venue intent and reference ticker cannot become Gate order/position truth', async (t) => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
     assert.equal((await h.trade('open', 'binance')).riskCode, 'GATEIO_VENUE_MISMATCH');
-    h.spine.kernel.publish('market.ticker.updated', { ticker: {
+    testSpinePublisher(h.spine).publish('market.ticker.updated', { ticker: {
       exchange: 'binance', instId: 'ETH/USDT', channel: 'ticker', last: 1, bestBid: 1, bestAsk: 1,
       volume24h: 0, high24h: 1, low24h: 1, ts: NOW }, receivedAt: NOW });
     assert.equal(h.spine.marketStore.getSnapshot('gateio', 'ETH/USDT')!.ticker!.ticker.last, 2000);

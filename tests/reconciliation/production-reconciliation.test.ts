@@ -1,3 +1,4 @@
+import { createTestProductionSpine as createProductionSpine, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 // Phase 5B2: Production reconciliation integration tests.
 // Covers read surfaces, Paper correlation persistence, Paper truth port,
 // startup authority, the 3-gate LIVE_READY, real restart MATCH, and negative proofs.
@@ -8,7 +9,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  createProductionSpine,
   executeThroughGateway,
   trustBaseline,
   recoverAndStart,
@@ -60,7 +60,7 @@ async function createSpineWithMarket(overrides: any = {}) {
 
 function pubPolicy(s: any) {
   const now = Date.now();
-  s.kernel.publish('policy.snapshot.published', {
+  testSpinePublisher(s).publish('policy.snapshot.published', {
     policy: {
       exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
       compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000,
@@ -443,9 +443,9 @@ describe('Phase 5B2 — Real restart proof', () => {
 
     // RUN 1: journal with SUBMISSION_UNKNOWN order (no fill)
     const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, riskAuthorization, journalPath });
-    s1.kernel.publish('order.created', { order: { orderId: 'o1', intentId: 'i1', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
-    s1.kernel.publish('order.submitted', { orderId: 'o1' });
-    s1.kernel.publish('order.submission.unknown', { orderId: 'o1', reason: 'adapter unavailable' });
+    testSpinePublisher(s1).publish('order.created', { order: { orderId: 'o1', intentId: 'i1', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
+    testSpinePublisher(s1).publish('order.submitted', { orderId: 'o1' });
+    testSpinePublisher(s1).publish('order.submission.unknown', { orderId: 'o1', reason: 'adapter unavailable' });
 
     // RUN 2: recover + reconcile
     const counting = countingPersistence(new PaperLedgerStore(cfg, { baseDir: join(dir, 'paper') }));
@@ -481,9 +481,9 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     assert.strictEqual(spine.reconciliationVerified, true);
 
     // Mutate factual local state through the normal kernel/store event path.
-    spine.kernel.publish('order.created', { order: { orderId: 'o-mut', intentId: 'i-mut', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
-    spine.kernel.publish('order.submitted', { orderId: 'o-mut' });
-    spine.kernel.publish('order.submission.unknown', { orderId: 'o-mut', reason: 'mutated after MATCH' });
+    testSpinePublisher(spine).publish('order.created', { order: { orderId: 'o-mut', intentId: 'i-mut', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
+    testSpinePublisher(spine).publish('order.submitted', { orderId: 'o-mut' });
+    testSpinePublisher(spine).publish('order.submission.unknown', { orderId: 'o-mut', reason: 'mutated after MATCH' });
 
     // Fresh collector market, but current facts no longer MATCH.
     emitTicker();

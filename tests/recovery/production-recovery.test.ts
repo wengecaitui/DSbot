@@ -1,10 +1,11 @@
+import { createTestProductionSpine as createProductionSpine, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 // Phase 5A: E2E Production Recovery Spine tests
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createProductionSpine, executeThroughGateway, recoverAndStart, trustBaseline } from '../../src/position/ProductionSpine';
+import { executeThroughGateway, recoverAndStart, trustBaseline } from '../../src/position/ProductionSpine';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
 import { saveRecoveryCheckpoint } from '../../src/recovery/RecoveryManager';
 
@@ -50,7 +51,7 @@ describe('Phase 5A — Production Recovery', () => {
     const s = await createProductionSpine({ exchange: 'bitget', accountId: 'cold', hardRisk, riskAuthorization, journalPath });
     
     // Before any events, sequence should be 0
-    const r = s.kernel.publish('position.baseline.confirmed' as any, {
+    const r = testSpinePublisher(s).publish('position.baseline.confirmed' as any, {
       baseline: { exchange: 'bitget', symbol: 'BTC/USDT', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 },
     });
     assert.strictEqual(r.envelope.kernelLogicalSequence, 1, 'first event = 1');
@@ -67,7 +68,7 @@ describe('Phase 5A — Production Recovery', () => {
     s1.protection.start();
     s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
-    await s1.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(s1).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -82,7 +83,7 @@ describe('Phase 5A — Production Recovery', () => {
     const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'resume-r2', hardRisk, riskAuthorization, journalPath: journalPath });
     
     // First new event after recovery = lastSequence + 1
-    const r = s2.kernel.publish('position.baseline.confirmed' as any, {
+    const r = testSpinePublisher(s2).publish('position.baseline.confirmed' as any, {
       baseline: { exchange: 'bitget', symbol: 'ETH/USDT', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 },
     });
     assert.strictEqual(r.envelope.kernelLogicalSequence, firstRunSeq + 1, `first new event = ${firstRunSeq}+1 = ${firstRunSeq + 1}, got ${r.envelope.kernelLogicalSequence}`);
@@ -99,7 +100,7 @@ describe('Phase 5A — Production Recovery', () => {
     s1.protection.start();
     s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
-    await s1.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(s1).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -211,7 +212,7 @@ describe('Phase 5A — Production Recovery', () => {
     });
     
     // Run more events to advance journal beyond checkpoint
-    await s1.kernel.publish('position.baseline.confirmed' as any, {
+    await testSpinePublisher(s1).publish('position.baseline.confirmed' as any, {
       baseline: { exchange: 'bitget', symbol: 'ETH/USDT', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 },
     });
     
@@ -236,7 +237,7 @@ describe('Phase 5A — Production Recovery', () => {
     // Publish valid policy helper
     const pubPolicy = (s: any) => {
       const now = Date.now();
-      s.kernel.publish('policy.snapshot.published', {
+      testSpinePublisher(s).publish('policy.snapshot.published', {
         policy: {
           exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
           compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000,
@@ -254,7 +255,7 @@ describe('Phase 5A — Production Recovery', () => {
     s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
     pubPolicy(s1);
-    await s1.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(s1).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -332,7 +333,7 @@ describe('Phase 5A — Production Recovery', () => {
     const sSetup = await createProductionSpine({ exchange: 'bitget', accountId: 'p0entrysetup', hardRisk, riskAuthorization, journalPath, policyMaxLifetimeMs: 3600_000 });
     trustBaseline(sSetup, 'bitget', 'BTC/USDT');
     const now = Date.now();
-    sSetup.kernel.publish('policy.snapshot.published', {
+    testSpinePublisher(sSetup).publish('policy.snapshot.published', {
       policy: { exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1, compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000, allowNewEntries: true, allowedSymbols: [], blockedSymbols: [], allowedStrategyIds: [], blockedStrategyIds: [], maxPositionMultiplier: 1, riskLevel: 'low' as const, directionBias: 'neutral' as const, symbolRules: {}, reasonCodes: [] },
     });
 
@@ -371,7 +372,7 @@ describe('Phase 5A — Production Recovery', () => {
     s.planStore.subscribeToKernel(s.kernel as any);
     trustBaseline(s, 'bitget', 'BTC/USDT');
     // Mode is 'replay' → onMarketEvent returns immediately, no submission
-    await s.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(s).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 10000, bestBid: 9999, bestAsk: 10001, volume24h: 100, high24h: 11000, low24h: 9000, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -388,10 +389,10 @@ describe('Phase 5A — Production Recovery', () => {
     sSetup.protection.start();
     trustBaseline(sSetup, 'bitget', 'BTC/USDT');
     const now = Date.now();
-    sSetup.kernel.publish('policy.snapshot.published', {
+    testSpinePublisher(sSetup).publish('policy.snapshot.published', {
       policy: { exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1, compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000, allowNewEntries: true, allowedSymbols: [], blockedSymbols: [], allowedStrategyIds: [], blockedStrategyIds: [], maxPositionMultiplier: 1, riskLevel: 'low' as const, directionBias: 'neutral' as const, symbolRules: {}, reasonCodes: [] },
     });
-    await sSetup.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(sSetup).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -429,7 +430,7 @@ describe('Phase 5A — Production Recovery', () => {
     assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
 
     // Forge: publish market event directly to kernel (bypasses production bus)
-    s.kernel.publish('market.ticker.updated', {
+    testSpinePublisher(s).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });

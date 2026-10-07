@@ -1,3 +1,4 @@
+import { createTestProductionSpine as createProductionSpine, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 /** Offline only: the real transport/parser/truth port/Spine/journal, with injected wire fixtures. */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -9,7 +10,7 @@ import { createKernelPositionStateStore } from '../../src/kernel/KernelPositionS
 import { createKernelPolicyStore } from '../../src/kernel/KernelPolicyStore';
 import { createKernelMarketStateStore } from '../../src/kernel/KernelMarketStateStore';
 import { createTradingKernel } from '../../src/kernel/TradingKernel';
-import { createProductionSpine, recoverAndStart, type ProductionSpine } from '../../src/position/ProductionSpine';
+import { recoverAndStart, type ProductionSpine } from '../../src/position/ProductionSpine';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
 import { recoverFromJournal } from '../../src/recovery/RecoveryManager';
 import type { ProjectorMap } from '../../src/recovery/ReplayCoordinator';
@@ -122,11 +123,11 @@ async function harness(options: {
     execution: { mode: 'limited-live', truthPort: port,
       adapter: { submit: async () => { assert.fail('Mutation must be unreachable'); } } } });
   const truth = await port.acquireTruth();
-  const baseline = { truthPort: port, truth, kernel: spine.kernel, positionStore: spine.positionStore,
+  const baseline = { truthPort: port, truth, kernel: testSpinePublisher(spine), positionStore: spine.positionStore,
     oms: spine.oms, accountId, symbol: 'ETH/USDT', now };
   const researchReport = operatorResearchReport();
   const researchReceivedAt = NOW;
-  const input = { spine, journal, journalPath, truthPort: port, truth, accountId, now,
+  const input = { spine, evidencePublisher: testSpineEvidencePublisher(spine), journal, journalPath, truthPort: port, truth, accountId, now,
     researchReport, researchReceivedAt,
     policy: operatorPolicy(researchReport, researchReceivedAt), policyMaxLifetimeMs: LIFETIME };
   return { spine, port, truth, baseline, input, journal, journalPath, requests,
@@ -315,7 +316,7 @@ describe('Gate G8A explicit policy and durable one-shot journal', () => {
   });
   it('nonempty Kernel journal rejects baseline and bootstrap', async () => {
     const h = await harness();
-    h.spine.kernel.publish('market.ticker.updated', { ticker: { channel: 'ticker', exchange: 'gateio',
+    testSpinePublisher(h.spine).publish('market.ticker.updated', { ticker: { channel: 'ticker', exchange: 'gateio',
       instId: 'ETH/USDT', last: 2000, bestBid: 1999, bestAsk: 2001, volume24h: 1, high24h: 2100, low24h: 1900, ts: NOW },
       receivedAt: NOW });
     assert.throws(() => establishVerifiedLiveFlatBaseline(h.baseline), /BASELINE_DENIED/);
@@ -450,7 +451,7 @@ describe('Gate G8A R1 journal-backed research provenance', () => {
   it('reentrant extra research event cannot shift the authorized seq3 policy publication', async () => {
     const h = await harness();
     h.spine.kernel.subscribe('research.bias.updated', e => {
-      if (e.kernelLogicalSequence === 2) h.spine.kernel.publish('research.bias.updated',
+      if (e.kernelLogicalSequence === 2) testSpinePublisher(h.spine).publish('research.bias.updated',
         { report: { ...h.input.researchReport, confidence: 62 }, receivedAt: NOW });
     });
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /RESEARCH_NOT_APPLIED/);

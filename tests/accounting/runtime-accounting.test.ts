@@ -1,3 +1,4 @@
+import { createTestProductionSpine as createProductionSpine, testSpinePublisher } from '../helpers/production-spine-capability-fixture';
 // Phase 6A: Runtime Accounting — focused integration + unit tests.
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
@@ -361,7 +362,7 @@ describe('Phase 6A — Python golden oracle', () => {
 
 describe('Phase 6A — Restart + side effects (ProductionSpine)', () => {
   it('RUN1 persisted execution → RUN2 reload → durable facts identical; valuation incomplete then complete; zero writes', async () => {
-    const { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
+    const { executeThroughGateway, trustBaseline, recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const { createMarketDataRuntime } = require('../../src/runtime/market/MarketDataRuntime');
 
     const dir = mkdtempSync(join(tmpdir(), 'p6a-restart-'));
@@ -399,7 +400,7 @@ describe('Phase 6A — Restart + side effects (ProductionSpine)', () => {
     await activateLiveReadiness(r1.spine);
     trustBaseline(r1.spine, 'bitget', 'BTC/USDT');
     const now = Date.now();
-    r1.spine.kernel.publish('policy.snapshot.published', { policy: { exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1, compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000, allowNewEntries: true, allowedSymbols: [], blockedSymbols: [], allowedStrategyIds: [], blockedStrategyIds: [], maxPositionMultiplier: 1, riskLevel: 'low', directionBias: 'neutral', symbolRules: {}, reasonCodes: [] } });
+    testSpinePublisher(r1.spine).publish('policy.snapshot.published', { policy: { exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1, compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000, allowNewEntries: true, allowedSymbols: [], blockedSymbols: [], allowedStrategyIds: [], blockedStrategyIds: [], maxPositionMultiplier: 1, riskLevel: 'low', directionBias: 'neutral', symbolRules: {}, reasonCodes: [] } });
     await executeThroughGateway(r1.spine, intent('i-restart') as any, 'open', 5000);
     await new Promise((r) => setTimeout(r, 200));
 

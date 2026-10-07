@@ -60,8 +60,15 @@ import type { TradeLifecycle } from '../accounting/trade-lifecycle-types';
 import { deriveTrustedExit, compareExitProduct, type TrustedExitProof } from '../risk/trusted-exit';
 import { multiplyQuantity } from '../types/decimal-quantity';
 import type { GatewayResult } from '../risk/pretrade-risk-types';
+import { resolve } from 'node:path';
+import { createProductionAuthorityPorts, type ProductionKernelReadView,
+  type ProductionEvidencePublisher, type RiskMandateOperatorAuthority } from './ProductionAuthorityPorts';
 
 export interface ProductionSpineConfig {
+  /** Trusted composition only: bind factual ingress without mandate authority. Never returned on spine. */
+  bindEvidencePublisher?: (publisher: ProductionEvidencePublisher) => void;
+  /** Explicit operator control-plane capability injection. Absent by default; provenance alone cannot mint it. */
+  bindOperatorAuthority?: (authority: RiskMandateOperatorAuthority) => void;
   exchange: string;
   accountId?: string;
   paperAccount?: PaperAccountConfig;
@@ -100,14 +107,14 @@ export interface ProductionSpineConfig {
 }
 
 export interface ProductionSpine {
-  kernel: TradingKernel;
+  kernel: ProductionKernelReadView;
   positionStore: KernelPositionStateStore;
   marketStore: KernelMarketStateStore;
   policyStore: KernelPolicyStore;
   /** Read-only order evidence. Mutation is available only through executeThroughGateway(). */
   oms: ProductionOmsReadView;
   planStore: PositionPlanStore;
-  protection: ReturnType<typeof createPositionManagerRuntime>;
+  protection: Omit<ReturnType<typeof createPositionManagerRuntime>, 'kernel' | '_setLive'>;
   executionMode: 'paper' | 'limited-live';
   /** Present only for Paper compatibility; limited-live never fabricates Paper truth. */
   service: PaperExecutionService | null;
@@ -380,6 +387,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   // Strip _setLive from public interface — captured for internal use only
   const _setLive = (protection as any)._setLive as () => void;
   delete (protection as any)._setLive;
+  delete (protection as any).kernel;
 
   // ── Recovery state (internal) ──
   let recoveryVerified = false;
@@ -398,8 +406,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     });
   }
 
+  const authorityPorts = createProductionAuthorityPorts(kernel, reconciliationIdentity);
   const spine = {
-    kernel, positionStore, marketStore, policyStore,
+    kernel: authorityPorts.read, positionStore, marketStore, policyStore,
     oms: omsReadView, planStore, protection, executionMode, service,
     privateConfig: Object.freeze({
       hardRisk: config.hardRisk,
@@ -450,6 +459,16 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     oms,
     executionOms: dynamicPriceOms,
     executeTrustedExit,
+    kernel,
+    evidencePublisher: authorityPorts.evidence,
+    journal: kernel.journal(),
+    verifyRecovery: async () => { if (!started) { recoveryVerified = true; started = true; } },
+    reconcile: async () => {
+      if (!recoveryVerified) throw new Error('RECONCILIATION_REQUIRES_RECOVERY');
+      return runCurrentReconciliation();
+    },
+    activateLive: async () => activateLive(),
+    checkEntry: async (intent: TradeIntent) => gateExecution ? checkEntry(intent) : null,
   }));
   if (accountRiskRuntime !== null) accountRiskRuntimeBySpine.set(spine, accountRiskRuntime);
   decisionReceiptStoreBySpine.set(spine, decisionReceipts);
@@ -590,8 +609,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     finally { exitPermit = null; exitDecisionInFlight = false; }
   }
 
-  if (gateExecution) {
-    (spine as any)[ENTRY_TOKEN] = async (intent: TradeIntent): Promise<string | null> => {
+  async function checkEntry(intent: TradeIntent): Promise<string | null> {
       if (intent.exchange !== exchange || intent.symbol !== 'ETH/USDT') return 'GATEIO_VENUE_MISMATCH';
       if (runtimeStopped || exitDecisionInFlight || !recoveryVerified || !reconciliationVerified || executionInFlight || reconciliationInFlight)
         return 'RECONCILIATION_NOT_VERIFIED';
@@ -602,24 +620,11 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
         if (!(await runCurrentReconciliation()).reconciliationVerified) return 'RECONCILIATION_NOT_VERIFIED';
       } catch { return 'RECONCILIATION_NOT_VERIFIED'; }
       return gateMarketFresh() ? null : 'MARKET_STALE';
-    };
   }
-
-  (spine as any)[VERIFY_TOKEN] = async function() {
-    if (started) return;
-    recoveryVerified = true;
-    started = true;
-  };
-
-  // Internal: run the real reconciliation sequence. Requires RECOVERY_VERIFIED.
-  (spine as any)[RECONCILE_TOKEN] = async function(): Promise<ReconciliationReport> {
-    if (!recoveryVerified) throw new Error('RECONCILIATION_REQUIRES_RECOVERY');
-    return await runCurrentReconciliation();
-  };
 
   // Internal: grant LIVE_READY. Requires recovery + a prior reconciliation + fresh
   // collector market, AND re-establishes that CURRENT facts still reconcile to MATCH.
-  (spine as any)[LIVE_TOKEN] = async function() {
+  async function activateLive() {
     if (!recoveryVerified) throw new Error('LIVE_READY_REQUIRES_RECOVERY');
     if (!reconciliationVerified) throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
     if (!freshMarketObserved) throw new Error('LIVE_READY_REQUIRES_FRESH_MARKET');
@@ -634,19 +639,24 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     if (!report.reconciliationVerified) throw new Error('LIVE_READY_REQUIRES_RECONCILIATION');
     if (gateExecution && !gateMarketFresh()) throw new Error('LIVE_READY_REQUIRES_FRESH_MARKET');
     _setLive();
-  };
+  }
 
   Object.freeze(protection);
+  config.bindEvidencePublisher?.(authorityPorts.evidence);
+  config.bindOperatorAuthority?.(authorityPorts.operator);
   return Object.freeze(spine);
 }
 
-const VERIFY_TOKEN = Symbol('verifyToken');
-const LIVE_TOKEN = Symbol('liveToken');
-const RECONCILE_TOKEN = Symbol('reconcileToken');
-const ENTRY_TOKEN = Symbol('entryToken');
 const accountRiskRuntimeBySpine = new WeakMap<object, GateIoAccountRiskRuntime>();
 const decisionReceiptStoreBySpine = new WeakMap<object, PreTradeRiskDecisionReceiptStore>();
 interface ProductionSpineInternals {
+  readonly evidencePublisher: ProductionEvidencePublisher;
+  readonly kernel: TradingKernel;
+  readonly journal: EventJournalPort;
+  readonly verifyRecovery: () => Promise<void>;
+  readonly reconcile: () => Promise<ReconciliationReport>;
+  readonly activateLive: () => Promise<void>;
+  readonly checkEntry: (intent: TradeIntent) => Promise<string | null>;
   readonly adapter: ExecutionAdapter;
   readonly truthPort: ExecutionTruthPort;
   readonly oms: OmsCore;
@@ -671,6 +681,15 @@ export function productionSpineUsesExecutionBinding(
   return internals?.adapter === adapter && internals.truthPort === truthPort;
 }
 
+/** Identity predicate only; does not return any journal or publisher capability. */
+export function productionSpineUsesJournal(spine: ProductionSpine, journal: EventJournalPort): boolean {
+  return productionSpineInternalsBySpine.get(spine)?.journal === journal;
+}
+
+export function productionSpineUsesEvidencePublisher(spine: ProductionSpine, publisher: ProductionEvidencePublisher): boolean {
+  return productionSpineInternalsBySpine.get(spine)?.evidencePublisher === publisher;
+}
+
 /**
  * Full recovery: journal → replay → verify → RECOVERY_VERIFIED.
  * Does NOT grant LIVE_READY — call activateLiveReadiness() after market data is fresh.
@@ -683,7 +702,14 @@ export async function recoverAndStart(
   const { recoverFromJournal } = require('../recovery/RecoveryManager') as typeof import('../recovery/RecoveryManager');
   const { createFileEventJournal } = require('../recovery/FileEventJournal') as typeof import('../recovery/FileEventJournal');
 
-  const journal = typeof journalPath === 'string' ? createFileEventJournal(journalPath) : journalPath;
+  const internals = requireProductionSpineInternals(spine);
+  const bound = internals.journal as FileEventJournal;
+  const requestedPath = typeof journalPath === 'string' ? journalPath : journalPath.filePath;
+  if (typeof bound?.filePath !== 'string' || typeof requestedPath !== 'string'
+      || resolve(requestedPath) !== resolve(bound.filePath))
+    throw new Error('RECOVERY_JOURNAL_BINDING_MISMATCH');
+  // Always reopen the composition-owned path: no caller-supplied empty/fake journal can grant recovery.
+  const journal = createFileEventJournal(bound.filePath);
   const projectors = buildProjectorMap(spine);
   const currentStoreDigests = () => ({
     position: spine.positionStore.digest(),
@@ -698,8 +724,7 @@ export async function recoverAndStart(
   const result = recoverFromJournal(journal, projectors, checkpointPath, currentStoreDigests);
 
   if (result.recoveryVerified) {
-    const fn = (spine as any)[VERIFY_TOKEN];
-    if (typeof fn === 'function') await fn();
+    await internals.verifyRecovery();
   }
 
   return { ...result, errors: result.replayReport.errors };
@@ -713,9 +738,7 @@ export async function recoverAndStart(
  * snapshot, report, or a reconciliationVerified=true boolean.
  */
 export async function reconcileRecoveredState(spine: ProductionSpine): Promise<ReconciliationReport> {
-  const fn = (spine as any)[RECONCILE_TOKEN];
-  if (typeof fn !== 'function') throw new Error('RECONCILIATION_AUTHORITY: no internal reconcile token');
-  return await fn();
+  return requireProductionSpineInternals(spine).reconcile();
 }
 
 /**
@@ -723,9 +746,7 @@ export async function reconcileRecoveredState(spine: ProductionSpine): Promise<R
  * Requires recoverAndStart + reconcileRecoveredState to have been called first.
  */
 export async function activateLiveReadiness(spine: ProductionSpine): Promise<void> {
-  const fn = (spine as any)[LIVE_TOKEN];
-  if (typeof fn !== 'function') throw new Error('LIVE_AUTHORITY: no internal live token');
-  await fn();
+  await requireProductionSpineInternals(spine).activateLive();
 }
 
 function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
@@ -782,9 +803,10 @@ export async function executeThroughGateway(
   }
 
   const { executionOms: oms } = requireProductionSpineInternals(spine);
-  const { kernel, positionStore, marketStore, policyStore } = spine;
-  if (action === 'open' && typeof (spine as any)[ENTRY_TOKEN] === 'function') {
-    const reason = await (spine as any)[ENTRY_TOKEN](intent);
+  const { kernel } = internals;
+  const { positionStore, marketStore, policyStore } = spine;
+  if (action === 'open') {
+    const reason = await internals.checkEntry(intent);
     if (reason) return { admitted: false, riskCode: reason, action };
   }
   const exchange = intent.exchange as any;
@@ -872,7 +894,8 @@ export function trustBaseline(
   exchange: string,
   symbol: string,
 ): void {
-  spine.kernel.publish('position.baseline.confirmed' as any, {
+  if (spine.executionMode !== 'paper') throw new Error('BASELINE_REQUIRES_COMPOSITION_EVIDENCE_CAPABILITY');
+  requireProductionSpineInternals(spine).kernel.publish('position.baseline.confirmed' as any, {
     baseline: {
       exchange: exchange as any,
       symbol,
