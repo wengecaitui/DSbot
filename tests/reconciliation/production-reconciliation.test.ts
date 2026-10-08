@@ -499,10 +499,18 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('P1: previous MATCH + incomplete truth (uncorrelated fill) → revocation + denied', async () => {
+  it('P1: previous MATCH + incomplete truth (uncorrelated fill) → revocation + denied', async (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-acqfail-'));
     const journalPath = join(dir, 'journal.jsonl');
     const cfg = paperConfig('acqfail');
+    // Trusted test composition captures its service; generic production callers
+    // only receive the detached read view and cannot create this corruption.
+    let compositionService!: PaperExecutionService;
+    const originalOpen = PaperExecutionService.open;
+    t.mock.method(PaperExecutionService, 'open', async (...args: Parameters<typeof originalOpen>) => {
+      compositionService = await originalOpen(...args);
+      return compositionService;
+    });
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'acqfail', journalPath, paperAccount: cfg });
     testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
@@ -512,7 +520,7 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
 
     // Make Paper truth incomplete: generic (non-OMS) execution carries no correlation.
     const genericIntent = { intentId: 'generic-1', exchange: 'bitget' as ExchangeId, symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 1000, source: 'test', createdAt: Date.now(), reason: 'generic', biasUpdatedAt: Date.now() };
-    await spine.service.execute(genericIntent as any, { markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: Date.now() });
+    await compositionService.execute(genericIntent as any, { markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: Date.now() });
 
     emitTicker();
     await assert.rejects(() => activateLiveReadiness(spine), { message: /RECONCILIATION/ });

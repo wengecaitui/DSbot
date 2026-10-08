@@ -39,6 +39,7 @@ import { createGateIoAccountRiskRuntime, type GateIoAccountRiskRuntime } from '.
 import {
   createPreTradeRiskDecisionReceipt,
   createPreTradeRiskDecisionReceiptStore,
+  preTradeReceiptExactNumber,
 } from '../risk/pretrade-decision-receipt';
 import type {
   PreTradeRiskDecisionReceiptStore,
@@ -69,6 +70,7 @@ import { createRiskIncreaseAdmission, type RiskIncreaseAdmissionBinding } from '
 import type { PreTradeRiskDecisionRecordedPayload } from '../risk/pretrade-decision-receipt-types';
 import type { PublishResult } from '../kernel/TradingKernel';
 import { resolve } from 'node:path';
+import { closeSync, fsyncSync, openSync } from 'node:fs';
 import { productionEvidenceSnapshot } from '../runtime/production/ProductionEvidenceSnapshot';
 import { createProductionAuthorityPorts, type ProductionKernelReadView,
   type ProductionEvidencePublisher, type RiskMandateOperatorAuthority,
@@ -128,8 +130,8 @@ export interface ProductionSpine {
   readonly planStore: ProductionPlanReadView;
   readonly protection: ProductionProtectionView;
   executionMode: 'paper' | 'limited-live';
-  /** Present only for Paper compatibility; limited-live never fabricates Paper truth. */
-  service: PaperExecutionService | null;
+  /** Detached Paper observations only. No execution service or mutable internals escape. */
+  readonly service: ProductionPaperReadView | null;
   privateConfig: {
     hardRisk: () => AccountBoundHardRiskSnapshot;
     accountId: string;
@@ -159,6 +161,8 @@ export interface ProductionOmsReadStore {
   list(): readonly OmsOrderSnapshot[];
   digest(): string;
 }
+
+export type ProductionPaperReadView = Readonly<Pick<PaperExecutionService, 'getIdentity' | 'snapshot' | 'entries'>>;
 
 export interface ProductionOmsReadView {
   getStore(): ProductionOmsReadStore;
@@ -466,7 +470,12 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     policyStore: createProductionPolicyReadView(policyStore),
     oms: omsReadView,
     planStore: createProductionPlanReadView(planStore),
-    protection: createProductionProtectionView(protection), executionMode, service,
+    protection: createProductionProtectionView(protection), executionMode,
+    service: service === null ? null : Object.freeze({
+      getIdentity: () => productionEvidenceSnapshot(service!.getIdentity()),
+      snapshot: () => productionEvidenceSnapshot(service!.snapshot()),
+      entries: () => productionEvidenceSnapshot(service!.entries()),
+    }),
     privateConfig: Object.freeze({
       hardRisk: config.hardRisk,
       accountId: reconciliationIdentity.accountId,
@@ -551,6 +560,37 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       } finally {
         entryAdmission.close(entryPermit); entryPermit = null;
       }
+    },
+    submitPaperDecision: async (intent: TradeIntent, action: TradeAction, approvedUsd: number,
+      receipt: PreTradeRiskDecisionRecordedPayload,
+      publication: PublishResult<'PRETRADE_RISK_DECISION_RECORDED'>) => {
+      // Paper simulation is still production-facing: a successful publish/cache
+      // is not proof of a durable decision. This capability stays in the private map.
+      try {
+        const r = receipt.receipt, e = publication.envelope;
+        if (executionMode !== 'paper' || riskAuthorizationMode !== 'LEGACY_PAPER_OR_NON_GATE'
+            || !recoveryVerified || !started || runtimeStopped || protection.getMode() !== 'live'
+            || publication.status !== 'accepted' || publication.failures !== 0
+            || r.gatewayMode !== riskAuthorizationMode || r.decision !== 'ADMITTED'
+            || r.accountId !== reconciliationIdentity.accountId || r.exchange !== exchange
+            || intent.exchange !== exchange || r.intentId !== intent.intentId || r.symbol !== intent.symbol
+            || r.action !== action || r.approvedPositionUsdExact !== preTradeReceiptExactNumber(approvedUsd)
+            || e.type !== 'PRETRADE_RISK_DECISION_RECORDED'
+            || JSON.stringify(e.payload) !== JSON.stringify(receipt)) throw new Error('PAPER_DECISION_INVALID');
+        const record = decisionReceipts.snapshot().records.find(v => v.receiptDigest === receipt.receiptDigest);
+        if (!record || record.kernelEventId !== e.kernelEventId
+            || record.kernelLogicalSequence !== e.kernelLogicalSequence) throw new Error('PAPER_DECISION_MISSING');
+        const path = (kernel.journal() as FileEventJournal).filePath;
+        if (typeof path !== 'string') throw new Error('PAPER_DURABLE_JOURNAL_REQUIRED');
+        const fd = openSync(path, 'r+');
+        try { fsyncSync(fd); } finally { closeSync(fd); }
+        const durable = createFileEventJournal(path).getByEventId(e.kernelEventId);
+        if (!durable || JSON.stringify(durable) !== JSON.stringify(e)) throw new Error('PAPER_DECISION_NOT_DURABLE');
+      } catch {
+        return { admitted: false, riskCode: 'PAPER_DECISION_ADMISSION_INVALID', action };
+      }
+      const omsResult = await dynamicPriceOms.submitRequest(intent, action, approvedUsd);
+      return { admitted: true, riskCode: null, action, omsResult };
     },
   }));
   if (accountRiskRuntime !== null) accountRiskRuntimeBySpine.set(spine, accountRiskRuntime);
@@ -746,6 +786,9 @@ interface ProductionSpineInternals {
   readonly priorEntryJournalSequence: () => number;
   readonly submitRiskIncrease: (binding: RiskIncreaseAdmissionBinding,
     publication: PublishResult<'PRETRADE_RISK_DECISION_RECORDED'>) => Promise<ExecuteThroughGatewayResult>;
+  readonly submitPaperDecision: (intent: TradeIntent, action: TradeAction, approvedUsd: number,
+    receipt: PreTradeRiskDecisionRecordedPayload,
+    publication: PublishResult<'PRETRADE_RISK_DECISION_RECORDED'>) => Promise<ExecuteThroughGatewayResult>;
   readonly evidencePublisher: ProductionEvidencePublisher;
   readonly kernel: TradingKernel;
   readonly journal: EventJournalPort;
@@ -893,7 +936,7 @@ export async function executeThroughGateway(
   if (spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND' && action !== 'open')
     return internals.executeTrustedExit(intent, action);
   const receiptBoundEntry = spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND' && action === 'open';
-  if (receiptBoundEntry) intent = Object.freeze(structuredClone(intent));
+  if (receiptBoundEntry || spine.executionMode === 'paper') intent = Object.freeze(structuredClone(intent));
   // Block entries before LIVE_READY (protection mode !== 'live')
   if (internals.protection.getMode() !== 'live') {
     if (action === 'open' || action === 'close') {
@@ -971,7 +1014,7 @@ export async function executeThroughGateway(
     if (recorded.failures > 0) {
       return { admitted: false, riskCode: 'RISK_DECISION_RECEIPT_PERSIST_FAILED', action };
     }
-    if (receiptBoundEntry) { entryReceipt = receipt; entryPublication = recorded; }
+    if (receiptBoundEntry || spine.executionMode === 'paper') { entryReceipt = receipt; entryPublication = recorded; }
   } catch {
     return { admitted: false, riskCode: 'RISK_DECISION_RECEIPT_PERSIST_FAILED', action };
   }
@@ -984,6 +1027,9 @@ export async function executeThroughGateway(
     intent, approvedUsd: authorisedUsd, expectedReceipt: entryReceipt!,
     priorJournalSequence, riskStateDigest,
   }, entryPublication!);
+
+  if (spine.executionMode === 'paper') return internals.submitPaperDecision(
+    intent, action, authorisedUsd, entryReceipt!, entryPublication!);
 
   const omsResult = await oms.submitRequest(intent, action, authorisedUsd);
 
