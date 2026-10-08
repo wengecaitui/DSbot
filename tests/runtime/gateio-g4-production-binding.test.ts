@@ -284,6 +284,24 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   };
 }
 
+describe('R3H6 Gate private clock boundary (offline owner composition)', () => {
+  it('public time replacement is unavailable; composition clock advancement still keeps stale Gate data blocked', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    const s = h.spine;
+    assert.equal('clock' in s.privateConfig, false);
+    assert.equal((s.privateConfig as any).clock, undefined);
+    assert.equal(Reflect.set(s.privateConfig, 'clock', { now: () => NOW }), false);
+    assert.equal(Reflect.set(s, 'clock', { now: () => NOW }), false);
+    h.advance(31_000);
+    const snapshot = s.marketStore.getSnapshot('gateio', 'ETH/USDT')!;
+    assert.equal(snapshot.generatedAt, NOW + 31_000); assert.equal(snapshot.isStale, true);
+    assert.equal(Reflect.set(snapshot, 'generatedAt', NOW), false);
+    const result = await h.trade();
+    assert.equal(result.admitted, false); assert.equal(result.riskCode, 'MARKET_STALE');
+    assert.equal(h.posts, 0);
+  });
+});
+
 describe('R3H4B Gate public evidence does not grant mutable authority (offline)', () => {
   it('detached recovery/observation/receipt/order snapshots cannot poison OPEN or trusted exit', async t => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();

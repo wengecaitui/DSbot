@@ -26,7 +26,7 @@ import type { PaperAccountConfig, PaperFillLedgerEntry } from '../types/paper-ac
 import type { PaperFill } from '../types/paper-fill';
 import { createPositionManagerRuntime } from './PositionManagerRuntime';
 import { PositionPlanStore } from './PositionPlanStore';
-import { systemDomainClock } from '../runtime/Clock';
+import type { DomainClock } from '../runtime/Clock';
 import { evaluateAccountBoundPreTradeRisk, evaluatePreTradeRisk } from '../risk/PreTradeRiskGateway';
 import type {
   AccountBoundGatewayInput,
@@ -92,7 +92,7 @@ export interface ProductionSpineConfig {
   journal?: EventJournalPort;
   /** Path to durable journal file. Creates FileEventJournal if provided. */
   journalPath?: string;
-  clock?: any;
+  clock?: DomainClock;
   marketStaleAfterMs?: number;
   /** Policy max lifetime in ms. Required for policy.snapshot.published. Default: 3_600_000 (1 hour). */
   policyMaxLifetimeMs?: number;
@@ -135,7 +135,6 @@ export interface ProductionSpine {
   privateConfig: {
     hardRisk: () => AccountBoundHardRiskSnapshot;
     accountId: string;
-    clock: { now(): number };
   };
   readonly riskAuthorizationMode: 'LEGACY_PAPER_OR_NON_GATE' | 'GATEIO_ACCOUNT_BOUND';
   /** Pure current composition; null in the explicitly isolated legacy mode. */
@@ -196,7 +195,10 @@ function sameCanonicalPosition(a: PositionResolution, b: PositionResolution): bo
 
 export async function createProductionSpine(config: ProductionSpineConfig): Promise<ProductionSpine> {
   const exchange = config.exchange as any;
-  const clock = config.clock ?? systemDomainClock;
+  // Composition owns time. Capture the injected method once (preserving its
+  // receiver), and never share or expose a mutable global/default clock object.
+  const clockSource: DomainClock = config.clock ?? { now: Date.now };
+  const clock: Readonly<DomainClock> = Object.freeze({ now: clockSource.now.bind(clockSource) });
   const policyMaxLifetimeMs = config.policyMaxLifetimeMs ?? 3_600_000;
 
   // ── Durable journal ──
@@ -479,7 +481,6 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     privateConfig: Object.freeze({
       hardRisk: config.hardRisk,
       accountId: reconciliationIdentity.accountId,
-      clock,
     }),
     riskAuthorizationMode,
     accountRiskAuthorizationContext(evaluationTime: number) {
@@ -521,6 +522,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     },
   };
   productionSpineInternalsBySpine.set(spine, Object.freeze({
+    clock,
     marketStore,
     planStore,
     protection,
@@ -777,6 +779,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 const accountRiskRuntimeBySpine = new WeakMap<object, GateIoAccountRiskRuntime>();
 const decisionReceiptStoreBySpine = new WeakMap<object, PreTradeRiskDecisionReceiptStore>();
 interface ProductionSpineInternals {
+  readonly clock: Readonly<DomainClock>;
   readonly marketStore: KernelMarketStateStore;
   readonly planStore: PositionPlanStore;
   readonly protection: ReturnType<typeof createPositionManagerRuntime>;
@@ -981,7 +984,7 @@ export async function executeThroughGateway(
     } : {}),
   };
 
-  const evaluationTime = spine.privateConfig.clock.now();
+  const evaluationTime = internals.clock.now();
   const riskResult = spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND'
       && action === 'open'
     ? evaluateAccountBoundPreTradeRisk({
