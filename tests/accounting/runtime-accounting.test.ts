@@ -393,7 +393,6 @@ describe('Phase 6A — Restart + side effects (ProductionSpine)', () => {
     // ── RUN 1: execute a fill, persist ──
     const r1 = await makeSpine('restart');
     r1.spine.protection.start();
-    r1.spine.planStore.subscribeToKernel(r1.spine.kernel as any);
     await recoverAndStart(r1.spine, journalPath);
     await reconcileRecoveredState(r1.spine);
     r1.emit(ticker('BTC/USDT', 100));

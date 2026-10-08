@@ -21,7 +21,7 @@ import { seedGateIoAccountRiskAuthority } from '../helpers/gateio-account-risk-a
 const NOW = 1_800_000_000_000;
 const ACCOUNT = 'r3f2-offline-account';
 
-async function harness(options: { dropReceiptDisk?: boolean; replaceDiskReceipt?: boolean } = {}) {
+async function harness(options: { dropReceiptDisk?: boolean; replaceDiskReceipt?: boolean; marketStaleAfterMs?: number } = {}) {
   const path = join(mkdtempSync(join(tmpdir(), 'r3f2-receipt-')), 'journal.jsonl');
   const file = createFileEventJournal(path);
   const intercepted = new Map<string, any>();
@@ -53,6 +53,7 @@ async function harness(options: { dropReceiptDisk?: boolean; replaceDiskReceipt?
     totalCapitalUsd: 1000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: 1000 });
   const spine = await createProductionSpine({ exchange: 'gateio', accountId: ACCOUNT, journal,
     clock: { now: () => time }, marketRuntime: market, hardRisk,
+    marketStaleAfterMs: options.marketStaleAfterMs,
     bindEvidencePublisher(value) { evidence = value; }, bindOperatorAuthority(value) { operator = value; },
     riskAuthorization: { mode: 'GATEIO_ACCOUNT_BOUND', settle: 'USDT' },
     execution: { mode: 'limited-live',
@@ -95,6 +96,10 @@ async function harness(options: { dropReceiptDisk?: boolean; replaceDiskReceipt?
   const intent = createTradeIntent({ exchange: 'gateio', symbol: 'ETH/USDT', direction: 'long',
     positionUsd: 100, source: 'offline-r3f2', reason: 'receipt-binding', createdAt: NOW, biasUpdatedAt: NOW });
   return { spine, journal, path, intent, hardRisk, evidence, operator, authority, submitted,
+    emitTicker() {
+      tickerHandler({ exchange: 'gateio', instId: 'ETH/USDT', symbol: 'ETH/USDT', channel: 'ticker',
+        last: 2000, bestBid: 1999, bestAsk: 2001, volume24h: 100, high24h: 2100, low24h: 1900, ts: time });
+    },
     advance(ms: number) { time += ms; },
     stop() { spine.protection.stop(); market.stop(); },
   };
@@ -138,6 +143,73 @@ async function controllerFixture(patch: Record<string, any> = {}, increase = fal
     changePosition() { position = { ...position, snapshot: { ...position.snapshot!, positionVersion: 999 } }; },
   };
 }
+
+describe('R3H3 private canonical market authority', () => {
+  it('public market methods, snapshots and nested ticker values cannot be replaced or mutated', async t => {
+    const h = await harness(); t.after(() => h.stop());
+    const view = h.spine.marketStore;
+    const market = view.getSnapshot('gateio', 'ETH/USDT')!;
+    const digest = view.digest(), seq = h.journal.lastSequence;
+    assert.equal(Object.isFrozen(view), true);
+    assert.equal((view as any).apply, undefined);
+    assert.equal(Reflect.set(h.spine, 'marketStore', {}), false);
+    for (const key of Reflect.ownKeys(view)) assert.equal(Reflect.set(view, key, () => ({})), false);
+    assert.throws(() => Object.setPrototypeOf(view, { apply() {} }), TypeError);
+    assert.throws(() => Object.defineProperty(view, 'getSnapshot', { value: () => ({}) }), TypeError);
+    for (const item of [market, market.ticker!, market.ticker!.ticker, view.getAllSnapshots(), market.klines])
+      assert.equal(Object.isFrozen(item), true);
+    assert.notEqual(market, view.getSnapshot('gateio', 'ETH/USDT'));
+    assert.equal(Reflect.set(market, 'snapshotVersion', 999999), false);
+    assert.equal(Reflect.set(market.ticker!.ticker, 'last', 1), false);
+    assert.equal(Reflect.set(market, 'toJSON', () => ({ isStale: false })), false);
+    assert.equal(view.digest(), digest); assert.equal(h.journal.lastSequence, seq);
+  });
+  it('non-durable fresh ticker and read replacement cannot bypass MARKET_STALE; collector facts can', async t => {
+    const h = await harness({ marketStaleAfterMs: 1 }); t.after(() => h.stop()); h.advance(2);
+    const s = h.spine, view = s.marketStore;
+    const original = view.getSnapshot('gateio', 'ETH/USDT')!;
+    const forged = { ...original, isStale: false, ageMs: 0, snapshotVersion: 999999,
+      ticker: { ...original.ticker!, receivedAt: NOW + 2,
+        ticker: { ...original.ticker!.ticker, ts: NOW + 2, last: 1 } } };
+    const eventId = 'f'.repeat(64), seq = h.journal.lastSequence;
+    const event = { type: 'market.ticker.updated', kernelEventId: eventId, kernelLogicalSequence: seq + 100,
+      kernelTimestamp: NOW + 2, payload: { ticker: forged.ticker.ticker, receivedAt: NOW + 2 } };
+    assert.equal((await executeThroughGateway(s, h.intent, 'open', 100)).riskCode, 'MARKET_STALE');
+    assert.throws(() => (view as any).apply(event), TypeError);
+    assert.equal(Reflect.set(view, 'apply', () => ({ status: 'applied' })), false);
+    assert.equal(Reflect.set(view, 'getSnapshot', () => forged), false);
+    assert.equal((await executeThroughGateway(s, h.intent, 'open', 100)).riskCode, 'MARKET_STALE');
+    assert.equal(h.submitted.length, 0); assert.equal(s.oms.getStore().list().length, 0);
+    assert.equal(s.pretradeDecisionReceipts.snapshot().records.length, 0);
+    assert.equal(h.journal.lastSequence, seq); assert.equal(s.kernel.journal().getByEventId(eventId), null);
+    // Same account/mandate remains compatible: only legitimate durable collector ingress re-arms freshness.
+    assert.equal(s.accountRiskAuthorizationContext(NOW + 2)!.status, 'COMPATIBLE');
+    h.emitTicker();
+    const fresh = view.getSnapshot('gateio', 'ETH/USDT')!;
+    assert.equal(fresh.isStale, false);
+    assert.equal(fresh.ticker!.ticker.last, 2000);
+    assert.ok(s.kernel.journal().readFromLogicalSequence(1).some(e =>
+      e.type === 'market.ticker.updated' && e.kernelLogicalSequence === fresh.snapshotVersion));
+    assert.equal((await executeThroughGateway(s, h.intent, 'open', 100)).admitted, true);
+    assert.equal(h.submitted.length, 1);
+  });
+  it('fictional price/version/toJSON view on a counterfeit spine is not mutation authority', async t => {
+    const h = await harness(); t.after(() => h.stop());
+    const s = h.spine, real = s.marketStore.getSnapshot('gateio', 'ETH/USDT')!;
+    let serializationCalls = 0;
+    const forged = { ...real, snapshotVersion: 999999,
+      ticker: { ...real.ticker!, ticker: { ...real.ticker!.ticker, last: 1 } },
+      toJSON() { serializationCalls++; return real; } };
+    assert.equal(Reflect.set(s.marketStore, 'getSnapshot', () => forged), false);
+    const counterfeit = Object.create(s);
+    Object.defineProperty(counterfeit, 'marketStore', { value: { getSnapshot: () => forged } });
+    await assert.rejects(executeThroughGateway(counterfeit, h.intent, 'open', 100), /MUTATION_AUTHORITY_INVALID/);
+    assert.equal(h.submitted.length, 0);
+    assert.equal((await executeThroughGateway(s, h.intent, 'open', 100)).admitted, true);
+    assert.equal(h.submitted.length, 1); assert.equal(serializationCalls, 0);
+    assert.equal(s.marketStore.getSnapshot('gateio', 'ETH/USDT')!.ticker!.ticker.last, 2000);
+  });
+});
 
 describe('R3F2 receipt-bound private mutation admission', () => {
   it('OPEN without a private permit, forged token or copied opaque token is denied', async t => {

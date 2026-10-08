@@ -66,7 +66,6 @@ describe('Phase 5A — Production Recovery', () => {
     // First run: publish baseline + market
     const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'resume', hardRisk, riskAuthorization, journalPath });
     s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
     await testSpinePublisher(s1).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
@@ -98,7 +97,6 @@ describe('Phase 5A — Production Recovery', () => {
     // Run 1: open position (baseline only — no policy needed for baseline)
     const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'replay', hardRisk, riskAuthorization, journalPath });
     s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
     await testSpinePublisher(s1).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
@@ -252,7 +250,6 @@ describe('Phase 5A — Production Recovery', () => {
     // Run 1: setup events in journal (baseline + policy + market)
     const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'factual', hardRisk, riskAuthorization, journalPath, policyMaxLifetimeMs: 3600_000 });
     s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
     trustBaseline(s1, 'bitget', 'BTC/USDT');
     pubPolicy(s1);
     await testSpinePublisher(s1).publish('market.ticker.updated', {
@@ -263,7 +260,6 @@ describe('Phase 5A — Production Recovery', () => {
     // Run 2: fresh spine, recoverAndStart replays journal → verified + live
     const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const { spine: s2, emitTicker } = await createSpineWithMarket({ accountId: 'factual-r2', journalPath: journalPath, policyMaxLifetimeMs: 3600_000 });
-    s2.planStore.subscribeToKernel(s2.kernel as any);
     const recoveryResult = await recoverAndStart(s2, journalPath);
     await reconcileRecoveredState(s2);
     // Fresh market through production collector → s2 now has freshMarketObserved
@@ -341,7 +337,6 @@ describe('Phase 5A — Production Recovery', () => {
     const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'p0entry', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
-    s.planStore.subscribeToKernel(s.kernel as any);
     await recoverAndStart(s, journalPath);
     await reconcileRecoveredState(s);
     assert.strictEqual(s.recoveryVerified, true, 'recovery verified');
@@ -369,7 +364,6 @@ describe('Phase 5A — Production Recovery', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const s = await createProductionSpine({ exchange: 'bitget', accountId: 'p0prot', hardRisk, riskAuthorization, journalPath });
     s.protection.start();
-    s.planStore.subscribeToKernel(s.kernel as any);
     trustBaseline(s, 'bitget', 'BTC/USDT');
     // Mode is 'replay' → onMarketEvent returns immediately, no submission
     await testSpinePublisher(s).publish('market.ticker.updated', {
@@ -399,7 +393,6 @@ describe('Phase 5A — Production Recovery', () => {
     // Fresh spine → recoverAndStart replays journal → verified + live
     const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'p0liveok', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
-    s.planStore.subscribeToKernel(s.kernel as any);
     const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);
     await reconcileRecoveredState(s);
@@ -421,7 +414,6 @@ describe('Phase 5A — Production Recovery', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const { spine: s, emitTicker } = await createSpineWithMarket({ accountId: 'p0fake', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
-    s.planStore.subscribeToKernel(s.kernel as any);
 
     // Recovery
     const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
@@ -484,7 +476,6 @@ describe('Phase 5A — Production Recovery', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const { spine: s, marketRuntime, emitTicker } = await createSpineWithMarket({ accountId: 'p0bus', journalPath, policyMaxLifetimeMs: 3600_000 });
     s.protection.start();
-    s.planStore.subscribeToKernel(s.kernel as any);
 
     const { recoverAndStart, reconcileRecoveredState, activateLiveReadiness } = require('../../src/position/ProductionSpine');
     await recoverAndStart(s, journalPath);

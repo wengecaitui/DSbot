@@ -12,7 +12,9 @@ import { createKernelPositionStateStore, applyFillToState, type KernelPositionSt
 import { createKernelMarketStateStore, type KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
 import { createKernelPolicyStore, type KernelPolicyStore } from '../kernel/KernelPolicyStore';
 import { createProductionPositionReadView, createProductionPolicyReadView,
-  type ProductionPositionReadView, type ProductionPolicyReadView } from './ProductionProjectorReadViews';
+  createProductionMarketReadView, createProductionPlanReadView, createProductionProtectionView,
+  type ProductionPositionReadView, type ProductionPolicyReadView,
+  type ProductionMarketReadView, type ProductionPlanReadView, type ProductionProtectionView } from './ProductionProjectorReadViews';
 import type { PositionResolution } from '../types/position-state';
 import { OmsCore } from '../oms/OmsCore';
 import type { ExecutionAdapter, OmsOrderSnapshot } from '../oms/oms-types';
@@ -115,12 +117,12 @@ export interface ProductionSpineConfig {
 export interface ProductionSpine {
   kernel: ProductionKernelReadView;
   readonly positionStore: ProductionPositionReadView;
-  marketStore: KernelMarketStateStore;
+  readonly marketStore: ProductionMarketReadView;
   readonly policyStore: ProductionPolicyReadView;
   /** Read-only order evidence. Mutation is available only through executeThroughGateway(). */
   oms: ProductionOmsReadView;
-  planStore: PositionPlanStore;
-  protection: Omit<ReturnType<typeof createPositionManagerRuntime>, 'kernel' | '_setLive'>;
+  readonly planStore: ProductionPlanReadView;
+  readonly protection: ProductionProtectionView;
   executionMode: 'paper' | 'limited-live';
   /** Present only for Paper compatibility; limited-live never fabricates Paper truth. */
   service: PaperExecutionService | null;
@@ -328,6 +330,10 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   kernel.subscribe('position.baseline.confirmed' as any, (e: any) => { positionStore.apply(e); });
 
   const planStore = new PositionPlanStore();
+  for (const type of ['position.plan.created', 'position.plan.updated',
+    'position.plan.closed', 'position.plan.archived'] as const) {
+    kernel.subscribe(type, event => { planStore.apply(event); });
+  }
 
   // ── Durable account-risk views and pretrade receipts ──
   const accountRiskRuntime: GateIoAccountRiskRuntime | null =
@@ -411,6 +417,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     kernel,
     positionStore,
     planStore,
+    planEventsAlreadySubscribed: true,
     oms: dynamicPriceOms,
     marketStore,
     hardRisk: config.hardRisk,
@@ -451,9 +458,11 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   const spine = {
     kernel: authorityPorts.read,
     positionStore: createProductionPositionReadView(positionStore),
-    marketStore,
+    marketStore: createProductionMarketReadView(marketStore),
     policyStore: createProductionPolicyReadView(policyStore),
-    oms: omsReadView, planStore, protection, executionMode, service,
+    oms: omsReadView,
+    planStore: createProductionPlanReadView(planStore),
+    protection: createProductionProtectionView(protection), executionMode, service,
     privateConfig: Object.freeze({
       hardRisk: config.hardRisk,
       accountId: reconciliationIdentity.accountId,
@@ -498,6 +507,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     },
   };
   productionSpineInternalsBySpine.set(spine, Object.freeze({
+    marketStore,
+    planStore,
+    protection,
     positionStore,
     policyStore,
     adapter,
@@ -716,6 +728,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 const accountRiskRuntimeBySpine = new WeakMap<object, GateIoAccountRiskRuntime>();
 const decisionReceiptStoreBySpine = new WeakMap<object, PreTradeRiskDecisionReceiptStore>();
 interface ProductionSpineInternals {
+  readonly marketStore: KernelMarketStateStore;
+  readonly planStore: PositionPlanStore;
+  readonly protection: ReturnType<typeof createPositionManagerRuntime>;
   readonly positionStore: KernelPositionStateStore;
   readonly policyStore: KernelPolicyStore;
   readonly entryRiskStateDigest: () => string;
@@ -785,10 +800,10 @@ export async function recoverAndStart(
   const projectors = buildProjectorMap(spine);
   const currentStoreDigests = () => ({
     position: internals.positionStore.digest(),
-    market: spine.marketStore.digest(),
+    market: internals.marketStore.digest(),
     policy: internals.policyStore.digest(),
     oms: spine.oms.getStore().digest(),
-    plan: spine.planStore.digest(),
+    plan: internals.planStore.digest(),
     ...(accountRiskRuntimeBySpine.get(spine)?.digests() ?? {
         pretradeDecisionReceipts: spine.pretradeDecisionReceipts.digest(),
       }),
@@ -827,10 +842,10 @@ function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
   const omsStore = internals.oms.getStore();
   m.set('position.baseline.confirmed', [internals.positionStore]);
   m.set('execution.fill.confirmed', [internals.positionStore, omsStore]);
-  m.set('market.ticker.updated', [spine.marketStore]);
+  m.set('market.ticker.updated', [internals.marketStore]);
   // Research remains journal evidence, not market/position truth. This existing projector
   // explicitly treats research as irrelevant, preserving its digest and all readiness gates.
-  m.set('research.bias.updated', [spine.marketStore]);
+  m.set('research.bias.updated', [internals.marketStore]);
   m.set('policy.snapshot.published', [internals.policyStore]);
   m.set('order.created', [omsStore]);
   m.set('order.submitted', [omsStore]);
@@ -838,10 +853,10 @@ function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
   m.set('order.submission.unknown', [omsStore]);
   m.set('order.execution.prepared', [omsStore]);
   m.set('order.execution.observed', [omsStore]);
-  m.set('position.plan.created', [spine.planStore]);
-  m.set('position.plan.updated', [spine.planStore]);
-  m.set('position.plan.archived', [spine.planStore]);
-  m.set('position.plan.closed', [spine.planStore]);
+  m.set('position.plan.created', [internals.planStore]);
+  m.set('position.plan.updated', [internals.planStore]);
+  m.set('position.plan.archived', [internals.planStore]);
+  m.set('position.plan.closed', [internals.planStore]);
   const accountRiskRuntime = accountRiskRuntimeBySpine.get(spine);
   if (accountRiskRuntime !== undefined) {
     for (const [type, projectors] of accountRiskRuntime.projectorBindings()) {
@@ -871,7 +886,7 @@ export async function executeThroughGateway(
   const receiptBoundEntry = spine.riskAuthorizationMode === 'GATEIO_ACCOUNT_BOUND' && action === 'open';
   if (receiptBoundEntry) intent = Object.freeze(structuredClone(intent));
   // Block entries before LIVE_READY (protection mode !== 'live')
-  if (spine.protection.getMode() !== 'live') {
+  if (internals.protection.getMode() !== 'live') {
     if (action === 'open' || action === 'close') {
       return { admitted: false, riskCode: 'NOT_LIVE_READY', action };
     }
@@ -879,8 +894,7 @@ export async function executeThroughGateway(
 
   const { executionOms: oms } = requireProductionSpineInternals(spine);
   const { kernel } = internals;
-  const { positionStore, policyStore } = internals;
-  const { marketStore } = spine;
+  const { positionStore, policyStore, marketStore } = internals;
   if (action === 'open') {
     const reason = await internals.checkEntry(intent);
     if (reason) return { admitted: false, riskCode: reason, action };

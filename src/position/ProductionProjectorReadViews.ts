@@ -1,10 +1,21 @@
 import type { KernelPositionStateStore } from '../kernel/KernelPositionStateStore';
 import type { KernelPolicyStore } from '../kernel/KernelPolicyStore';
+import type { KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
+import type { PositionPlanStore } from './PositionPlanStore';
+import type { PositionManagerRuntime } from './PositionManagerRuntime';
 
 export type ProductionPositionReadView = Readonly<Pick<KernelPositionStateStore,
   'getLatest' | 'getByVersion' | 'resolve' | 'listResolved' | 'digest'>>;
 export type ProductionPolicyReadView = Readonly<Pick<KernelPolicyStore,
   'getLatest' | 'getByVersion' | 'resolve' | 'digest'>>;
+export type ProductionMarketReadView = Readonly<Pick<KernelMarketStateStore, 'getSnapshot' | 'digest'> & {
+  getAllSnapshots(): readonly ReturnType<KernelMarketStateStore['getAllSnapshots']>[number][];
+}>;
+export type ProductionPlanReadView = Readonly<Pick<PositionPlanStore, 'get' | 'getActive' | 'list' | 'digest'>>;
+export type ProductionProtectionView = Readonly<Pick<PositionManagerRuntime,
+  'getMode' | 'start' | 'stop' | 'getSubmittedCount' | 'clearSubmitted'> & {
+  readonly positionManager: Readonly<Pick<PositionManagerRuntime['positionManager'], 'getStopConfig'>>;
+}>;
 
 /** Detached, recursively frozen evidence. Never return the projector or its methods. */
 function snapshot<T>(value: T): T {
@@ -35,5 +46,34 @@ export function createProductionPolicyReadView(store: KernelPolicyStore): Produc
     getByVersion: (...args: Parameters<KernelPolicyStore['getByVersion']>) => snapshot(store.getByVersion(...args)),
     resolve: (...args: Parameters<KernelPolicyStore['resolve']>) => snapshot(store.resolve(...args)),
     digest: () => store.digest(),
+  });
+}
+
+export function createProductionMarketReadView(store: KernelMarketStateStore): ProductionMarketReadView {
+  return Object.freeze({
+    getSnapshot: (...args: Parameters<KernelMarketStateStore['getSnapshot']>) => snapshot(store.getSnapshot(...args)),
+    getAllSnapshots: () => snapshot(store.getAllSnapshots()),
+    digest: () => store.digest(),
+  });
+}
+
+export function createProductionPlanReadView(store: PositionPlanStore): ProductionPlanReadView {
+  return Object.freeze({
+    get: (id: string) => snapshot(store.get(id)),
+    getActive: (exchange: string, symbol: string) => snapshot(store.getActive(exchange, symbol)),
+    list: () => snapshot(store.list()),
+    digest: () => store.digest(),
+  });
+}
+
+/** Lifecycle remains unchanged; the mutable protective evaluator is never published. */
+export function createProductionProtectionView(runtime: PositionManagerRuntime): ProductionProtectionView {
+  return Object.freeze({
+    getMode: () => runtime.getMode(),
+    start: () => runtime.start(),
+    stop: () => runtime.stop(),
+    getSubmittedCount: () => runtime.getSubmittedCount(),
+    clearSubmitted: (id: string) => runtime.clearSubmitted(id),
+    positionManager: Object.freeze({ getStopConfig: () => snapshot(runtime.positionManager.getStopConfig()) }),
   });
 }

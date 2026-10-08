@@ -53,7 +53,6 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     const m = await createSpineWithMarket({ accountId: 'e2e', policyMaxLifetimeMs: 3600_000, journalPath });
     spine = m.spine;
     spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
 
     // Recovery + start (cold start → no_history → verified + live)
     await recoverAndStart(spine, journalPath);
@@ -138,7 +137,6 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     const m = await createSpineWithMarket({ accountId: 'prot-e2e', policyMaxLifetimeMs: 3600_000, journalPath: protJournalPath });
     const s = m.spine;
     s.protection.start();
-    s.planStore.subscribeToKernel(s.kernel as any);
 
     // Recovery + start (cold start → verified + live)
     await recoverAndStart(s, protJournalPath);

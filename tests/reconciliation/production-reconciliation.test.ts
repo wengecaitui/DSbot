@@ -266,7 +266,6 @@ describe('Phase 5B2 — Authority', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const { spine } = await createSpineWithMarket({ accountId: 'match', journalPath });
     spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
     await recoverAndStart(spine, journalPath);
     const report = await reconcileRecoveredState(spine);
     assert.strictEqual(report.outcome, 'MATCH');
@@ -290,7 +289,6 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'g2', journalPath });
     spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
     await recoverAndStart(spine, journalPath);
     emitTicker(); // fresh market available, but reconciliation NOT run
     await assert.rejects(() => activateLiveReadiness(spine), { message: /RECONCILIATION/ });
@@ -302,7 +300,6 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const { spine } = await createSpineWithMarket({ accountId: 'g3', journalPath });
     spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine); // MATCH
     assert.strictEqual(spine.reconciliationVerified, true);
@@ -315,7 +312,6 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'g4', journalPath });
     spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine);
     emitTicker();
@@ -338,7 +334,6 @@ describe('Phase 5B2 — Real restart proof', () => {
     const m1 = await createSpineWithMarket({ accountId: 'restart', journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
     s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -356,7 +351,6 @@ describe('Phase 5B2 — Real restart proof', () => {
     // ── RUN 2: fresh spine, same durable paper + journal ──
     counting.reset();
     const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'restart', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000 });
-    s2.planStore.subscribeToKernel(s2.kernel as any);
 
     const recResult = await recoverAndStart(s2, journalPath);
     assert.strictEqual(recResult.recoveryVerified, true, `recovery failed: ${JSON.stringify(recResult.errors)}`);
@@ -382,7 +376,6 @@ describe('Phase 5B2 — Real restart proof', () => {
     const m1 = await createSpineWithMarket({ accountId: 'negfill', journalPath, paperAccount: cfg, persistence: new PaperLedgerStore(cfg, { baseDir: join(dir, 'paper1') }), policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
     s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -414,7 +407,6 @@ describe('Phase 5B2 — Real restart proof', () => {
     const m1 = await createSpineWithMarket({ accountId: 'negoph', journalPath, paperAccount: cfg, persistence: paperStore, policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
     s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -474,7 +466,6 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'stale', journalPath });
     spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
     await recoverAndStart(spine, journalPath);
     const r1 = await reconcileRecoveredState(spine);
     assert.strictEqual(r1.outcome, 'MATCH');
@@ -497,7 +488,6 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'nomut', journalPath });
     spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine);
     assert.strictEqual(spine.reconciliationVerified, true);
@@ -514,7 +504,6 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     const cfg = paperConfig('acqfail');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'acqfail', journalPath, paperAccount: cfg });
     spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
     await recoverAndStart(spine, journalPath);
     const r1 = await reconcileRecoveredState(spine);
     assert.strictEqual(r1.outcome, 'MATCH');

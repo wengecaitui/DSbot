@@ -274,6 +274,96 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   };
 }
 
+describe('R3H3 private market/protection authority (offline owner composition)', () => {
+  it('formal owner cannot consume a replaced market price/version or injected market projector', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    const s = h.owner.authoritativeSpine()!;
+    const real = s.marketStore.getSnapshot('gateio', 'ETH/USDT')!;
+    const forged = { ...real, snapshotVersion: 999999,
+      ticker: { ...real.ticker!, ticker: { ...real.ticker!.ticker, last: 1 } }, toJSON: () => real };
+    assert.equal((s.marketStore as any).apply, undefined);
+    assert.equal(Reflect.set(s.marketStore, 'getSnapshot', () => forged), false);
+    assert.equal(Reflect.set(s.marketStore, 'getAllSnapshots', () => [forged]), false);
+    assert.equal(Reflect.set(s, 'marketStore', { getSnapshot: () => forged }), false);
+    assert.equal((await h.trade()).omsResult?.status, 'filled');
+    assert.equal(h.posts, 1);
+    assert.equal(s.marketStore.getSnapshot('gateio', 'ETH/USDT')!.ticker!.ticker.last, 2000);
+    assert.ok(s.kernel.journal().readFromLogicalSequence(1).some(e =>
+      e.type === 'market.ticker.updated' && e.kernelLogicalSequence === real.snapshotVersion));
+    assert.equal(s.kernel.journal().readFromLogicalSequence(1).some(e => e.kernelLogicalSequence === 999999), false);
+    const receipt = s.pretradeDecisionReceipts.snapshot().records.at(-1)!.receipt;
+    assert.equal(receipt.gatewayMode, 'GATEIO_ACCOUNT_BOUND');
+    assert.equal(receipt.riskEffect, 'OPEN');
+  });
+  it('non-durable plan/stop/evaluator injection cannot suppress a real protective close', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
+    await new Promise(resolve => setImmediate(resolve));
+    const s = h.owner.authoritativeSpine()!, view = s.planStore;
+    const plan = view.getActive('gateio', 'ETH/USDT')!;
+    assert.equal(plan.stopPrice, 1900);
+    const seq = s.kernel.journal().lastSequence, digest = view.digest();
+    const eventId = 'd'.repeat(64);
+    const event = { type: 'position.plan.updated', kernelLogicalSequence: seq + 100,
+      kernelEventId: eventId, kernelTimestamp: NOW, payload: { planId: plan.planId, stopPrice: 1 } };
+    assert.equal(Object.isFrozen(view), true);
+    assert.equal((view as any).apply, undefined);
+    assert.equal((view as any).subscribeToKernel, undefined);
+    assert.equal((view as any).plans, undefined);
+    assert.throws(() => (view as any).apply(event), TypeError);
+    assert.equal(Reflect.set(view, 'apply', () => null), false);
+    const forged = { ...plan, stopPrice: 1, planVersion: seq + 100, sourceKernelEventId: eventId, toJSON: () => plan };
+    for (const key of Reflect.ownKeys(view)) assert.equal(Reflect.set(view, key, () => forged), false);
+    assert.throws(() => Object.setPrototypeOf(view, { apply() {} }), TypeError);
+    assert.equal(Reflect.set(s, 'planStore', { getActive: () => forged }), false);
+    assert.equal(Object.isFrozen(plan), true); assert.equal(Object.isFrozen(view.list()), true);
+    assert.notEqual(plan, view.get(plan.planId));
+    assert.equal(Reflect.set(plan, 'stopPrice', 1), false);
+    assert.equal(Reflect.set(plan, 'sourceKernelEventId', eventId), false);
+    assert.equal(Reflect.set(plan, 'toJSON', forged.toJSON), false);
+    const manager = s.protection.positionManager;
+    assert.equal(Object.isFrozen(manager), true);
+    assert.equal((manager as any).evaluate, undefined); assert.equal((manager as any).onFill, undefined);
+    assert.equal((manager as any).stopConfig, undefined);
+    assert.equal(Reflect.set(manager, 'evaluate', () => ({ decision: 'hold' })), false);
+    assert.equal(Reflect.set(s.protection, 'positionManager', {}), false);
+    assert.equal(Reflect.set(manager.getStopConfig(), 'stopPct', 0.99), false);
+    assert.equal(view.digest(), digest); assert.equal(s.kernel.journal().lastSequence, seq);
+    assert.equal(s.kernel.journal().getByEventId(eventId), null);
+    // Genuine durable ticker still triggers the real evaluator against its private 1900 stop.
+    testSpinePublisher(s).publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
+      channel: 'ticker', last: 1800, bestBid: 1799, bestAsk: 1801, volume24h: 100,
+      high24h: 2100, low24h: 1800, ts: NOW + 1 }, receivedAt: NOW });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.posts, 2); assert.equal(h.exposure, 0);
+    const receipt = s.pretradeDecisionReceipts.snapshot().records.at(-1)!.receipt;
+    assert.equal(receipt.gatewayMode, 'GATEIO_TRUSTED_EXIT_ONLY'); assert.equal(receipt.riskEffect, 'CLOSE');
+    assert.equal(receipt.exitProof!.reduceOnly, true);
+    assert.equal(h.requests.filter(r => r.method === 'POST').at(-1)!.body.reduce_only, true);
+    assert.equal(view.get(plan.planId)!.status, 'closed');
+    assert.ok(s.kernel.journal().getByEventId(view.get(plan.planId)!.sourceKernelEventId));
+  });
+  it('durable market/plan creation and restart replay retain canonical state without public plan ingress', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
+    await new Promise(resolve => setImmediate(resolve));
+    const s = h.spine, plan = s.planStore.getActive('gateio', 'ETH/USDT')!;
+    assert.ok(s.kernel.journal().getByEventId(plan.sourceKernelEventId));
+    // Even the narrowed evidence capability cannot grant arbitrary protection-plan changes.
+    assert.throws(() => (testSpinePublisher(s).publish as any)('position.plan.updated',
+      { planId: plan.planId, stopPrice: 1850 }), /PRODUCTION_EVIDENCE_EVENT_NOT_PERMITTED/);
+    assert.equal(s.planStore.get(plan.planId)!.stopPrice, 1900);
+    const market = s.marketStore.getSnapshot('gateio', 'ETH/USDT')!;
+    await h.restart();
+    assert.equal(h.spine.recoveryVerified, true);
+    assert.deepEqual(h.spine.planStore.get(plan.planId), plan);
+    assert.deepEqual(h.spine.marketStore.getSnapshot('gateio', 'ETH/USDT'), market);
+    assert.equal((h.spine.planStore as any).apply, undefined); assert.equal((h.spine.marketStore as any).apply, undefined);
+    assert.equal(h.spine.protection.getMode(), 'replay');
+    assert.equal((await h.trade()).riskCode, 'NOT_LIVE_READY');
+    assert.equal((await h.trade('close')).omsResult?.status, 'filled');
+    assert.equal(h.exposure, 0);
+  });
+});
+
 describe('R3H1 public projector authority closure (offline owner composition)', () => {
   it('public position/policy facades and returned views are detached and immutable', async t => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start();

@@ -17,6 +17,8 @@ export interface PositionManagerRuntimeConfig {
   readonly kernel: TradingKernel;
   readonly positionStore: KernelPositionStateStore;
   readonly planStore: PositionPlanStore;
+  /** Production composition owns durable plan projection before runtime startup. */
+  readonly planEventsAlreadySubscribed?: boolean;
   readonly marketStore?: KernelMarketStateStore;
   readonly hardRisk: () => HardRiskSnapshot;
   readonly oms?: OmsCore;
@@ -206,7 +208,7 @@ export function createPositionManagerRuntime(config: PositionManagerRuntimeConfi
     start(): void {
       if (started) return;
       // PlanStore must subscribe before runtime so events project state
-      planStore.subscribeToKernel(kernel as any);
+      if (!config.planEventsAlreadySubscribed) planStore.subscribeToKernel(kernel as any);
       kernel.subscribe('execution.fill.confirmed', onFillEvent);
       kernel.subscribe('market.ticker.updated', onMarketEvent);
       started = true;
