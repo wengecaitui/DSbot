@@ -1,6 +1,7 @@
 import type { TradingEventPayloadMap, TradingEventType } from '../events/TradingEvent';
 import type { EventJournalPort } from '../kernel/EventJournalPort';
 import type { KernelSubscriber, PublishResult, TradingKernel } from '../kernel/TradingKernel';
+import { productionEvidenceSnapshot } from '../runtime/production/ProductionEvidenceSnapshot';
 
 /** Explicit composition ingress, not a general event publisher. */
 export const PRODUCTION_EVIDENCE_EVENTS = Object.freeze([
@@ -53,9 +54,9 @@ export function createProductionAuthorityPorts(kernel: TradingKernel, identity: 
   });
   // Detached journal observations must never permit mutation of the replay cache.
   const readJournal = Object.freeze({
-    getByEventId(id: string) { return structuredClone(kernel.journal().getByEventId(id)); },
+    getByEventId(id: string) { return productionEvidenceSnapshot(kernel.journal().getByEventId(id)); },
     readFromLogicalSequence(sequence: number, limit?: number) {
-      return structuredClone(kernel.journal().readFromLogicalSequence(sequence, limit));
+      return productionEvidenceSnapshot(kernel.journal().readFromLogicalSequence(sequence, limit));
     },
     get lastSequence() { return (kernel.journal() as { lastSequence?: number }).lastSequence ?? 0; },
   });
@@ -66,7 +67,7 @@ export function createProductionAuthorityPorts(kernel: TradingKernel, identity: 
     subscribe<T extends TradingEventType>(type: T, observer: KernelSubscriber<T>) {
       return kernel.subscribe(type, envelope => {
         try {
-          const result = observer(envelope);
+          const result = observer(productionEvidenceSnapshot(envelope));
           if (result !== undefined) Promise.resolve(result).catch(() => {});
         } catch { /* OBSERVER_FAILURE != PERSISTENCE_FAILURE */ }
       });

@@ -18,6 +18,7 @@ import type { ReconciliationReport } from '../../reconciliation/reconciliation-t
 import type { ExecutionTruthPort } from '../../reconciliation/reconciliation-types';
 import type { ExecutionAdapter } from '../../oms/oms-types';
 import type { ProductionProtectionLifecycleAuthority } from '../../position/ProductionAuthorityPorts';
+import { productionEvidenceSnapshot } from './ProductionEvidenceSnapshot';
 import { createGateIoProductionBinding, type GateIoProductionDependencies } from '../gateio/GateIoProductionBinding';
 import {
   createBinanceAuthenticatedReadFoundation,
@@ -448,9 +449,14 @@ export function createApplicationProductionRuntimeOwner(
     reason = 'authoritative production runtime is disabled';
   }
 
-  const binanceAuthenticatedRead = dependencies.createBinanceAuthenticatedRead(
+  const binanceReadFoundation = dependencies.createBinanceAuthenticatedRead(
     validated ? copyIdentity(validated.identity) : null,
   );
+  const binanceAuthenticatedRead: BinanceAuthenticatedReadFoundation = Object.freeze({
+    accountTruth: Object.freeze({ read: async () => productionEvidenceSnapshot(await binanceReadFoundation.accountTruth.read()) }),
+    instrumentFacts: Object.freeze({ read: async (symbol: string) => productionEvidenceSnapshot(await binanceReadFoundation.instrumentFacts.read(symbol)) }),
+    status: () => productionEvidenceSnapshot(binanceReadFoundation.status()),
+  });
 
   function releaseReservation(): void {
     if (!validated || reservation === null) return;
@@ -480,7 +486,7 @@ export function createApplicationProductionRuntimeOwner(
 
   const read: ProductionRuntimePublicReadView = Object.freeze({
     status(): ProductionRuntimeStatusSnapshot {
-      return Object.freeze({
+      return productionEvidenceSnapshot({
         state,
         identity: validated ? copyIdentity(validated.identity) : null,
         reason,
@@ -488,14 +494,14 @@ export function createApplicationProductionRuntimeOwner(
         legacyWritePolicy: legacyWrites.mode,
       });
     },
-    identity: () => (validated ? copyIdentity(validated.identity) : null),
-    recovery: () => recoveryEvidence,
+    identity: () => productionEvidenceSnapshot(validated?.identity ?? null),
+    recovery: () => productionEvidenceSnapshot(recoveryEvidence),
     reconciliation: () => {
-      if (!authoritativeSpine) return reconciliationEvidence;
+      if (!authoritativeSpine) return productionEvidenceSnapshot(reconciliationEvidence);
       const current = authoritativeSpine.lastReconciliationReport;
       // A later failed/in-flight acquisition must not display the successful boot report.
       return !authoritativeSpine.reconciliationVerified && current?.reconciliationVerified
-        ? null : current;
+        ? null : productionEvidenceSnapshot(current);
     },
     binanceAuthenticatedReadStatus: binanceAuthenticatedRead.status,
   });
@@ -638,7 +644,7 @@ export function createApplicationProductionRuntimeOwner(
     read,
     binanceAuthenticatedRead,
     authoritativeSpine: binding.provider.productionSpine,
-    gateIoObservation: () => gateBinding?.readObservation() ?? null,
+    gateIoObservation: () => productionEvidenceSnapshot(gateBinding?.readObservation() ?? null),
     legacyWrites,
     start,
     stop,

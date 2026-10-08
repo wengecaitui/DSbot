@@ -284,6 +284,35 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   };
 }
 
+describe('R3H4B Gate public evidence does not grant mutable authority (offline)', () => {
+  it('detached recovery/observation/receipt/order snapshots cannot poison OPEN or trusted exit', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    const s = h.owner.authoritativeSpine()!;
+    function immutable(value: any, seen = new WeakSet<object>()) {
+      if (value === null || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value); assert.equal(Object.isFrozen(value), true);
+      assert.equal(Reflect.set(value, 'injected', () => 'forged'), false);
+      for (const key of Object.keys(value)) {
+        immutable(value[key], seen); assert.equal(Reflect.set(value, key, 'forged'), false);
+      }
+    }
+    for (const read of [h.owner.read.recovery, h.owner.read.status, h.owner.read.reconciliation,
+      h.owner.gateIoObservation, () => s.lastReconciliationReport, () => s.accountRiskAuthorizationContext(NOW)]) {
+      const first = read(); const expected = structuredClone(first); immutable(first);
+      assert.deepEqual(read(), expected); assert.notStrictEqual(read(), first);
+    }
+    assert.equal(Reflect.set(s.accounting, 'snapshot', () => ({ forged: true })), false);
+    assert.throws(() => s.accounting.snapshot(), /LIMITED_LIVE_ACCOUNTING_UNAVAILABLE_L0/);
+    assert.throws(() => s.accounting.lifecycle(), /LIMITED_LIVE_LIFECYCLE_UNAVAILABLE_L0/);
+    assert.equal((await h.trade()).omsResult?.status, 'filled');
+    immutable(s.pretradeDecisionReceipts.snapshot()); immutable(s.oms.getStore().list());
+    h.advance(1); assert.equal((await h.trade('close')).omsResult?.status, 'filled');
+    assert.equal(h.posts, 2); assert.equal(h.exposure, 0);
+    assert.equal((s.kernel as any).publish, undefined); assert.equal((s.oms as any).submitRequest, undefined);
+    assert.equal((s.protection as any).stop, undefined);
+  });
+});
+
 describe('R3H4A observer and protective control isolation (offline owner composition)', () => {
   it('throwing/rejecting generic receipt observers cannot veto legitimate OPEN or CLOSE', async t => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();

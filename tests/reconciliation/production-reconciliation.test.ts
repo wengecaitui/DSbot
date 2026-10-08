@@ -270,7 +270,8 @@ describe('Phase 5B2 — Authority', () => {
     const report = await reconcileRecoveredState(spine);
     assert.strictEqual(report.outcome, 'MATCH');
     assert.strictEqual(spine.reconciliationVerified, true);
-    assert.strictEqual(spine.lastReconciliationReport, report);
+    assert.notStrictEqual(spine.lastReconciliationReport, report, 'public evidence is detached');
+    assert.deepStrictEqual(spine.lastReconciliationReport, report);
     rmSync(dir, { recursive: true, force: true });
   });
 });

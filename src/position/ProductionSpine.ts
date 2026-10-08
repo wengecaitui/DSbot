@@ -69,6 +69,7 @@ import { createRiskIncreaseAdmission, type RiskIncreaseAdmissionBinding } from '
 import type { PreTradeRiskDecisionRecordedPayload } from '../risk/pretrade-decision-receipt-types';
 import type { PublishResult } from '../kernel/TradingKernel';
 import { resolve } from 'node:path';
+import { productionEvidenceSnapshot } from '../runtime/production/ProductionEvidenceSnapshot';
 import { createProductionAuthorityPorts, type ProductionKernelReadView,
   type ProductionEvidencePublisher, type RiskMandateOperatorAuthority,
   type ProductionProtectionLifecycleAuthority } from './ProductionAuthorityPorts';
@@ -147,7 +148,7 @@ export interface ProductionSpine {
   readonly reconciliationVerified: boolean;
   readonly lastReconciliationReport: ReconciliationReport | null;
   /** Phase 6A: derived read-only runtime accounting (no mutation, no persistence write). */
-  accounting: { snapshot(): RuntimeAccountingSnapshot; lifecycle(): TradeLifecycle };
+  readonly accounting: Readonly<{ snapshot(): RuntimeAccountingSnapshot; lifecycle(): TradeLifecycle }>;
   /** Start production: must be called after recovery verification */
   start(options: { exchange: string }): Promise<void>;
 }
@@ -406,9 +407,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
   const mutableOmsStore = oms.getStore();
   const omsReadStore: ProductionOmsReadStore = Object.freeze({
-    get: mutableOmsStore.get.bind(mutableOmsStore),
-    getByIntent: mutableOmsStore.getByIntent.bind(mutableOmsStore),
-    list: mutableOmsStore.list.bind(mutableOmsStore),
+    get: (id: string) => productionEvidenceSnapshot(mutableOmsStore.get(id)),
+    getByIntent: (id: string) => productionEvidenceSnapshot(mutableOmsStore.getByIntent(id)),
+    list: () => productionEvidenceSnapshot(mutableOmsStore.list()),
     digest: mutableOmsStore.digest.bind(mutableOmsStore),
   });
   const omsReadView: ProductionOmsReadView = Object.freeze({
@@ -482,10 +483,10 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
     get recoveryVerified() { return recoveryVerified; },
     get reconciliationVerified() { return reconciliationVerified; },
-    get lastReconciliationReport() { return lastReconciliationReport; },
+    get lastReconciliationReport() { return productionEvidenceSnapshot(lastReconciliationReport); },
 
     // Phase 6A: derived read-only runtime accounting. No mutation, no persistence write.
-    accounting: {
+    accounting: Object.freeze({
       snapshot(): RuntimeAccountingSnapshot {
         if (!service) throw new Error('LIMITED_LIVE_ACCOUNTING_UNAVAILABLE_L0');
         const account = service.snapshot();
@@ -493,7 +494,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
           .filter((e) => e.type === 'fill')
           .map((e) => (e as { fill: PaperFill }).fill);
         const markets = marketStore.getAllSnapshots();
-        return computeRuntimeAccounting({ account, fills, markets, capturedAt: clock.now(), source: 'production-spine' });
+        return productionEvidenceSnapshot(computeRuntimeAccounting({ account, fills, markets,
+          capturedAt: clock.now(), source: 'production-spine' }));
       },
       // Phase 6B: derived read-only trade lifecycle. No mutation, no persistence
       // write, no OMS/execution/market writes, no state mutation.
@@ -501,9 +503,9 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
         if (!service) throw new Error('LIMITED_LIVE_LIFECYCLE_UNAVAILABLE_L0');
         const account = service.snapshot();
         const fills = service.entries().filter((e) => e.type === 'fill') as PaperFillLedgerEntry[];
-        return computeTradeLifecycle({ account, fills });
+        return productionEvidenceSnapshot(computeTradeLifecycle({ account, fills }));
       },
-    },
+    }),
 
     async start(options: { exchange: string }) {
       throw new Error('START_AUTHORITY: use recoverAndStart + activateLiveReadiness');
@@ -832,7 +834,7 @@ export async function recoverAndStart(
  * snapshot, report, or a reconciliationVerified=true boolean.
  */
 export async function reconcileRecoveredState(spine: ProductionSpine): Promise<ReconciliationReport> {
-  return requireProductionSpineInternals(spine).reconcile();
+  return productionEvidenceSnapshot(await requireProductionSpineInternals(spine).reconcile());
 }
 
 /**
