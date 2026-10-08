@@ -220,11 +220,13 @@ describe('Gate G8A LIVE-only factual baseline', () => {
   });
   it('existing local position denies even if journal is empty', async () => {
     const h = await harness();
-    h.spine.positionStore.apply({ type: 'position.baseline.confirmed', kernelLogicalSequence: 1,
+    // Pure preflight input, not a public production projector write capability.
+    const localPosition = createKernelPositionStateStore();
+    localPosition.apply({ type: 'position.baseline.confirmed', kernelLogicalSequence: 1,
       kernelEventId: 'a'.repeat(64), kernelTimestamp: NOW, payload: { baseline: {
         exchange: 'gateio', symbol: 'ETH/USDT', side: 'flat', signedQuantity: 0, averageEntryPrice: 0 } } } as any);
     assert.equal(h.journal.eventCount, 0);
-    assert.throws(() => establishVerifiedLiveFlatBaseline(h.baseline), /BASELINE_DENIED/);
+    assert.throws(() => establishVerifiedLiveFlatBaseline({ ...h.baseline, positionStore: localPosition }), /BASELINE_DENIED/);
   });
   it('nonempty local OMS after acquisition denies without publishing', async () => {
     const h = await harness();

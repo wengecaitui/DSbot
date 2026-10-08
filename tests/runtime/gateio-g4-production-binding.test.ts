@@ -274,6 +274,107 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   };
 }
 
+describe('R3H1 public projector authority closure (offline owner composition)', () => {
+  it('public position/policy facades and returned views are detached and immutable', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start();
+    const s = h.owner.authoritativeSpine()!;
+    for (const store of [s.positionStore, s.policyStore]) {
+      assert.equal(Object.isFrozen(store), true);
+      assert.equal('apply' in store, false);
+      for (const key of Reflect.ownKeys(store)) assert.equal(Reflect.set(store, key, () => null), false);
+      assert.equal(Reflect.set(store, 'apply', () => {}), false);
+      assert.throws(() => Object.setPrototypeOf(store, { apply() {} }), TypeError);
+    }
+    assert.equal(Reflect.set(s, 'positionStore', {}), false);
+    assert.equal(Reflect.set(s, 'policyStore', {}), false);
+    const pos = s.positionStore.resolve('gateio', 'ETH/USDT');
+    const positions = s.positionStore.listResolved();
+    const policy = s.policyStore.resolve('gateio', 'ETH/USDT');
+    for (const item of [pos, pos.snapshot!, positions, policy,
+      s.positionStore.getLatest('gateio', 'ETH/USDT')!, s.policyStore.getLatest('gateio')!])
+      assert.equal(Object.isFrozen(item), true);
+    assert.notEqual(pos, s.positionStore.resolve('gateio', 'ETH/USDT'));
+    assert.equal(Reflect.set(pos.snapshot!, 'positionVersion', 999), false);
+    assert.equal(Reflect.set(pos, 'toJSON', () => ({ status: 'flat' })), false);
+    assert.equal(Reflect.set(positions, '0', { status: 'flat' }), false);
+    assert.equal(Reflect.set(s.policyStore.getLatest('gateio')!.allowedSymbols, '0', 'BTC/USDT'), false);
+  });
+  it('B1: fictional flat read/count cannot bypass the actual open position limit', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    assert.equal((await h.trade()).omsResult?.status, 'filled');
+    const s = h.owner.authoritativeSpine()!;
+    const canonical = s.positionStore.resolve('gateio', 'ETH/USDT');
+    const fictional = { ...canonical, status: 'flat', side: 'flat', signedQuantity: 0,
+      averageEntryPrice: 0, snapshot: { ...canonical.snapshot, side: 'flat', signedQuantity: 0 } };
+    assert.equal(Reflect.set(s.positionStore, 'resolve', () => fictional), false);
+    assert.equal(Reflect.set(s.positionStore, 'listResolved', () => [fictional]), false);
+    assert.throws(() => Object.defineProperty(s.positionStore, 'resolve', { value: () => fictional }), TypeError);
+    const counterfeitSpine = Object.create(s);
+    Object.defineProperty(counterfeitSpine, 'positionStore', { value: { resolve: () => fictional } });
+    h.advance(1);
+    const intent = createTradeIntent({ exchange: 'gateio', symbol: 'ETH/USDT', direction: 'long',
+      positionUsd: 0.2, source: 'forged-read', reason: 'open', biasUpdatedAt: NOW, createdAt: NOW + 1 });
+    await assert.rejects(executeThroughGateway(counterfeitSpine, intent, 'open', 0.2),
+      /PRODUCTION_SPINE_MUTATION_AUTHORITY_INVALID/);
+    assert.equal((await h.trade()).riskCode, 'POSITION_LIMIT_REACHED');
+    assert.equal(h.posts, 1); assert.equal(h.exposure, 0.1);
+  });
+  it('B2: non-durable policy cannot authorize; legitimate durable policy still can', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    h.publishPolicy(false);
+    const s = h.owner.authoritativeSpine()!;
+    const original = s.policyStore.getLatest('gateio')!;
+    const forged = { ...original, allowNewEntries: true, policyId: 'b'.repeat(64) };
+    const sequence = s.kernel.journal().lastSequence;
+    assert.equal((s.policyStore as any).apply, undefined);
+    assert.throws(() => (s.policyStore as any).apply(forged), TypeError);
+    assert.equal(Reflect.set(original, 'allowNewEntries', true), false);
+    assert.equal(Reflect.set(s.policyStore, 'resolve', () => forged), false);
+    assert.equal(Reflect.set(s.policyStore, 'getLatest', () => forged), false);
+    assert.equal(s.kernel.journal().lastSequence, sequence);
+    assert.equal(s.kernel.journal().getByEventId(forged.policyId), null);
+    assert.equal((await h.trade()).riskCode, 'POLICY_ENTRIES_BLOCKED'); assert.equal(h.posts, 0);
+    h.advance(1); h.publishPolicy(true);
+    assert.equal((await h.trade()).omsResult?.status, 'filled'); assert.equal(h.posts, 1);
+  });
+  it('B3: forged toJSON/version/source cannot enter exit proof; receipt uses durable lineage', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
+    const s = h.owner.authoritativeSpine()!;
+    const real = s.positionStore.resolve('gateio', 'ETH/USDT');
+    let serializationCalls = 0;
+    const forged = { ...real, snapshot: { ...real.snapshot, positionVersion: 999,
+      sourceKernelEventId: 'e'.repeat(64) }, toJSON() { serializationCalls++; return real; } };
+    assert.equal(Reflect.set(s.positionStore, 'resolve', () => forged), false);
+    assert.equal(Reflect.set(real.snapshot!, 'sourceKernelEventId', 'e'.repeat(64)), false);
+    assert.equal(Reflect.set(real, 'toJSON', forged.toJSON), false);
+    h.advance(1);
+    assert.equal((await h.trade('close')).omsResult?.status, 'filled');
+    assert.equal(serializationCalls, 0);
+    const receipt = s.pretradeDecisionReceipts.snapshot().records.at(-1)!.receipt;
+    assert.equal(receipt.exitProof!.positionVersion, real.snapshot!.positionVersion);
+    assert.equal(receipt.exitProof!.positionSourceKernelEventId, real.snapshot!.sourceKernelEventId);
+    assert.ok(s.kernel.journal().getByEventId(receipt.exitProof!.positionSourceKernelEventId));
+    assert.equal(h.requests.filter(r => r.method === 'POST').at(-1)!.body.reduce_only, true);
+    assert.equal(h.exposure, 0);
+  });
+  it('restart replays private position/policy and retains immutable views and trusted exit', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
+    const before = h.spine.positionStore.resolve('gateio', 'ETH/USDT');
+    const policyVersion = h.spine.policyStore.getLatest('gateio')!.policyVersion;
+    const policy = h.spine.policyStore.getByVersion('gateio', policyVersion);
+    await h.restart();
+    assert.equal(h.spine.recoveryVerified, true);
+    assert.deepEqual(h.spine.positionStore.resolve('gateio', 'ETH/USDT'), before);
+    assert.deepEqual(h.spine.policyStore.getByVersion('gateio', policyVersion), policy);
+    assert.equal((h.spine.positionStore as any).apply, undefined);
+    assert.equal((h.spine.policyStore as any).apply, undefined);
+    assert.equal(h.spine.protection.getMode(), 'replay');
+    assert.equal((await h.trade()).riskCode, 'NOT_LIVE_READY');
+    assert.equal((await h.trade('close')).omsResult?.status, 'filled');
+    assert.equal(h.exposure, 0);
+  });
+});
+
 describe('R3D2 authoritative trusted exit boundary (offline wire only)', () => {
   function exit(h: ReturnType<typeof harness>, action: 'reduce' | 'close' | 'emergency_exit',
     direction: 'long' | 'short' = 'short', usd = 0.2, exchange: 'gateio' | 'binance' = 'gateio') {
@@ -386,11 +487,10 @@ describe('R3D2 authoritative trusted exit boundary (offline wire only)', () => {
     assert.equal((await h.trade()).omsResult?.status, 'rejected');
     assert.equal(h.posts, 0);
   });
-  it('private proof rejects non-journal position projection and unresolved exposure', async t => {
+  it('public projection injection is unavailable; mismatched and unresolved exposure are denied', async t => {
     const h = harness({ initialExposure: 0.1 }); t.after(() => h.owner.stop()); await h.start();
-    h.spine.positionStore.apply({ type: 'execution.fill.confirmed', kernelEventId: 'f'.repeat(64),
-      kernelLogicalSequence: 999, kernelTimestamp: NOW, payload: { fill: { fillId: 'forged-position',
-        exchange: 'gateio', symbol: 'ETH/USDT', side: 'buy', quantity: 0.0001, price: 2000, executedAt: NOW } } });
+    assert.equal('apply' in h.spine.positionStore, false);
+    assert.equal(Reflect.set(h.spine.positionStore, 'apply', () => {}), false);
     h.exposure = 0.2;
     assert.equal((await exit(h, 'close', 'short', 0.4)).admitted, false); assert.equal(h.posts, 0);
     const pending = harness(); t.after(() => pending.owner.stop()); await pending.start(); await pending.activate();

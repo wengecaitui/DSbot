@@ -11,6 +11,9 @@ import { createTradingKernel, type TradingKernel } from '../kernel/TradingKernel
 import { createKernelPositionStateStore, applyFillToState, type KernelPositionStateStore } from '../kernel/KernelPositionStateStore';
 import { createKernelMarketStateStore, type KernelMarketStateStore } from '../kernel/KernelMarketStateStore';
 import { createKernelPolicyStore, type KernelPolicyStore } from '../kernel/KernelPolicyStore';
+import { createProductionPositionReadView, createProductionPolicyReadView,
+  type ProductionPositionReadView, type ProductionPolicyReadView } from './ProductionProjectorReadViews';
+import type { PositionResolution } from '../types/position-state';
 import { OmsCore } from '../oms/OmsCore';
 import type { ExecutionAdapter, OmsOrderSnapshot } from '../oms/oms-types';
 import type { ProjectorMap } from '../recovery/ReplayCoordinator';
@@ -111,9 +114,9 @@ export interface ProductionSpineConfig {
 
 export interface ProductionSpine {
   kernel: ProductionKernelReadView;
-  positionStore: KernelPositionStateStore;
+  readonly positionStore: ProductionPositionReadView;
   marketStore: KernelMarketStateStore;
-  policyStore: KernelPolicyStore;
+  readonly policyStore: ProductionPolicyReadView;
   /** Read-only order evidence. Mutation is available only through executeThroughGateway(). */
   oms: ProductionOmsReadView;
   planStore: PositionPlanStore;
@@ -168,6 +171,17 @@ function inMemoryPersistence(): PaperBrokerPersistence {
     load() { return Promise.resolve(saved); },
     save(ledger: any) { saved = ledger; return Promise.resolve(); },
   };
+}
+
+/** Canonical durable lineage, not caller-overridable serialization. */
+function sameCanonicalPosition(a: PositionResolution, b: PositionResolution): boolean {
+  if (a.status !== b.status || a.side !== b.side || a.signedQuantity !== b.signedQuantity
+      || a.averageEntryPrice !== b.averageEntryPrice) return false;
+  const x = a.snapshot, y = b.snapshot;
+  if (x === null || y === null) return x === y;
+  return x.exchange === y.exchange && x.symbol === y.symbol && x.side === y.side
+    && x.signedQuantity === y.signedQuantity && x.averageEntryPrice === y.averageEntryPrice
+    && x.positionVersion === y.positionVersion && x.sourceKernelEventId === y.sourceKernelEventId;
 }
 
 export async function createProductionSpine(config: ProductionSpineConfig): Promise<ProductionSpine> {
@@ -435,7 +449,10 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 
   const authorityPorts = createProductionAuthorityPorts(kernel, reconciliationIdentity);
   const spine = {
-    kernel: authorityPorts.read, positionStore, marketStore, policyStore,
+    kernel: authorityPorts.read,
+    positionStore: createProductionPositionReadView(positionStore),
+    marketStore,
+    policyStore: createProductionPolicyReadView(policyStore),
     oms: omsReadView, planStore, protection, executionMode, service,
     privateConfig: Object.freeze({
       hardRisk: config.hardRisk,
@@ -481,6 +498,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
     },
   };
   productionSpineInternalsBySpine.set(spine, Object.freeze({
+    positionStore,
+    policyStore,
     adapter,
     truthPort,
     oms,
@@ -625,7 +644,7 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
       const position = positionStore.resolve(exchange, originalIntent.symbol);
       const recovered = durable.resolve(exchange, originalIntent.symbol);
       const external = truth.positions.filter(p => p.exchange === exchange && p.symbol === originalIntent.symbol);
-      if (JSON.stringify(position) !== JSON.stringify(recovered) || position.status !== 'open'
+      if (!sameCanonicalPosition(position, recovered) || position.status !== 'open'
           || external.length !== 1 || external[0]!.side !== position.side
           || external[0]!.signedQuantity !== position.signedQuantity
           || external[0]!.averageEntryPrice !== position.averageEntryPrice) return deny('EXIT_POSITION_NOT_VERIFIED');
@@ -697,6 +716,8 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
 const accountRiskRuntimeBySpine = new WeakMap<object, GateIoAccountRiskRuntime>();
 const decisionReceiptStoreBySpine = new WeakMap<object, PreTradeRiskDecisionReceiptStore>();
 interface ProductionSpineInternals {
+  readonly positionStore: KernelPositionStateStore;
+  readonly policyStore: KernelPolicyStore;
   readonly entryRiskStateDigest: () => string;
   readonly priorEntryJournalSequence: () => number;
   readonly submitRiskIncrease: (binding: RiskIncreaseAdmissionBinding,
@@ -763,9 +784,9 @@ export async function recoverAndStart(
   const journal = createFileEventJournal(bound.filePath);
   const projectors = buildProjectorMap(spine);
   const currentStoreDigests = () => ({
-    position: spine.positionStore.digest(),
+    position: internals.positionStore.digest(),
     market: spine.marketStore.digest(),
-    policy: spine.policyStore.digest(),
+    policy: internals.policyStore.digest(),
     oms: spine.oms.getStore().digest(),
     plan: spine.planStore.digest(),
     ...(accountRiskRuntimeBySpine.get(spine)?.digests() ?? {
@@ -802,14 +823,15 @@ export async function activateLiveReadiness(spine: ProductionSpine): Promise<voi
 
 function buildProjectorMap(spine: ProductionSpine): ProjectorMap {
   const m: ProjectorMap = new Map();
-  const omsStore = requireProductionSpineInternals(spine).oms.getStore();
-  m.set('position.baseline.confirmed', [spine.positionStore]);
-  m.set('execution.fill.confirmed', [spine.positionStore, omsStore]);
+  const internals = requireProductionSpineInternals(spine);
+  const omsStore = internals.oms.getStore();
+  m.set('position.baseline.confirmed', [internals.positionStore]);
+  m.set('execution.fill.confirmed', [internals.positionStore, omsStore]);
   m.set('market.ticker.updated', [spine.marketStore]);
   // Research remains journal evidence, not market/position truth. This existing projector
   // explicitly treats research as irrelevant, preserving its digest and all readiness gates.
   m.set('research.bias.updated', [spine.marketStore]);
-  m.set('policy.snapshot.published', [spine.policyStore]);
+  m.set('policy.snapshot.published', [internals.policyStore]);
   m.set('order.created', [omsStore]);
   m.set('order.submitted', [omsStore]);
   m.set('order.rejected', [omsStore]);
@@ -857,7 +879,8 @@ export async function executeThroughGateway(
 
   const { executionOms: oms } = requireProductionSpineInternals(spine);
   const { kernel } = internals;
-  const { positionStore, marketStore, policyStore } = spine;
+  const { positionStore, policyStore } = internals;
+  const { marketStore } = spine;
   if (action === 'open') {
     const reason = await internals.checkEntry(intent);
     if (reason) return { admitted: false, riskCode: reason, action };

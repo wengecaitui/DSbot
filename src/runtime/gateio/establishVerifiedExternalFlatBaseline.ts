@@ -12,7 +12,7 @@ export interface VerifiedGateIoFlatBaselineInput {
   readonly kernel: Pick<ProductionEvidencePublisher, 'publish'> & {
     journal(): Pick<EventJournalPort, 'readFromLogicalSequence'>;
   };
-  readonly positionStore: KernelPositionStateStore;
+  readonly positionStore: Readonly<Pick<KernelPositionStateStore, 'resolve'>>;
   readonly accountId: string;
   readonly symbol: string;
   readonly now: () => number;
