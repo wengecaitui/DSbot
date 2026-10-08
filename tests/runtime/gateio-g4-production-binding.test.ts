@@ -25,6 +25,7 @@ const NOW = 1_800_000_000_000;
 let nextAccount = 0;
 function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   riskAuthority?: boolean;
+  receiptWriteFailure?: boolean;
   initialExposure?: number;
   authorityFailure?: 'MISSING' | 'REVOKED' | 'EXPIRED' | 'STALE' | 'PARTIAL' | 'LOSS' | 'DRAWDOWN';
   overrideConfig?: Partial<ProductionRuntimeConfig>; omitGate?: boolean; wrongEnvironment?: boolean;
@@ -210,6 +211,15 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
   };
   let spine: ProductionSpine;
   const createOwner = () => createApplicationProductionRuntimeOwner(config, {
+    ...(options.receiptWriteFailure ? { createJournal(path: string) {
+      const file = createFileEventJournal(path);
+      return { ...file, get lastSequence() { return file.lastSequence; },
+        get eventCount() { return file.eventCount; },
+        append(event: Parameters<typeof file.append>[0]) {
+          if (event.type === 'PRETRADE_RISK_DECISION_RECORDED') throw new Error('OFFLINE_RECEIPT_DISK_FAILURE');
+          file.append(event);
+        } };
+    } } : {}),
     ...(options.omitGate ? {} : { gateIo: { environment: options.wrongEnvironment
       ? environment === 'testnet' ? 'live' as const : 'testnet' as const : environment,
     accountId: options.wrongAccount ? 'other-account' : accountId,
@@ -273,6 +283,97 @@ function harness(options: { environment?: 'testnet' | 'live'; seed?: boolean;
       .filter((e) => e.type === 'execution.fill.confirmed'); },
   };
 }
+
+describe('R3H4A observer and protective control isolation (offline owner composition)', () => {
+  it('throwing/rejecting generic receipt observers cannot veto legitimate OPEN or CLOSE', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    let calls = 0;
+    const unsubscribe = h.spine.kernel.subscribe('PRETRADE_RISK_DECISION_RECORDED', () => {
+      calls += 1; throw new Error('GENERIC_OBSERVER_NOT_AUTHORITY');
+    });
+    h.spine.kernel.subscribe('PRETRADE_RISK_DECISION_RECORDED', async () => {
+      throw new Error('ASYNC_OBSERVER_NOT_AUTHORITY');
+    });
+    assert.equal((await h.trade()).omsResult?.status, 'filled'); h.advance(1);
+    assert.equal((await h.trade('close')).omsResult?.status, 'filled');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 2); assert.equal(h.posts, 2); assert.equal(h.exposure, 0);
+    unsubscribe(); unsubscribe();
+    const events = h.spine.kernel.journal().readFromLogicalSequence(1);
+    for (const created of events.filter(e => e.type === 'order.created')) {
+      assert.ok(events.some(e => e.type === 'PRETRADE_RISK_DECISION_RECORDED'
+        && e.kernelLogicalSequence < created.kernelLogicalSequence));
+    }
+  });
+
+  for (const action of ['open', 'close'] as const) {
+    it('real durable receipt append failure blocks ' + action + ' before mutation', async t => {
+      const h = harness({ receiptWriteFailure: true, initialExposure: action === 'close' ? 0.1 : 0 });
+      t.after(() => h.owner.stop()); await h.start();
+      if (action === 'open') await h.activate();
+      const orders = h.spine.oms.getStore().list().length;
+      const result = await h.trade(action);
+      assert.equal(result.riskCode, 'RISK_DECISION_RECEIPT_PERSIST_FAILED');
+      assert.equal(h.posts, 0); assert.equal(h.spine.oms.getStore().list().length, orders);
+      assert.equal(h.spine.pretradeDecisionReceipts.snapshot().records.length, 0);
+      assert.equal(h.spine.kernel.journal().readFromLogicalSequence(1)
+        .some(e => e.type === 'PRETRADE_RISK_DECISION_RECORDED'), false);
+    });
+  }
+
+  it('generic caller cannot obtain, replace or invoke protective lifecycle/re-arm capabilities', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    const view = h.owner.authoritativeSpine()!.protection;
+    assert.deepEqual(Object.keys(view).sort(), ['getMode', 'getSubmittedCount', 'positionManager']);
+    assert.deepEqual(Object.getOwnPropertySymbols(view), []);
+    for (const method of ['start', 'stop', 'clearSubmitted', '_setLive', 'reset', 'set']) {
+      assert.equal((view as any)[method], undefined);
+      assert.equal(Reflect.set(view, method, () => {}), false);
+      assert.throws(() => (view as any)[method]('forged-plan'), TypeError);
+    }
+    assert.equal(Reflect.set(h.spine, 'protection', { stop() {} }), false);
+    assert.equal(view.getMode(), 'live');
+    assert.equal((await h.trade()).omsResult?.status, 'filled'); h.advance(1);
+    assert.equal((await h.trade('close')).omsResult?.status, 'filled');
+    await h.owner.stop();
+    assert.equal(view.getMode(), 'replay'); assert.equal(h.owner.read.status().state, 'STOPPED');
+    assert.equal((await h.trade()).admitted, false);
+  });
+
+  it('public caller cannot clear the in-flight protective lock without a durable fact', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();
+    await h.trade('open', 'gateio', 4); h.pendingPartial = true;
+    testSpinePublisher(h.spine).publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
+      channel: 'ticker', last: 1800, bestBid: 1799, bestAsk: 1801, volume24h: 100, high24h: 2100,
+      low24h: 1800, ts: NOW }, receivedAt: NOW });
+    await new Promise(resolve => setImmediate(resolve));
+    const plan = h.spine.planStore.getActive('gateio', 'ETH/USDT')!;
+    assert.equal(h.spine.protection.getSubmittedCount(), 1);
+    const sequence = h.spine.kernel.journal().lastSequence;
+    assert.throws(() => (h.spine.protection as any).clearSubmitted(plan.planId), TypeError);
+    assert.equal(h.spine.protection.getSubmittedCount(), 1);
+    assert.equal(h.spine.kernel.journal().lastSequence, sequence); assert.equal(h.posts, 2);
+  });
+
+  it('protective close remains authoritative and durable despite generic observer errors', async t => {
+    const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate(); await h.trade();
+    h.halt = 'RISK_INCREASE';
+    h.spine.kernel.subscribe('PRETRADE_RISK_DECISION_RECORDED', () => { throw new Error('OBSERVER'); });
+    testSpinePublisher(h.spine).publish('market.ticker.updated', { ticker: { exchange: 'gateio', instId: 'ETH/USDT',
+      channel: 'ticker', last: 1800, bestBid: 1799, bestAsk: 1801, volume24h: 100, high24h: 2100,
+      low24h: 1800, ts: NOW }, receivedAt: NOW });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.posts, 2); assert.equal(h.exposure, 0);
+    const events = h.spine.kernel.journal().readFromLogicalSequence(1);
+    const receipt = events.filter(e => e.type === 'PRETRADE_RISK_DECISION_RECORDED').at(-1)!;
+    const close = h.spine.oms.getStore().list().find(o => o.action === 'close')!;
+    assert.equal(receipt.payload.receipt.exitProof?.orderId, close.orderId);
+    assert.equal(receipt.payload.receipt.exitProof?.reduceOnly, true);
+    assert.equal(close.preparation?.reduceOnly, true);
+    assert.ok(receipt.kernelLogicalSequence < events.find(e => e.type === 'order.created'
+      && e.payload.order.orderId === close.orderId)!.kernelLogicalSequence);
+  });
+});
 
 describe('R3H3 private market/protection authority (offline owner composition)', () => {
   it('formal owner cannot consume a replaced market price/version or injected market projector', async t => {
@@ -556,7 +657,7 @@ describe('R3D2 authoritative trusted exit boundary (offline wire only)', () => {
     assert.equal(receipt.riskEffect, 'CLOSE'); assert.equal(receipt.exitProof?.reduceOnly, true);
     assert.equal(receipt.exitProof?.orderId, h.spine.oms.getStore().list().at(-1)!.orderId);
   });
-  it('receipt persistence failure, halt changed by subscriber, and tampering never create a bypass', async t => {
+  it('observer-driven explicit halt and tampering never create a bypass; observer errors alone do not veto', async t => {
     const h = harness({ initialExposure: 0.1 }); t.after(() => h.owner.stop()); await h.start();
     const risk = h.spine.privateConfig.hardRisk;
     Reflect.set(h.spine, 'riskAuthorizationMode', 'LEGACY_PAPER_OR_NON_GATE');
@@ -568,8 +669,8 @@ describe('R3D2 authoritative trusted exit boundary (offline wire only)', () => {
     assert.equal(result.omsResult?.status, 'rejected'); assert.equal(h.posts, 0);
     const fail = harness({ initialExposure: 0.1 }); t.after(() => fail.owner.stop()); await fail.start();
     fail.spine.kernel.subscribe('PRETRADE_RISK_DECISION_RECORDED', () => { throw new Error('receipt subscriber failure'); });
-    assert.equal((await exit(fail, 'close')).riskCode, 'RISK_DECISION_RECEIPT_PERSIST_FAILED');
-    assert.equal(fail.posts, 0); assert.equal(fail.spine.oms.getStore().list().length, 1);
+    assert.equal((await exit(fail, 'close')).omsResult?.status, 'filled');
+    assert.equal(fail.posts, 1); assert.equal(fail.spine.oms.getStore().list().length, 2);
   });
   it('ALL_MUTATIONS newly asserted while recording OPEN stops before adapter POST', async t => {
     const h = harness(); t.after(() => h.owner.stop()); await h.start(); await h.activate();

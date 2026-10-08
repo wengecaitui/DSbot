@@ -70,9 +70,12 @@ import type { PreTradeRiskDecisionRecordedPayload } from '../risk/pretrade-decis
 import type { PublishResult } from '../kernel/TradingKernel';
 import { resolve } from 'node:path';
 import { createProductionAuthorityPorts, type ProductionKernelReadView,
-  type ProductionEvidencePublisher, type RiskMandateOperatorAuthority } from './ProductionAuthorityPorts';
+  type ProductionEvidencePublisher, type RiskMandateOperatorAuthority,
+  type ProductionProtectionLifecycleAuthority } from './ProductionAuthorityPorts';
 
 export interface ProductionSpineConfig {
+  /** Trusted composition binds owner lifecycle; no public Spine-to-capability lookup. */
+  bindProtectionLifecycle?: (authority: ProductionProtectionLifecycleAuthority) => void;
   /** Trusted composition only: bind factual ingress without mandate authority. Never returned on spine. */
   bindEvidencePublisher?: (publisher: ProductionEvidencePublisher) => void;
   /** Explicit operator control-plane capability injection. Absent by default; provenance alone cannot mint it. */
@@ -720,6 +723,10 @@ export async function createProductionSpine(config: ProductionSpineConfig): Prom
   }
 
   Object.freeze(protection);
+  config.bindProtectionLifecycle?.(Object.freeze({
+    start: () => protection.start(),
+    stop: () => protection.stop(),
+  }));
   config.bindEvidencePublisher?.(authorityPorts.evidence);
   config.bindOperatorAuthority?.(authorityPorts.operator);
   return Object.freeze(spine);

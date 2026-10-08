@@ -6,7 +6,8 @@ import { describe, it } from 'node:test';
 import { createTradingKernel } from '../../src/kernel/TradingKernel';
 import { createFileEventJournal } from '../../src/recovery/FileEventJournal';
 import { createProductionSpine, recoverAndStart, reconcileRecoveredState, activateLiveReadiness, executeThroughGateway } from '../../src/position/ProductionSpine';
-import type { ProductionEvidencePublisher, RiskMandateOperatorAuthority } from '../../src/position/ProductionAuthorityPorts';
+import type { ProductionEvidencePublisher, RiskMandateOperatorAuthority,
+  ProductionProtectionLifecycleAuthority } from '../../src/position/ProductionAuthorityPorts';
 import { createMarketDataRuntime } from '../../src/runtime/market/MarketDataRuntime';
 import { createRiskIncreaseAdmission } from '../../src/risk/risk-increase-admission';
 import { evaluateAccountBoundPreTradeRisk } from '../../src/risk/PreTradeRiskGateway';
@@ -48,6 +49,7 @@ async function harness(options: { dropReceiptDisk?: boolean; replaceDiskReceipt?
   }) });
   let evidence!: ProductionEvidencePublisher;
   let operator!: RiskMandateOperatorAuthority;
+  let lifecycle!: ProductionProtectionLifecycleAuthority;
   const submitted: OmsOrder[] = [];
   const hardRisk = () => ({ exchange: 'gateio' as const, accountId: ACCOUNT, enabled: true, locked: false,
     totalCapitalUsd: 1000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: 1000 });
@@ -55,6 +57,7 @@ async function harness(options: { dropReceiptDisk?: boolean; replaceDiskReceipt?
     clock: { now: () => time }, marketRuntime: market, hardRisk,
     marketStaleAfterMs: options.marketStaleAfterMs,
     bindEvidencePublisher(value) { evidence = value; }, bindOperatorAuthority(value) { operator = value; },
+    bindProtectionLifecycle(value) { lifecycle = value; },
     riskAuthorization: { mode: 'GATEIO_ACCOUNT_BOUND', settle: 'USDT' },
     execution: { mode: 'limited-live',
       adapter: { async submit(order, prepared) {
@@ -89,7 +92,7 @@ async function harness(options: { dropReceiptDisk?: boolean; replaceDiskReceipt?
     allowNewEntries: true, allowedSymbols: [], blockedSymbols: [], allowedStrategyIds: [], blockedStrategyIds: [],
     maxPositionMultiplier: 1, riskLevel: 'low', directionBias: 'neutral', symbolRules: {}, reasonCodes: [] } });
   await reconcileRecoveredState(spine);
-  spine.protection.start(); await market.start();
+  lifecycle.start(); await market.start();
   tickerHandler({ exchange: 'gateio', instId: 'ETH/USDT', symbol: 'ETH/USDT', channel: 'ticker',
     last: 2000, bestBid: 1999, bestAsk: 2001, volume24h: 100, high24h: 2100, low24h: 1900, ts: time });
   await activateLiveReadiness(spine);
@@ -101,7 +104,7 @@ async function harness(options: { dropReceiptDisk?: boolean; replaceDiskReceipt?
         last: 2000, bestBid: 1999, bestAsk: 2001, volume24h: 100, high24h: 2100, low24h: 1900, ts: time });
     },
     advance(ms: number) { time += ms; },
-    stop() { spine.protection.stop(); market.stop(); },
+    stop() { lifecycle.stop(); market.stop(); },
   };
 }
 

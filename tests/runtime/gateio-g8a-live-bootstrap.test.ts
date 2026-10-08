@@ -325,11 +325,16 @@ describe('Gate G8A explicit policy and durable one-shot journal', () => {
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /JOURNAL_DENIED/);
     assert.equal(h.journal.eventCount, 1);
   });
-  it('publication failure stops, preserves partial evidence, never retries or activates', async () => {
+  it('durable policy append failure stops, preserves partial evidence, never retries or activates', async () => {
     const h = await harness();
-    h.spine.kernel.subscribe('policy.snapshot.published', () => { throw new Error('fixture projection failure'); });
-    assert.throws(() => bootstrapGateIoLiveJournal(h.input), /POLICY_NOT_APPLIED/);
-    assert.equal(h.journal.eventCount, 3);
+    const append = h.journal.append;
+    h.journal.append = event => {
+      if (event.type === 'policy.snapshot.published') throw new Error('fixture durable policy write failure');
+      append(event);
+    };
+    assert.throws(() => bootstrapGateIoLiveJournal(h.input), /JOURNAL_APPEND_FAILED/);
+    assert.equal(h.journal.eventCount, 2);
+    assert.equal(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
     assert.throws(() => bootstrapGateIoLiveJournal(h.input), /JOURNAL_DENIED/);
     assert.equal(h.spine.reconciliationVerified, false);
   });
@@ -443,12 +448,25 @@ describe('Gate G8A R1 journal-backed research provenance', () => {
     assert.equal(h.journal.eventCount, 1);
     assert.equal(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
   });
-  it('research subscriber failure stops before policy and preserves factual partial evidence', async () => {
+  it('durable research append failure stops before policy and preserves factual partial evidence', async () => {
     const h = await harness();
-    h.spine.kernel.subscribe('research.bias.updated', () => { throw new Error('offline projector failure'); });
-    assert.throws(() => bootstrapGateIoLiveJournal(h.input), /RESEARCH_NOT_APPLIED/);
-    assert.equal(createFileEventJournal(h.journalPath).eventCount, 2);
+    const append = h.journal.append;
+    h.journal.append = event => {
+      if (event.type === 'research.bias.updated') throw new Error('offline durable research write failure');
+      append(event);
+    };
+    assert.throws(() => bootstrapGateIoLiveJournal(h.input), /JOURNAL_APPEND_FAILED/);
+    assert.equal(createFileEventJournal(h.journalPath).eventCount, 1);
     assert.equal(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
+  });
+  it('generic research/policy observer failures cannot veto authoritative bootstrap publication', async () => {
+    const h = await harness();
+    h.spine.kernel.subscribe('research.bias.updated', () => { throw new Error('research observer'); });
+    h.spine.kernel.subscribe('policy.snapshot.published', () => { throw new Error('policy observer'); });
+    bootstrapGateIoLiveJournal(h.input);
+    assert.equal(createFileEventJournal(h.journalPath).eventCount, 3);
+    assert.notEqual(h.spine.policyStore.resolve('gateio', 'ETH/USDT').status, 'missing');
+    assert.equal(h.spine.recoveryVerified, false);
   });
   it('reentrant extra research event cannot shift the authorized seq3 policy publication', async () => {
     const h = await harness();

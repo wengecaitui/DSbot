@@ -13,7 +13,7 @@ export type ProductionMarketReadView = Readonly<Pick<KernelMarketStateStore, 'ge
 }>;
 export type ProductionPlanReadView = Readonly<Pick<PositionPlanStore, 'get' | 'getActive' | 'list' | 'digest'>>;
 export type ProductionProtectionView = Readonly<Pick<PositionManagerRuntime,
-  'getMode' | 'start' | 'stop' | 'getSubmittedCount' | 'clearSubmitted'> & {
+  'getMode' | 'getSubmittedCount'> & {
   readonly positionManager: Readonly<Pick<PositionManagerRuntime['positionManager'], 'getStopConfig'>>;
 }>;
 
@@ -66,14 +66,11 @@ export function createProductionPlanReadView(store: PositionPlanStore): Producti
   });
 }
 
-/** Lifecycle remains unchanged; the mutable protective evaluator is never published. */
+/** Observations only: lifecycle and in-flight state remain owner/internal authority. */
 export function createProductionProtectionView(runtime: PositionManagerRuntime): ProductionProtectionView {
   return Object.freeze({
     getMode: () => runtime.getMode(),
-    start: () => runtime.start(),
-    stop: () => runtime.stop(),
     getSubmittedCount: () => runtime.getSubmittedCount(),
-    clearSubmitted: (id: string) => runtime.clearSubmitted(id),
     positionManager: Object.freeze({ getStopConfig: () => snapshot(runtime.positionManager.getStopConfig()) }),
   });
 }

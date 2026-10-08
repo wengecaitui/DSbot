@@ -1,4 +1,4 @@
-import { createTestProductionSpine as createProductionSpine, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
+import { createTestProductionSpine as createProductionSpine, testSpineProtectionLifecycle, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 // Phase 5B2: Production reconciliation integration tests.
 // Covers read surfaces, Paper correlation persistence, Paper truth port,
 // startup authority, the 3-gate LIVE_READY, real restart MATCH, and negative proofs.
@@ -265,7 +265,7 @@ describe('Phase 5B2 — Authority', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-match-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine } = await createSpineWithMarket({ accountId: 'match', journalPath });
-    spine.protection.start();
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     const report = await reconcileRecoveredState(spine);
     assert.strictEqual(report.outcome, 'MATCH');
@@ -288,7 +288,7 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-g2-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'g2', journalPath });
-    spine.protection.start();
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     emitTicker(); // fresh market available, but reconciliation NOT run
     await assert.rejects(() => activateLiveReadiness(spine), { message: /RECONCILIATION/ });
@@ -299,7 +299,7 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-g3-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine } = await createSpineWithMarket({ accountId: 'g3', journalPath });
-    spine.protection.start();
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine); // MATCH
     assert.strictEqual(spine.reconciliationVerified, true);
@@ -311,7 +311,7 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-g4-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'g4', journalPath });
-    spine.protection.start();
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine);
     emitTicker();
@@ -333,7 +333,7 @@ describe('Phase 5B2 — Real restart proof', () => {
     // ── RUN 1: real execution ──
     const m1 = await createSpineWithMarket({ accountId: 'restart', journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
-    s1.protection.start();
+    testSpineProtectionLifecycle(s1).start();
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -375,7 +375,7 @@ describe('Phase 5B2 — Real restart proof', () => {
     // RUN 1: persist fill to journal + paper
     const m1 = await createSpineWithMarket({ accountId: 'negfill', journalPath, paperAccount: cfg, persistence: new PaperLedgerStore(cfg, { baseDir: join(dir, 'paper1') }), policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
-    s1.protection.start();
+    testSpineProtectionLifecycle(s1).start();
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -406,7 +406,7 @@ describe('Phase 5B2 — Real restart proof', () => {
     // RUN 1: execute fill, persist to shared paper
     const m1 = await createSpineWithMarket({ accountId: 'negoph', journalPath, paperAccount: cfg, persistence: paperStore, policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
-    s1.protection.start();
+    testSpineProtectionLifecycle(s1).start();
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -465,7 +465,7 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-stale-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'stale', journalPath });
-    spine.protection.start();
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     const r1 = await reconcileRecoveredState(spine);
     assert.strictEqual(r1.outcome, 'MATCH');
@@ -487,7 +487,7 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-nomut-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'nomut', journalPath });
-    spine.protection.start();
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine);
     assert.strictEqual(spine.reconciliationVerified, true);
@@ -503,7 +503,7 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     const journalPath = join(dir, 'journal.jsonl');
     const cfg = paperConfig('acqfail');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'acqfail', journalPath, paperAccount: cfg });
-    spine.protection.start();
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     const r1 = await reconcileRecoveredState(spine);
     assert.strictEqual(r1.outcome, 'MATCH');

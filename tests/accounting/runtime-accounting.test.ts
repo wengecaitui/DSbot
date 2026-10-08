@@ -1,4 +1,4 @@
-import { createTestProductionSpine as createProductionSpine, testSpinePublisher } from '../helpers/production-spine-capability-fixture';
+import { createTestProductionSpine as createProductionSpine, testSpineProtectionLifecycle, testSpinePublisher } from '../helpers/production-spine-capability-fixture';
 // Phase 6A: Runtime Accounting — focused integration + unit tests.
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
@@ -392,7 +392,7 @@ describe('Phase 6A — Restart + side effects (ProductionSpine)', () => {
 
     // ── RUN 1: execute a fill, persist ──
     const r1 = await makeSpine('restart');
-    r1.spine.protection.start();
+    testSpineProtectionLifecycle(r1.spine).start();
     await recoverAndStart(r1.spine, journalPath);
     await reconcileRecoveredState(r1.spine);
     r1.emit(ticker('BTC/USDT', 100));

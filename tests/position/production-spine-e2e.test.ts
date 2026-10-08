@@ -1,4 +1,4 @@
-import { createTestProductionSpine as createProductionSpine, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
+import { createTestProductionSpine as createProductionSpine, testSpineProtectionLifecycle, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
@@ -52,7 +52,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     if (initDone) return;
     const m = await createSpineWithMarket({ accountId: 'e2e', policyMaxLifetimeMs: 3600_000, journalPath });
     spine = m.spine;
-    spine.protection.start();
+    testSpineProtectionLifecycle(spine).start();
 
     // Recovery + start (cold start → no_history → verified + live)
     await recoverAndStart(spine, journalPath);
@@ -136,7 +136,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     const protJournalPath = join(protDir, 'journal.jsonl');
     const m = await createSpineWithMarket({ accountId: 'prot-e2e', policyMaxLifetimeMs: 3600_000, journalPath: protJournalPath });
     const s = m.spine;
-    s.protection.start();
+    testSpineProtectionLifecycle(s).start();
 
     // Recovery + start (cold start → verified + live)
     await recoverAndStart(s, protJournalPath);

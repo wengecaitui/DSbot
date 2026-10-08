@@ -17,6 +17,7 @@ import type { RecoveryResult } from '../../recovery/RecoveryManager';
 import type { ReconciliationReport } from '../../reconciliation/reconciliation-types';
 import type { ExecutionTruthPort } from '../../reconciliation/reconciliation-types';
 import type { ExecutionAdapter } from '../../oms/oms-types';
+import type { ProductionProtectionLifecycleAuthority } from '../../position/ProductionAuthorityPorts';
 import { createGateIoProductionBinding, type GateIoProductionDependencies } from '../gateio/GateIoProductionBinding';
 import {
   createBinanceAuthenticatedReadFoundation,
@@ -420,6 +421,7 @@ export function createApplicationProductionRuntimeOwner(
   let state: ProductionRuntimeState = config?.enabled === false ? 'DISABLED' : 'NOT_CONFIGURED';
   let reason: string | null = null;
   let authoritativeSpine: ProductionSpine | null = null;
+  let protectionLifecycle: ProductionProtectionLifecycleAuthority | null = null;
   let gateBinding: ReturnType<typeof createGateIoProductionBinding> | null = null;
   let marketRuntime: MarketDataRuntime | null = null;
   let journal: FileEventJournal | null = null;
@@ -468,7 +470,7 @@ export function createApplicationProductionRuntimeOwner(
     binding.owner.makeUnavailable();
     const failures: unknown[] = [];
     if (!cleanupComplete) {
-      try { authoritativeSpine?.protection.stop(); } catch (error) { failures.push(error); }
+      try { protectionLifecycle?.stop(); } catch (error) { failures.push(error); }
       try { marketRuntime?.stop(); } catch (error) { failures.push(error); }
       try { journal?.close(); } catch (error) { failures.push(error); }
       if (failures.length === 0) cleanupComplete = true;
@@ -543,6 +545,10 @@ export function createApplicationProductionRuntimeOwner(
           : assertCanonicalHardRiskSource(validated!.identity, hardRiskSource);
 
         authoritativeSpine = await dependencies.createSpine({
+          bindProtectionLifecycle(authority) {
+            if (protectionLifecycle !== null) throw new Error('PROTECTION_LIFECYCLE_ALREADY_BOUND');
+            protectionLifecycle = authority;
+          },
           exchange: validated.identity.exchange,
           accountId: validated.identity.accountId,
           ...(validated.paperAccount === undefined ? {} : { paperAccount: validated.paperAccount }),
@@ -587,7 +593,8 @@ export function createApplicationProductionRuntimeOwner(
           throw new Error(`PRODUCTION_RUNTIME_RECONCILIATION_FAILED: ${reconciliation.outcome}`);
         }
 
-        authoritativeSpine.protection.start();
+        if (protectionLifecycle === null) throw new Error('PROTECTION_LIFECYCLE_NOT_BOUND');
+        protectionLifecycle.start();
         failureState = 'MARKET_FAILED';
         await marketRuntime.start();
         state = 'READY_FOR_MARKET';

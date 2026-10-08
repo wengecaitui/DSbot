@@ -1,6 +1,6 @@
 import type { TradingEventPayloadMap, TradingEventType } from '../events/TradingEvent';
 import type { EventJournalPort } from '../kernel/EventJournalPort';
-import type { PublishResult, TradingKernel } from '../kernel/TradingKernel';
+import type { KernelSubscriber, PublishResult, TradingKernel } from '../kernel/TradingKernel';
 
 /** Explicit composition ingress, not a general event publisher. */
 export const PRODUCTION_EVIDENCE_EVENTS = Object.freeze([
@@ -16,6 +16,11 @@ export interface ProductionEvidencePublisher {
 export interface RiskMandateOperatorAuthority {
   activate(payload: TradingEventPayloadMap['RISK_MANDATE_ACTIVATED']): PublishResult<'RISK_MANDATE_ACTIVATED'>;
   revoke(payload: TradingEventPayloadMap['RISK_MANDATE_REVOKED']): PublishResult<'RISK_MANDATE_REVOKED'>;
+}
+/** Possession-scoped owner lifecycle; never returned by the public Spine. */
+export interface ProductionProtectionLifecycleAuthority {
+  start(): void;
+  stop(): void;
 }
 export interface ProductionKernelReadView {
   subscribe: TradingKernel['subscribe'];
@@ -55,7 +60,17 @@ export function createProductionAuthorityPorts(kernel: TradingKernel, identity: 
     get lastSequence() { return (kernel.journal() as { lastSequence?: number }).lastSequence ?? 0; },
   });
   const read: ProductionKernelReadView = Object.freeze({
-    subscribe: kernel.subscribe,
+    // Internal consumers subscribe directly to the private kernel and remain
+    // authoritative. Public observers cannot turn a successful durable append
+    // into a consumer/persistence failure, including through rejected promises.
+    subscribe<T extends TradingEventType>(type: T, observer: KernelSubscriber<T>) {
+      return kernel.subscribe(type, envelope => {
+        try {
+          const result = observer(envelope);
+          if (result !== undefined) Promise.resolve(result).catch(() => {});
+        } catch { /* OBSERVER_FAILURE != PERSISTENCE_FAILURE */ }
+      });
+    },
     journal: () => readJournal,
   });
   return Object.freeze({ evidence, operator, read });
