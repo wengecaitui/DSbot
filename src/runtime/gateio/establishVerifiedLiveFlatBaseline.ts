@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { ExternalFlatBaselineEvidence } from '../../events/TradingEvent';
-import type { OmsCore } from '../../oms/OmsCore';
+import type { ProductionOmsReadView } from '../../position/ProductionSpine';
 import { isGateIoExecutionTruthPort } from '../../reconciliation/GateIoExecutionTruthPort';
 import type { VerifiedGateIoFlatBaselineInput } from './establishVerifiedExternalFlatBaseline';
 
 export interface VerifiedGateIoLiveFlatBaselineInput extends VerifiedGateIoFlatBaselineInput {
-  readonly oms: Pick<OmsCore, 'getStore'>;
+  readonly oms: ProductionOmsReadView;
 }
 
 export const GATEIO_LIVE_BASELINE_MAX_AGE_MS = 30_000;

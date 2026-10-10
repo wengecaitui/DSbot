@@ -29,7 +29,7 @@ export function recoverFromJournal(
   journal: FileEventJournal,
   projectors: ProjectorMap,
   checkpointPath?: string,
-  storeDigests?: Record<string, string>,
+  storeDigests?: Record<string, string> | (() => Record<string, string>),
 ): RecoveryResult {
   // Empty journal → no_history
   if (journal.lastSequence === 0) {
@@ -93,7 +93,10 @@ export function recoverFromJournal(
       checkpointComparison = 'stale';
     } else {
       // Sequence match → compare store-name digests
-      const digests = storeDigests ?? {};
+      // Recovery must compare the checkpoint with the post-replay projection,
+      // never with the empty stores that existed before replay began.
+      const digests = typeof storeDigests === 'function'
+        ? storeDigests() : storeDigests ?? {};
       const allMatch = validateCheckpointDigests(cp, digests);
       checkpointComparison = allMatch ? 'match' : 'mismatch';
       if (!allMatch) {
@@ -133,7 +136,9 @@ function validateCheckpointDigests(
   cp: CheckpointFile,
   expectedDigests: Record<string, string>,
 ): boolean {
-  const required = ['position', 'market', 'policy', 'oms', 'plan'];
+  const required = [...new Set([
+    'position', 'market', 'policy', 'oms', 'plan', ...Object.keys(expectedDigests),
+  ])];
   for (const name of required) {
     if (!(name in cp.digests)) return false; // missing required store
     if (cp.digests[name] !== expectedDigests[name]) return false; // mismatch

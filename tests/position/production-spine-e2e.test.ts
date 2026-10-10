@@ -1,7 +1,8 @@
+import { createTestProductionSpine as createProductionSpine, testSpineProtectionLifecycle, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 // Phase 4C: E2E paper scenario — full kernel execution spine with Gateway
 import * as assert from 'node:assert';
 import { describe, it } from 'node:test';
-import { createProductionSpine, executeThroughGateway, trustBaseline, recoverAndStart, reconcileRecoveredState, activateLiveReadiness } from '../../src/position/ProductionSpine';
+import { executeThroughGateway, trustBaseline, recoverAndStart, reconcileRecoveredState, activateLiveReadiness } from '../../src/position/ProductionSpine';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,7 @@ const hardRisk = () => ({
   exchange: 'bitget', locked: false, enabled: true,
   totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity,
 });
+const riskAuthorization = { mode: 'LEGACY_PAPER_OR_NON_GATE' } as const;
 
 function btcTicker() {
   return { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() };
@@ -30,7 +32,7 @@ async function createSpineWithMarket(overrides: any = {}) {
     onKline: (_h: any) => {},
   };
   const marketRuntime = createMarketDataRuntime({ collectorFactory: () => collector });
-  const s = await createProductionSpine({ exchange: 'bitget', hardRisk, ...overrides, marketRuntime });
+  const s = await createProductionSpine({ exchange: 'bitget', hardRisk, riskAuthorization, ...overrides, marketRuntime });
   await marketRuntime.start();
   return {
     spine: s,
@@ -50,8 +52,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     if (initDone) return;
     const m = await createSpineWithMarket({ accountId: 'e2e', policyMaxLifetimeMs: 3600_000, journalPath });
     spine = m.spine;
-    spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
+    testSpineProtectionLifecycle(spine).start();
 
     // Recovery + start (cold start → no_history → verified + live)
     await recoverAndStart(spine, journalPath);
@@ -66,7 +67,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
     // Publish minimal valid policy (seq ≥ 2, sourceResearchSequence=1 < seq)
     const now = Date.now();
-    spine.kernel.publish('policy.snapshot.published', {
+    testSpinePublisher(spine).publish('policy.snapshot.published', {
       policy: {
         exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
         compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000,
@@ -77,7 +78,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
       },
     });
     // Seed market price
-    await spine.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(spine).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -87,7 +88,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
   // ── 1. Real market event → KernelMarketStateStore snapshot ────────────────
   it('market event → market store snapshot', async () => {
     await init();
-    await spine.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(spine).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'ETH/USDT', symbol: 'ETH/USDT', channel: 'ticker', last: 3500, bestBid: 3499, bestAsk: 3501, volume24h: 1000, high24h: 3600, low24h: 3400, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -135,8 +136,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     const protJournalPath = join(protDir, 'journal.jsonl');
     const m = await createSpineWithMarket({ accountId: 'prot-e2e', policyMaxLifetimeMs: 3600_000, journalPath: protJournalPath });
     const s = m.spine;
-    s.protection.start();
-    s.planStore.subscribeToKernel(s.kernel as any);
+    testSpineProtectionLifecycle(s).start();
 
     // Recovery + start (cold start → verified + live)
     await recoverAndStart(s, protJournalPath);
@@ -149,7 +149,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
 
     // Publish policy (baseline is seq 1, policy is seq 2)
     const pNow = Date.now();
-    s.kernel.publish('policy.snapshot.published', {
+    testSpinePublisher(s).publish('policy.snapshot.published', {
       policy: {
         exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
         compilerVersion: '1', compiledAt: pNow, effectiveAt: pNow, expiresAt: pNow + 3600_000,
@@ -161,7 +161,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     });
 
     trustBaseline(s, 'bitget', 'BTC/USDT');
-    await s.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(s).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 50000, bestBid: 49999, bestAsk: 50001, volume24h: 100, high24h: 51000, low24h: 49000, ts: Date.now() },
       receivedAt: Date.now(),
     });
@@ -183,7 +183,7 @@ describe('Phase 4C: E2E — Gateway, market price, protective, risk rejection', 
     });
 
     // Breach stop at 47000 (entry at 50000, stop at 47500 → 47000 < 47500 breached)
-    await s.kernel.publish('market.ticker.updated', {
+    await testSpinePublisher(s).publish('market.ticker.updated', {
       ticker: { exchange: 'bitget', instId: 'BTC/USDT', symbol: 'BTC/USDT', channel: 'ticker', last: 47000, bestBid: 46999, bestAsk: 47001, volume24h: 100, high24h: 48000, low24h: 46000, ts: Date.now() },
       receivedAt: Date.now(),
     });

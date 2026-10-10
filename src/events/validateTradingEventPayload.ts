@@ -15,6 +15,11 @@ import {
   validateAccountRiskMetricPolicyActivatedPayload,
   validateGateIoAccountFactObservedPayload,
 } from '../accounting/gateio-account-risk-metrics';
+import {
+  validateRiskMandateActivatedPayload,
+  validateRiskMandateRevokedPayload,
+} from '../risk/risk-mandate';
+import { validatePreTradeRiskDecisionRecordedPayload } from '../risk/pretrade-decision-receipt';
 
 export function validateTradingEventPayload(
   type: string,
@@ -30,6 +35,18 @@ export function validateTradingEventPayload(
   }
   if (type === 'ACCOUNT_RISK_METRIC_POLICY_ACTIVATED') {
     validateAccountRiskMetricPolicyActivatedPayload(payload);
+    return;
+  }
+  if (type === 'RISK_MANDATE_ACTIVATED') {
+    validateRiskMandateActivatedPayload(payload);
+    return;
+  }
+  if (type === 'RISK_MANDATE_REVOKED') {
+    validateRiskMandateRevokedPayload(payload);
+    return;
+  }
+  if (type === 'PRETRADE_RISK_DECISION_RECORDED') {
+    validatePreTradeRiskDecisionRecordedPayload(payload);
     return;
   }
   if (type === 'order.execution.prepared') {

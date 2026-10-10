@@ -17,6 +17,8 @@ import type { RecoveryResult } from '../../recovery/RecoveryManager';
 import type { ReconciliationReport } from '../../reconciliation/reconciliation-types';
 import type { ExecutionTruthPort } from '../../reconciliation/reconciliation-types';
 import type { ExecutionAdapter } from '../../oms/oms-types';
+import type { ProductionProtectionLifecycleAuthority } from '../../position/ProductionAuthorityPorts';
+import { productionEvidenceSnapshot } from './ProductionEvidenceSnapshot';
 import { createGateIoProductionBinding, type GateIoProductionDependencies } from '../gateio/GateIoProductionBinding';
 import {
   createBinanceAuthenticatedReadFoundation,
@@ -44,6 +46,7 @@ export interface ProductionRuntimeIdentity {
 export interface ProductionRuntimeHardRiskConfig {
   readonly enabled: true;
   readonly locked: boolean;
+  readonly mutationHalt?: 'RISK_INCREASE' | 'ALL_MUTATIONS';
   readonly lockReason?: string;
   readonly totalCapitalUsd: number;
   readonly maxSinglePositionPct: number;
@@ -114,9 +117,9 @@ export interface ApplicationProductionRuntimeOwner {
   /** Internal, read-only L1A ports. No credential, execution, or activation surface. */
   readonly binanceAuthenticatedRead: BinanceAuthenticatedReadFoundation;
   /**
-   * Internal Workbench spine provider only. Resolves the exact owner spine (or
-   * null); wired exclusively into WorkbenchReadAdapter inside createGateway and
-   * never exposed through the public AppGateway.productionRuntime surface.
+   * Internal Workbench spine provider only. The returned spine exposes order
+   * evidence but no mutable OMS or execution adapter; all execution authority
+   * remains behind executeThroughGateway().
    */
   readonly authoritativeSpine: () => ProductionSpine | null;
   /** Internal Gate observation from the same binding used by reconciliation. No I/O or mutation. */
@@ -218,6 +221,8 @@ function validateHardRiskFacts(
   if (snapshot.locked && (typeof snapshot.lockReason !== 'string' || snapshot.lockReason.trim().length === 0)) {
     throw new Error('HARD_RISK_INCOMPLETE: locked snapshots require a reason');
   }
+  if (snapshot.mutationHalt !== undefined && !['RISK_INCREASE', 'ALL_MUTATIONS'].includes(snapshot.mutationHalt))
+    throw new Error('HARD_RISK_INCOMPLETE: mutationHalt must be explicit');
   return snapshot;
 }
 
@@ -246,6 +251,7 @@ export function createConfiguredCanonicalHardRiskSource(
     accountId: sourceIdentity.accountId,
     enabled: config.enabled,
     locked: config.locked,
+    ...(config.mutationHalt === undefined ? {} : { mutationHalt: config.mutationHalt }),
     ...(config.lockReason === undefined ? {} : { lockReason: config.lockReason }),
     totalCapitalUsd: config.totalCapitalUsd,
     maxSinglePositionPct: config.maxSinglePositionPct,
@@ -416,6 +422,7 @@ export function createApplicationProductionRuntimeOwner(
   let state: ProductionRuntimeState = config?.enabled === false ? 'DISABLED' : 'NOT_CONFIGURED';
   let reason: string | null = null;
   let authoritativeSpine: ProductionSpine | null = null;
+  let protectionLifecycle: ProductionProtectionLifecycleAuthority | null = null;
   let gateBinding: ReturnType<typeof createGateIoProductionBinding> | null = null;
   let marketRuntime: MarketDataRuntime | null = null;
   let journal: FileEventJournal | null = null;
@@ -442,9 +449,14 @@ export function createApplicationProductionRuntimeOwner(
     reason = 'authoritative production runtime is disabled';
   }
 
-  const binanceAuthenticatedRead = dependencies.createBinanceAuthenticatedRead(
+  const binanceReadFoundation = dependencies.createBinanceAuthenticatedRead(
     validated ? copyIdentity(validated.identity) : null,
   );
+  const binanceAuthenticatedRead: BinanceAuthenticatedReadFoundation = Object.freeze({
+    accountTruth: Object.freeze({ read: async () => productionEvidenceSnapshot(await binanceReadFoundation.accountTruth.read()) }),
+    instrumentFacts: Object.freeze({ read: async (symbol: string) => productionEvidenceSnapshot(await binanceReadFoundation.instrumentFacts.read(symbol)) }),
+    status: () => productionEvidenceSnapshot(binanceReadFoundation.status()),
+  });
 
   function releaseReservation(): void {
     if (!validated || reservation === null) return;
@@ -464,7 +476,7 @@ export function createApplicationProductionRuntimeOwner(
     binding.owner.makeUnavailable();
     const failures: unknown[] = [];
     if (!cleanupComplete) {
-      try { authoritativeSpine?.protection.stop(); } catch (error) { failures.push(error); }
+      try { protectionLifecycle?.stop(); } catch (error) { failures.push(error); }
       try { marketRuntime?.stop(); } catch (error) { failures.push(error); }
       try { journal?.close(); } catch (error) { failures.push(error); }
       if (failures.length === 0) cleanupComplete = true;
@@ -474,7 +486,7 @@ export function createApplicationProductionRuntimeOwner(
 
   const read: ProductionRuntimePublicReadView = Object.freeze({
     status(): ProductionRuntimeStatusSnapshot {
-      return Object.freeze({
+      return productionEvidenceSnapshot({
         state,
         identity: validated ? copyIdentity(validated.identity) : null,
         reason,
@@ -482,14 +494,14 @@ export function createApplicationProductionRuntimeOwner(
         legacyWritePolicy: legacyWrites.mode,
       });
     },
-    identity: () => (validated ? copyIdentity(validated.identity) : null),
-    recovery: () => recoveryEvidence,
+    identity: () => productionEvidenceSnapshot(validated?.identity ?? null),
+    recovery: () => productionEvidenceSnapshot(recoveryEvidence),
     reconciliation: () => {
-      if (!authoritativeSpine) return reconciliationEvidence;
+      if (!authoritativeSpine) return productionEvidenceSnapshot(reconciliationEvidence);
       const current = authoritativeSpine.lastReconciliationReport;
       // A later failed/in-flight acquisition must not display the successful boot report.
       return !authoritativeSpine.reconciliationVerified && current?.reconciliationVerified
-        ? null : current;
+        ? null : productionEvidenceSnapshot(current);
     },
     binanceAuthenticatedReadStatus: binanceAuthenticatedRead.status,
   });
@@ -539,6 +551,10 @@ export function createApplicationProductionRuntimeOwner(
           : assertCanonicalHardRiskSource(validated!.identity, hardRiskSource);
 
         authoritativeSpine = await dependencies.createSpine({
+          bindProtectionLifecycle(authority) {
+            if (protectionLifecycle !== null) throw new Error('PROTECTION_LIFECYCLE_ALREADY_BOUND');
+            protectionLifecycle = authority;
+          },
           exchange: validated.identity.exchange,
           accountId: validated.identity.accountId,
           ...(validated.paperAccount === undefined ? {} : { paperAccount: validated.paperAccount }),
@@ -549,8 +565,13 @@ export function createApplicationProductionRuntimeOwner(
           journal,
           hardRisk: readHardRisk,
           marketRuntime,
+          riskAuthorization: validated.identity.exchange === 'gateio'
+            ? { mode: 'GATEIO_ACCOUNT_BOUND', settle: 'USDT' }
+            : { mode: 'LEGACY_PAPER_OR_NON_GATE' },
           ...(gateBinding === null ? {} : {
             clock: gateBinding.clock, marketStaleAfterMs: gateBinding.staleAfterMs,
+            exitValuationPrice: gateBinding.exitValuationPrice,
+            mutationControl: gateBinding.mutationControl,
           }),
         });
         gateBinding?.bindSpine(authoritativeSpine);
@@ -572,11 +593,14 @@ export function createApplicationProductionRuntimeOwner(
         failureState = 'RECONCILIATION_FAILED';
         const reconciliation = await dependencies.reconcile(authoritativeSpine);
         reconciliationEvidence = reconciliation;
-        if (!reconciliation.reconciliationVerified) {
+        if (!reconciliation.reconciliationVerified && !(gateBinding !== null
+            && reconciliation.issues.length > 0
+            && reconciliation.issues.every(issue => issue.outcome === 'MISSING_PROTECTION'))) {
           throw new Error(`PRODUCTION_RUNTIME_RECONCILIATION_FAILED: ${reconciliation.outcome}`);
         }
 
-        authoritativeSpine.protection.start();
+        if (protectionLifecycle === null) throw new Error('PROTECTION_LIFECYCLE_NOT_BOUND');
+        protectionLifecycle.start();
         failureState = 'MARKET_FAILED';
         await marketRuntime.start();
         state = 'READY_FOR_MARKET';
@@ -620,7 +644,7 @@ export function createApplicationProductionRuntimeOwner(
     read,
     binanceAuthenticatedRead,
     authoritativeSpine: binding.provider.productionSpine,
-    gateIoObservation: () => gateBinding?.readObservation() ?? null,
+    gateIoObservation: () => productionEvidenceSnapshot(gateBinding?.readObservation() ?? null),
     legacyWrites,
     start,
     stop,

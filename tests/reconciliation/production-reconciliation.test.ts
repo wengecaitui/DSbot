@@ -1,3 +1,4 @@
+import { createTestProductionSpine as createProductionSpine, testSpineProtectionLifecycle, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 // Phase 5B2: Production reconciliation integration tests.
 // Covers read surfaces, Paper correlation persistence, Paper truth port,
 // startup authority, the 3-gate LIVE_READY, real restart MATCH, and negative proofs.
@@ -8,7 +9,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  createProductionSpine,
   executeThroughGateway,
   trustBaseline,
   recoverAndStart,
@@ -17,7 +17,11 @@ import {
 } from '../../src/position/ProductionSpine';
 import { createPaperExecutionTruthPort } from '../../src/reconciliation/PaperExecutionTruthPort';
 import { PaperLedgerStore } from '../../src/paper/PaperLedgerStore';
+import { PaperExecutionService } from '../../src/paper/PaperExecutionService';
+import { PaperExecutionAdapter } from '../../src/oms/PaperExecutionAdapter';
+import { OmsCore } from '../../src/oms/OmsCore';
 import { OmsOrderStore } from '../../src/oms/OmsOrderStore';
+import { createTradingKernel } from '../../src/kernel/TradingKernel';
 import { createKernelPositionStateStore } from '../../src/kernel/KernelPositionStateStore';
 import { PositionPlanStore } from '../../src/position/PositionPlanStore';
 import { validatePaperFill } from '../../src/types/paper-fill';
@@ -25,6 +29,7 @@ import type { PaperBrokerPersistence } from '../../src/paper/PaperBroker';
 import type { ExchangeId } from '../../src/data/MarketIdentity';
 
 const hardRisk = () => ({ exchange: 'bitget', locked: false, enabled: true, totalCapitalUsd: 1_000_000, maxSinglePositionPct: 1, maxSinglePositionAbsUsd: Infinity });
+const riskAuthorization = { mode: 'LEGACY_PAPER_OR_NON_GATE' } as const;
 
 function env(type: string, seq: number, payload: Record<string, unknown>) {
   return { kernelEventId: 'a'.repeat(64), kernelLogicalSequence: seq, kernelTimestamp: seq * 1000, type, payload };
@@ -48,14 +53,14 @@ async function createSpineWithMarket(overrides: any = {}) {
     onKline: (_h: any) => {},
   };
   const marketRuntime = createMarketDataRuntime({ collectorFactory: () => collector });
-  const spine = await createProductionSpine({ exchange: 'bitget', hardRisk, ...overrides, marketRuntime });
+  const spine = await createProductionSpine({ exchange: 'bitget', hardRisk, riskAuthorization, ...overrides, marketRuntime });
   await marketRuntime.start();
   return { spine, emitTicker: () => { tickerHandler?.(btcTicker()); } };
 }
 
 function pubPolicy(s: any) {
   const now = Date.now();
-  s.kernel.publish('policy.snapshot.published', {
+  testSpinePublisher(s).publish('policy.snapshot.published', {
     policy: {
       exchange: 'bitget', sourceResearchEventId: 'a'.repeat(64), sourceResearchSequence: 1,
       compilerVersion: '1', compiledAt: now, effectiveAt: now, expiresAt: now + 3600_000,
@@ -131,20 +136,19 @@ describe('Phase 5B2 — Paper correlation persistence', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-corr-'));
     const cfg = paperConfig('corr');
     const store = new PaperLedgerStore(cfg, { baseDir: dir });
-    const journalPath = join(dir, 'journal.jsonl');
+    const service = await PaperExecutionService.open(cfg, store);
+    const kernel = createTradingKernel({ exchange: 'bitget' });
+    const adapter = new PaperExecutionAdapter(service, {
+      markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: Date.now(),
+    });
+    const oms = new OmsCore(kernel, adapter);
 
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'corr', hardRisk, journalPath, paperAccount: cfg, persistence: store });
-    s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
-
-    // Direct OMS submit (adapter carries correlation into the Paper fill)
-    (s1.adapter as any).params.markPriceUsd = 50000;
-    (s1.adapter as any).params.executedAtMs = Date.now();
-    const omsResult = await s1.oms.submitRequest(makeIntent('i1', 'BTC/USDT', 'long', 5000), 'open', 5000);
+    // OMS unit boundary still carries correlation; ProductionSpine no longer exposes this authority.
+    const omsResult = await oms.submitRequest(makeIntent('i1', 'BTC/USDT', 'long', 5000), 'open', 5000);
     assert.strictEqual(omsResult.status, 'filled', `filled, got ${omsResult.status}`);
 
     // Persisted Paper fill carries correlation
-    const fillEntry = s1.service.entries().find((e: any) => e.type === 'fill');
+    const fillEntry = service.entries().find((e: any) => e.type === 'fill');
     assert.ok(fillEntry, 'fill persisted');
     const fill = (fillEntry as any).fill;
     assert.strictEqual(typeof fill.sourceOrderId, 'string', 'sourceOrderId present');
@@ -237,7 +241,7 @@ describe('Phase 5B2 — Authority', () => {
   it('reconcileRecoveredState before recovery fails closed', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-auth-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'auth', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'auth', hardRisk, riskAuthorization, journalPath });
     await assert.rejects(() => reconcileRecoveredState(s), { message: /RECONCILIATION_REQUIRES_RECOVERY/ });
     rmSync(dir, { recursive: true, force: true });
   });
@@ -245,7 +249,7 @@ describe('Phase 5B2 — Authority', () => {
   it('caller cannot forge reconciliationVerified (no setter/token/bool injection)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-forge-'));
     const journalPath = join(dir, 'journal.jsonl');
-    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'forge', hardRisk, journalPath });
+    const s = await createProductionSpine({ exchange: 'bitget', accountId: 'forge', hardRisk, riskAuthorization, journalPath });
     assert.strictEqual(s.reconciliationVerified, false, 'default false');
     const desc = Object.getOwnPropertyDescriptor(s, 'reconciliationVerified');
     assert.strictEqual(desc && desc.set, undefined, 'no setter on reconciliationVerified');
@@ -261,13 +265,13 @@ describe('Phase 5B2 — Authority', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-match-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine } = await createSpineWithMarket({ accountId: 'match', journalPath });
-    spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     const report = await reconcileRecoveredState(spine);
     assert.strictEqual(report.outcome, 'MATCH');
     assert.strictEqual(spine.reconciliationVerified, true);
-    assert.strictEqual(spine.lastReconciliationReport, report);
+    assert.notStrictEqual(spine.lastReconciliationReport, report, 'public evidence is detached');
+    assert.deepStrictEqual(spine.lastReconciliationReport, report);
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -285,8 +289,7 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-g2-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'g2', journalPath });
-    spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     emitTicker(); // fresh market available, but reconciliation NOT run
     await assert.rejects(() => activateLiveReadiness(spine), { message: /RECONCILIATION/ });
@@ -297,8 +300,7 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-g3-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine } = await createSpineWithMarket({ accountId: 'g3', journalPath });
-    spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine); // MATCH
     assert.strictEqual(spine.reconciliationVerified, true);
@@ -310,8 +312,7 @@ describe('Phase 5B2 — LIVE_READY 3-gate', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-g4-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'g4', journalPath });
-    spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine);
     emitTicker();
@@ -333,8 +334,7 @@ describe('Phase 5B2 — Real restart proof', () => {
     // ── RUN 1: real execution ──
     const m1 = await createSpineWithMarket({ accountId: 'restart', journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
-    s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
+    testSpineProtectionLifecycle(s1).start();
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -351,8 +351,7 @@ describe('Phase 5B2 — Real restart proof', () => {
 
     // ── RUN 2: fresh spine, same durable paper + journal ──
     counting.reset();
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'restart', hardRisk, journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000 });
-    s2.planStore.subscribeToKernel(s2.kernel as any);
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'restart', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: counting, policyMaxLifetimeMs: 3600_000 });
 
     const recResult = await recoverAndStart(s2, journalPath);
     assert.strictEqual(recResult.recoveryVerified, true, `recovery failed: ${JSON.stringify(recResult.errors)}`);
@@ -377,8 +376,7 @@ describe('Phase 5B2 — Real restart proof', () => {
     // RUN 1: persist fill to journal + paper
     const m1 = await createSpineWithMarket({ accountId: 'negfill', journalPath, paperAccount: cfg, persistence: new PaperLedgerStore(cfg, { baseDir: join(dir, 'paper1') }), policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
-    s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
+    testSpineProtectionLifecycle(s1).start();
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -390,7 +388,7 @@ describe('Phase 5B2 — Real restart proof', () => {
 
     // RUN 2: same journal (has OMS/fill events), EMPTY paper persistence
     const emptyPaper = new PaperLedgerStore(cfg, { baseDir: join(dir, 'paper2-empty') });
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negfill', hardRisk, journalPath, paperAccount: cfg, persistence: emptyPaper });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negfill', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: emptyPaper });
     await recoverAndStart(s2, journalPath);
     const report = await reconcileRecoveredState(s2);
     assert.notStrictEqual(report.outcome, 'MATCH');
@@ -409,8 +407,7 @@ describe('Phase 5B2 — Real restart proof', () => {
     // RUN 1: execute fill, persist to shared paper
     const m1 = await createSpineWithMarket({ accountId: 'negoph', journalPath, paperAccount: cfg, persistence: paperStore, policyMaxLifetimeMs: 3600_000 });
     const s1 = m1.spine;
-    s1.protection.start();
-    s1.planStore.subscribeToKernel(s1.kernel as any);
+    testSpineProtectionLifecycle(s1).start();
     await recoverAndStart(s1, journalPath);
     await reconcileRecoveredState(s1);
     m1.emitTicker();
@@ -422,7 +419,7 @@ describe('Phase 5B2 — Real restart proof', () => {
 
     // RUN 2: EMPTY journal (no local OMS), SAME paper persistence (has correlated fill)
     const emptyJournal = join(dir, 'empty-journal.jsonl');
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negoph', hardRisk, journalPath: emptyJournal, paperAccount: cfg, persistence: paperStore });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negoph', hardRisk, riskAuthorization, journalPath: emptyJournal, paperAccount: cfg, persistence: paperStore });
     await recoverAndStart(s2, emptyJournal); // no_history → verified, empty local
     const report = await reconcileRecoveredState(s2);
     assert.notStrictEqual(report.outcome, 'MATCH');
@@ -438,14 +435,14 @@ describe('Phase 5B2 — Real restart proof', () => {
     const cfg = paperConfig('negunk');
 
     // RUN 1: journal with SUBMISSION_UNKNOWN order (no fill)
-    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, journalPath });
-    s1.kernel.publish('order.created', { order: { orderId: 'o1', intentId: 'i1', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
-    s1.kernel.publish('order.submitted', { orderId: 'o1' });
-    s1.kernel.publish('order.submission.unknown', { orderId: 'o1', reason: 'adapter unavailable' });
+    const s1 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, riskAuthorization, journalPath });
+    testSpinePublisher(s1).publish('order.created', { order: { orderId: 'o1', intentId: 'i1', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
+    testSpinePublisher(s1).publish('order.submitted', { orderId: 'o1' });
+    testSpinePublisher(s1).publish('order.submission.unknown', { orderId: 'o1', reason: 'adapter unavailable' });
 
     // RUN 2: recover + reconcile
     const counting = countingPersistence(new PaperLedgerStore(cfg, { baseDir: join(dir, 'paper') }));
-    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, journalPath, paperAccount: cfg, persistence: counting });
+    const s2 = await createProductionSpine({ exchange: 'bitget', accountId: 'negunk', hardRisk, riskAuthorization, journalPath, paperAccount: cfg, persistence: counting });
     await recoverAndStart(s2, journalPath);
     counting.reset();
     const report = await reconcileRecoveredState(s2);
@@ -469,17 +466,16 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-stale-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'stale', journalPath });
-    spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     const r1 = await reconcileRecoveredState(spine);
     assert.strictEqual(r1.outcome, 'MATCH');
     assert.strictEqual(spine.reconciliationVerified, true);
 
     // Mutate factual local state through the normal kernel/store event path.
-    spine.kernel.publish('order.created', { order: { orderId: 'o-mut', intentId: 'i-mut', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
-    spine.kernel.publish('order.submitted', { orderId: 'o-mut' });
-    spine.kernel.publish('order.submission.unknown', { orderId: 'o-mut', reason: 'mutated after MATCH' });
+    testSpinePublisher(spine).publish('order.created', { order: { orderId: 'o-mut', intentId: 'i-mut', exchange: 'bitget', symbol: 'BTC/USDT', action: 'open', side: 'buy', orderType: 'market', approvedNotionalUsd: 1000 } });
+    testSpinePublisher(spine).publish('order.submitted', { orderId: 'o-mut' });
+    testSpinePublisher(spine).publish('order.submission.unknown', { orderId: 'o-mut', reason: 'mutated after MATCH' });
 
     // Fresh collector market, but current facts no longer MATCH.
     emitTicker();
@@ -492,8 +488,7 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-nomut-'));
     const journalPath = join(dir, 'journal.jsonl');
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'nomut', journalPath });
-    spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     await reconcileRecoveredState(spine);
     assert.strictEqual(spine.reconciliationVerified, true);
@@ -504,13 +499,20 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('P1: previous MATCH + incomplete truth (uncorrelated fill) → revocation + denied', async () => {
+  it('P1: previous MATCH + incomplete truth (uncorrelated fill) → revocation + denied', async (t) => {
     const dir = mkdtempSync(join(tmpdir(), 'p5b2-acqfail-'));
     const journalPath = join(dir, 'journal.jsonl');
     const cfg = paperConfig('acqfail');
+    // Trusted test composition captures its service; generic production callers
+    // only receive the detached read view and cannot create this corruption.
+    let compositionService!: PaperExecutionService;
+    const originalOpen = PaperExecutionService.open;
+    t.mock.method(PaperExecutionService, 'open', async (...args: Parameters<typeof originalOpen>) => {
+      compositionService = await originalOpen(...args);
+      return compositionService;
+    });
     const { spine, emitTicker } = await createSpineWithMarket({ accountId: 'acqfail', journalPath, paperAccount: cfg });
-    spine.protection.start();
-    spine.planStore.subscribeToKernel(spine.kernel as any);
+    testSpineProtectionLifecycle(spine).start();
     await recoverAndStart(spine, journalPath);
     const r1 = await reconcileRecoveredState(spine);
     assert.strictEqual(r1.outcome, 'MATCH');
@@ -518,7 +520,7 @@ describe('Phase 5B2 — reconciliation freshness authority', () => {
 
     // Make Paper truth incomplete: generic (non-OMS) execution carries no correlation.
     const genericIntent = { intentId: 'generic-1', exchange: 'bitget' as ExchangeId, symbol: 'BTC/USDT', direction: 'long' as const, orderType: 'market' as const, positionUsd: 1000, source: 'test', createdAt: Date.now(), reason: 'generic', biasUpdatedAt: Date.now() };
-    await spine.service.execute(genericIntent as any, { markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: Date.now() });
+    await compositionService.execute(genericIntent as any, { markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: Date.now() });
 
     emitTicker();
     await assert.rejects(() => activateLiveReadiness(spine), { message: /RECONCILIATION/ });

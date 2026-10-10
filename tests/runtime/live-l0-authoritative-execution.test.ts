@@ -1,5 +1,6 @@
+import { createTestProductionSpine as createProductionSpine, testSpinePublisher, testSpineEvidencePublisher } from '../helpers/production-spine-capability-fixture';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, it } from 'node:test';
@@ -15,7 +16,6 @@ import {
   type BinanceFuturesMarketOrderResult,
 } from '../../src/exchanges/binance-futures/BinanceFuturesExecutionAdapter';
 import {
-  createProductionSpine,
   reconcileRecoveredState,
   recoverAndStart,
 } from '../../src/position/ProductionSpine';
@@ -97,17 +97,20 @@ const hardRisk = () => ({
 
 describe('Live L0 authoritative execution preparation', () => {
   it('preserves Paper defaults while limited-live uses only injected execution and truth ports', async () => {
-    const paper = await createProductionSpine({ exchange: 'binance', hardRisk });
+    const paper = await createProductionSpine({ exchange: 'binance', hardRisk,
+      riskAuthorization: { mode: 'LEGACY_PAPER_OR_NON_GATE' } });
     assert.equal(paper.executionMode, 'paper');
     assert.ok(paper.service);
 
     let truthCalls = 0;
     const fakeClient = client(async request => filled(request));
+    const limitedJournalPath = join(mkdtempSync(join(tmpdir(), 'r3f1-l0-')), 'events.jsonl');
     const limited = await createProductionSpine({
       exchange: 'binance',
       accountId: 'live-l0',
       hardRisk,
-      journal: createInMemoryEventJournal(),
+      riskAuthorization: { mode: 'LEGACY_PAPER_OR_NON_GATE' },
+      journalPath: limitedJournalPath,
       execution: {
         mode: 'limited-live',
         adapter: new BinanceFuturesExecutionAdapter(fakeClient),
@@ -130,7 +133,7 @@ describe('Live L0 authoritative execution preparation', () => {
     assert.throws(() => limited.accounting.snapshot(), /ACCOUNTING_UNAVAILABLE_L0/);
     assert.throws(() => limited.accounting.lifecycle(), /LIFECYCLE_UNAVAILABLE_L0/);
 
-    const recovered = await recoverAndStart(limited, limited.kernel.journal() as never);
+    const recovered = await recoverAndStart(limited, limitedJournalPath);
     assert.equal(recovered.recoveryVerified, true);
     const report = await reconcileRecoveredState(limited);
     assert.equal(report.outcome, 'MATCH');

@@ -16,7 +16,8 @@ export interface ProtectiveContext {
 }
 
 /** Deterministic protective close intent — sized from current factual PositionState */
-export function buildProtectiveIntent(ctx: ProtectiveContext): TradeIntent {
+export function buildProtectiveIntent(ctx: Pick<ProtectiveContext,
+  'plan' | 'currentPosition' | 'exchange' | 'marketPrice'>): TradeIntent {
   const closeSize = Math.abs(ctx.currentPosition.signedQuantity * ctx.currentPosition.averageEntryPrice);
   return {
     intentId: `protect-${ctx.plan.planId}`,

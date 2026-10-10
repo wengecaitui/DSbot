@@ -3,7 +3,8 @@ import { isAbsolute, resolve } from 'node:path';
 import { validatePolicyPublication } from '../../events/validatePolicySnapshot';
 import { validateTradingEventPayload } from '../../events/validateTradingEventPayload';
 import type { TradingEventPayloadMap } from '../../events/TradingEvent';
-import type { ProductionSpine } from '../../position/ProductionSpine';
+import { productionSpineUsesJournal, productionSpineUsesEvidencePublisher, type ProductionSpine } from '../../position/ProductionSpine';
+import type { ProductionEvidencePublisher } from '../../position/ProductionAuthorityPorts';
 import { createFileEventJournal, type FileEventJournal } from '../../recovery/FileEventJournal';
 import type { MarketBiasReportFull } from '../../types/market-bias';
 import type { CompiledPolicy } from '../../types/policy-snapshot';
@@ -14,7 +15,9 @@ export interface GateIoLiveBootstrapInput {
   /** Compose the existing, unstarted Spine with this SAME FileEventJournal before calling.
    * Bootstrap never creates a Runtime, Spine, OMS, risk gateway or position authority.
    */
-  readonly spine: Pick<ProductionSpine, 'kernel' | 'positionStore' | 'policyStore' | 'oms'>;
+  readonly spine: ProductionSpine;
+  /** Bound at trusted composition time; cannot be obtained from the public spine. */
+  readonly evidencePublisher: ProductionEvidencePublisher;
   readonly journal: FileEventJournal;
   readonly journalPath: string;
   readonly truthPort: VerifiedGateIoLiveFlatBaselineInput['truthPort'];
@@ -39,7 +42,8 @@ export function bootstrapGateIoLiveJournal(input: GateIoLiveBootstrapInput) {
   const { spine, journal, journalPath } = input;
   if (typeof journalPath !== 'string' || !isAbsolute(journalPath)
       || typeof journal?.filePath !== 'string' || !isAbsolute(journal.filePath)
-      || resolve(journal.filePath) !== resolve(journalPath) || spine.kernel.journal() !== journal
+      || resolve(journal.filePath) !== resolve(journalPath) || !productionSpineUsesJournal(spine, journal)
+      || !productionSpineUsesEvidencePublisher(spine, input.evidencePublisher)
       || journal.eventCount !== 0 || journal.lastSequence !== 0
       || journal.readFromLogicalSequence(1).length !== 0
       || spine.policyStore.getLatest('gateio') !== undefined) {
@@ -85,7 +89,7 @@ export function bootstrapGateIoLiveJournal(input: GateIoLiveBootstrapInput) {
     throw new Error('GATEIO_BOOTSTRAP_POLICY_DENIED');
   }
   const baselineInput: VerifiedGateIoLiveFlatBaselineInput = {
-    kernel: spine.kernel, positionStore: spine.positionStore, oms: spine.oms,
+    kernel: { ...spine.kernel, publish: input.evidencePublisher.publish }, positionStore: spine.positionStore, oms: spine.oms,
     truthPort: input.truthPort, truth: input.truth,
     accountId: input.accountId, symbol: 'ETH/USDT', now: input.now,
   };
@@ -97,7 +101,7 @@ export function bootstrapGateIoLiveJournal(input: GateIoLiveBootstrapInput) {
     if (!stat.isFile() || stat.size !== 0 || stat.nlink !== 1)
       throw new Error('GATEIO_BOOTSTRAP_JOURNAL_DENIED');
     const baseline = establishVerifiedLiveFlatBaseline(baselineInput);
-    const research = spine.kernel.publish('research.bias.updated', researchPayload);
+    const research = input.evidencePublisher.publish('research.bias.updated', researchPayload);
     const researchEnvelope = research.envelope;
     const journaledResearch = journal.getByEventId(researchEnvelope.kernelEventId);
     if (research.status !== 'accepted' || research.failures !== 0
@@ -112,7 +116,7 @@ export function bootstrapGateIoLiveJournal(input: GateIoLiveBootstrapInput) {
       throw new Error('GATEIO_BOOTSTRAP_POLICY_PROVENANCE_MISMATCH');
     }
     validatePolicyPublication(policy, 3, input.now(), input.policyMaxLifetimeMs);
-    const published = spine.kernel.publish('policy.snapshot.published', { policy });
+    const published = input.evidencePublisher.publish('policy.snapshot.published', { policy });
     if (published.status !== 'accepted' || published.failures !== 0 || published.envelope.kernelLogicalSequence !== 3)
       throw new Error('GATEIO_BOOTSTRAP_POLICY_NOT_APPLIED');
     const resolution = spine.policyStore.resolve('gateio', 'ETH/USDT');

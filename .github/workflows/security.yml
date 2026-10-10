@@ -56,9 +56,17 @@ jobs:
         run: npm run security:audit
 
       - name: Check for known vulnerabilities
+        if: ${{ always() }}
         run: |
-          echo "=== Security Summary ==="
-          npm audit --json | jq '.metadata.vulnerabilities'
+          set -euo pipefail
+          set +e
+          npm audit --omit=dev --json > "$RUNNER_TEMP/npm-audit-production.json"
+          audit_status=$?
+          set -e
+          jq -e '.metadata.vulnerabilities' "$RUNNER_TEMP/npm-audit-production.json"
+          if [[ "$audit_status" -gt 1 ]]; then
+            exit "$audit_status"
+          fi
 
   # CodeQL Analysis - Enable when repo is public or GitHub Advanced Security is enabled
   # codeql:

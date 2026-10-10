@@ -232,5 +232,5 @@ export function createTradingKernel(config: {
     };
   }
 
-  return { publish, subscribe, journal: () => journal };
+  return Object.freeze({ publish, subscribe, journal: () => journal });
 }
