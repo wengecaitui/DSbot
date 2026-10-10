@@ -51,7 +51,8 @@ apps/
 
 # Placeholder folders
 ui/
-vendor/
+vendor/*
+!vendor/sprintf-js/
 
 # Development workspace
 workspace/
